@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+schemars = "1.2.3"
 serde.workspace = true
 thiserror.workspace = true
 
