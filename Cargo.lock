@@ -357,6 +357,13 @@ dependencies = [
 [[package]]
 name = "cerbrix-agent"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cerbrix-common",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
 
 [[package]]
 name = "cerbrix-common"
