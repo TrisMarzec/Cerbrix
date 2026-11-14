@@ -14,6 +14,8 @@ use super::{MAX_ISSUES, Snapshot, SyncIssue, compile};
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// A tree with more files than this is rejected.
 pub const MAX_FILES: usize = 20_000;
+/// A snapshot holds at most this many bytes of file content in total.
+pub const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Directories nested deeper than this below a root are rejected.
 const MAX_DEPTH: usize = 16;
@@ -28,10 +30,25 @@ const ROOTS: [&str; 5] = [
 
 const SYMLINK_REASON: &str = "symbolic links are not allowed in the configuration repository";
 
+/// Bounds on the size of a tree; injectable so tests do not need huge trees.
+struct Limits {
+    max_files: usize,
+    max_total_bytes: u64,
+}
+
+const DEFAULT_LIMITS: Limits = Limits {
+    max_files: MAX_FILES,
+    max_total_bytes: MAX_TOTAL_BYTES,
+};
+
 struct Walk {
+    limits: Limits,
     snapshot: Snapshot,
     issues: Vec<SyncIssue>,
     files_seen: usize,
+    total_bytes: u64,
+    /// Set when a tree-wide limit is hit; ends the walk.
+    stopped: Option<String>,
 }
 
 impl Walk {
@@ -45,9 +62,16 @@ impl Walk {
         }
     }
 
-    /// Stops the whole walk: too many files or too many issues.
+    fn stop_total_bytes(&mut self) {
+        self.stopped = Some(format!(
+            "the repository's configuration files add up to more than {} MiB",
+            self.limits.max_total_bytes / (1024 * 1024)
+        ));
+    }
+
+    /// Stops the whole walk: a tree-wide limit was hit or there are too many issues.
     fn done(&self) -> bool {
-        self.full() || self.files_seen > MAX_FILES
+        self.full() || self.stopped.is_some()
     }
 }
 
@@ -57,13 +81,20 @@ impl Walk {
 /// oversized `.json` files and more than [`MAX_FILES`] files are reported as
 /// issues. Keys use `/` as separator on every platform.
 pub fn read_tree(root: &Path, commit: &str) -> Result<Snapshot, Vec<SyncIssue>> {
+    read_tree_with(root, commit, DEFAULT_LIMITS)
+}
+
+fn read_tree_with(root: &Path, commit: &str, limits: Limits) -> Result<Snapshot, Vec<SyncIssue>> {
     let mut walk = Walk {
+        limits,
         snapshot: Snapshot {
             commit: commit.to_owned(),
             files: Default::default(),
         },
         issues: Vec::new(),
         files_seen: 0,
+        total_bytes: 0,
+        stopped: None,
     };
 
     for name in ROOTS {
@@ -80,12 +111,9 @@ pub fn read_tree(root: &Path, commit: &str) -> Result<Snapshot, Vec<SyncIssue>> 
         }
     }
 
-    if walk.files_seen > MAX_FILES {
+    if let Some(reason) = walk.stopped.take() {
         walk.issues.truncate(MAX_ISSUES - 1);
-        walk.issues.push(SyncIssue::new(
-            None,
-            format!("the repository has more than {MAX_FILES} files"),
-        ));
+        walk.issues.push(SyncIssue::new(None, reason));
     }
 
     if walk.issues.is_empty() {
@@ -100,13 +128,21 @@ fn walk_dir(walk: &mut Walk, dir: &Path, rel: &str, depth: usize) {
         walk.issue(rel, "directories are nested too deeply");
         return;
     }
-    let mut entries = match fs::read_dir(dir) {
-        Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
+    let read_dir = match fs::read_dir(dir) {
+        Ok(read_dir) => read_dir,
         Err(err) => {
             walk.issue(rel, format!("cannot read directory: {err}"));
             return;
         }
     };
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        match entry {
+            Ok(entry) => entries.push(entry),
+            // A dropped entry could be a missing file in a snapshot judged valid.
+            Err(err) => walk.issue(rel, format!("cannot read directory entry: {err}")),
+        }
+    }
     entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries {
@@ -134,7 +170,11 @@ fn walk_dir(walk: &mut Walk, dir: &Path, rel: &str, depth: usize) {
             walk_dir(walk, &path, &key, depth + 1);
         } else if file_type.is_file() {
             walk.files_seen += 1;
-            if walk.files_seen > MAX_FILES {
+            if walk.files_seen > walk.limits.max_files {
+                walk.stopped = Some(format!(
+                    "the repository has more than {} files",
+                    walk.limits.max_files
+                ));
                 return;
             }
             if name.ends_with(".json") {
@@ -152,6 +192,10 @@ fn read_file(walk: &mut Walk, path: &Path, key: &str, len: u64) {
         walk.issue(key, too_large);
         return;
     }
+    if walk.total_bytes + len > walk.limits.max_total_bytes {
+        walk.stop_total_bytes();
+        return;
+    }
     // Read at most one byte more than allowed, in case the file grew since
     // the metadata call.
     let mut bytes = Vec::new();
@@ -159,7 +203,11 @@ fn read_file(walk: &mut Walk, path: &Path, key: &str, len: u64) {
         fs::File::open(path).and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes));
     match read {
         Ok(_) if bytes.len() as u64 > MAX_FILE_BYTES => walk.issue(key, too_large),
+        Ok(_) if walk.total_bytes + bytes.len() as u64 > walk.limits.max_total_bytes => {
+            walk.stop_total_bytes();
+        }
         Ok(_) => {
+            walk.total_bytes += bytes.len() as u64;
             walk.snapshot.files.insert(key.to_owned(), bytes);
         }
         Err(err) => walk.issue(key, format!("cannot read: {err}")),
@@ -307,6 +355,83 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].file.as_deref(), Some("hosts/big.json"));
         assert!(issues[0].reason.contains("larger than"));
+    }
+
+    #[test]
+    fn too_many_files_stops_the_walk_with_one_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            write(dir.path(), &format!("hosts/h{i}.json"), b"{}");
+        }
+        // After the limit, an oversized file would give a second issue if the walk went on.
+        write(
+            dir.path(),
+            "hosts/z-big.json",
+            &vec![b' '; MAX_FILE_BYTES as usize + 1],
+        );
+        let limits = Limits {
+            max_files: 3,
+            max_total_bytes: MAX_TOTAL_BYTES,
+        };
+        let issues = read_tree_with(dir.path(), "", limits).unwrap_err();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].file, None);
+        assert!(issues[0].reason.contains("more than 3 files"));
+    }
+
+    #[test]
+    fn too_many_bytes_stops_the_walk_with_one_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mib = 1024 * 1024;
+        write(dir.path(), "hosts/a.json", &vec![b' '; mib]);
+        write(dir.path(), "hosts/b.json", &vec![b' '; mib]);
+        write(dir.path(), "hosts/c.json", &vec![b' '; mib]);
+        write(
+            dir.path(),
+            "hosts/z-big.json",
+            &vec![b' '; MAX_FILE_BYTES as usize + 1],
+        );
+        let limits = Limits {
+            max_files: MAX_FILES,
+            max_total_bytes: 2 * mib as u64,
+        };
+        let issues = read_tree_with(dir.path(), "", limits).unwrap_err();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].file, None);
+        assert!(issues[0].reason.contains("2 MiB"), "{}", issues[0].reason);
+    }
+
+    #[test]
+    fn total_bytes_at_the_limit_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "hosts/a.json", &[b' '; 100]);
+        write(dir.path(), "hosts/b.json", &[b' '; 100]);
+        let limits = Limits {
+            max_files: MAX_FILES,
+            max_total_bytes: 200,
+        };
+        assert_eq!(
+            read_tree_with(dir.path(), "", limits).unwrap().files.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn unreadable_root_directory_is_an_issue() {
+        // A directory that cannot be listed is reported, not skipped.
+        let dir = tempfile::tempdir().unwrap();
+        let mut walk = Walk {
+            limits: DEFAULT_LIMITS,
+            snapshot: Snapshot::default(),
+            issues: Vec::new(),
+            files_seen: 0,
+            total_bytes: 0,
+            stopped: None,
+        };
+        walk_dir(&mut walk, &dir.path().join("gone"), "hosts/gone", 0);
+        assert_eq!(walk.issues.len(), 1);
+        assert_eq!(walk.issues[0].file.as_deref(), Some("hosts/gone"));
+        assert!(walk.issues[0].reason.starts_with("cannot read directory"));
     }
 
     #[test]
