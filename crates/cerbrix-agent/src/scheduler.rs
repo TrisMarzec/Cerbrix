@@ -35,6 +35,11 @@ impl Scheduler {
     }
 
     /// Runs until `shutdown` is cancelled or the output channel is closed.
+    ///
+    /// On shutdown a collector still inside `collect` is abandoned: its
+    /// blocking thread keeps running until the call returns, which may be
+    /// never (e.g. a hung mount). The caller should therefore shut the Tokio
+    /// runtime down with a timeout (`Runtime::shutdown_timeout`).
     pub async fn run(self, shutdown: CancellationToken) {
         let stop = shutdown.child_token();
         let mut tasks = JoinSet::new();
@@ -70,7 +75,11 @@ async fn run_collector(
             _ = ticker.tick() => {}
         }
         let shared = Arc::clone(&collector);
-        let result = tokio::task::spawn_blocking(move || lock(&shared).collect()).await;
+        let blocking = tokio::task::spawn_blocking(move || lock(&shared).collect());
+        let result = tokio::select! {
+            () = stop.cancelled() => return,
+            result = blocking => result,
+        };
         let readings = match result {
             Ok(Ok(readings)) => readings,
             Ok(Err(err)) => {
@@ -298,5 +307,54 @@ mod tests {
         tokio::time::advance(Duration::from_secs(25)).await;
         shutdown.cancel();
         handle.await.unwrap();
+    }
+
+    /// Blocks inside `collect` until the test releases it.
+    struct Blocked {
+        started: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Collector for Blocked {
+        fn name(&self) -> &'static str {
+            "blocked"
+        }
+        fn collect(&mut self) -> anyhow::Result<Vec<Reading>> {
+            self.started.send(()).unwrap();
+            let _ = self.release.recv();
+            Ok(Vec::new())
+        }
+    }
+
+    // Real time: a paused clock would not fire the timeout while a blocking
+    // task is pending, so a regression would hang instead of failing.
+    #[tokio::test]
+    async fn run_ends_on_shutdown_while_a_collector_is_blocked() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = mpsc::channel(100);
+        let mut sched = Scheduler::new(tx);
+        sched.add(
+            Box::new(Blocked {
+                started: started_tx,
+                release: release_rx,
+            }),
+            Duration::from_secs(10),
+        );
+        let shutdown = CancellationToken::new();
+        let handle = tokio::spawn(sched.run(shutdown.clone()));
+
+        // Wait until `collect` is really running, then cancel.
+        tokio::task::spawn_blocking(move || started_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        shutdown.cancel();
+        let ended = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        // Let the abandoned blocking thread finish so the process can exit.
+        release_tx.send(()).unwrap();
+        ended
+            .expect("run did not end while a collector was blocked")
+            .unwrap();
     }
 }
