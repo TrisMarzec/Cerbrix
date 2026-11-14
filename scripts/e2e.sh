@@ -79,7 +79,13 @@ AGENT_BIN="$ROOT/target/debug/cerbrix-agent"
 
 # Throw-away server configuration with a random database password.
 DB_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
-sed -e "s/change-me-before-first-start/$DB_PASSWORD/g" deploy/server.env.example > "$WORK/server.env"
+sed -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$DB_PASSWORD|" \
+    -e "s|^\(CERBRIX_DATABASE__URL=postgres://cerbrix:\)@|\1$DB_PASSWORD@|" \
+    deploy/server.env.example > "$WORK/server.env"
+if ! { grep -q "^POSTGRES_PASSWORD=$DB_PASSWORD\$" "$WORK/server.env" \
+    && grep -q "cerbrix:$DB_PASSWORD@postgres" "$WORK/server.env"; }; then
+    fail "could not fill in the password in the example env file"
+fi
 
 echo "e2e: starting the stack '$PROJECT' (server on port $CERBRIX_SERVER_PORT, VictoriaMetrics on $CERBRIX_VM_PORT)"
 compose up -d --build --wait --wait-timeout 300 >&2 || fail "the stack did not become healthy"
