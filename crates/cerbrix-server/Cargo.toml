@@ -8,11 +8,19 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+base64 = "0.23.1"
 clap.workspace = true
 figment.workspace = true
+rand = "0.10.3"
 serde.workspace = true
+sha2 = "0.11.1"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "uuid", "time"] }
 thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
 url = "2.5.8"
+uuid.workspace = true
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["macros", "runtime-tokio", "postgres", "migrate", "uuid", "time"] }
