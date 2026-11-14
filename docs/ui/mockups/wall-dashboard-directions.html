@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cerbrix wall dashboard directions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600;700&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { background: #d9dde1; color: #14212b; font: 16px/1.5 "Instrument Sans", system-ui, sans-serif; padding: 28px 16px 60px; }
+  .page { max-width: 1280px; margin: 0 auto; }
+  .intro h1 { font-size: 26px; font-weight: 700; }
+  .intro p { max-width: 70ch; margin-top: 6px; color: #3b4a56; }
+  .direction { margin-top: 36px; }
+  .direction h2 { font-size: 20px; font-weight: 700; }
+  .direction > p { max-width: 75ch; color: #3b4a56; margin: 4px 0 12px; }
+  .pick { margin-top: 10px; font: inherit; font-weight: 600; padding: 8px 16px; border-radius: 6px; border: 2px solid #14212b; background: #fff; cursor: pointer; }
+  .pick.selected { background: #14212b; color: #fff; }
+  .pick:focus-visible { outline: 3px solid #1f6feb; outline-offset: 2px; }
+
+  /* A wall screen: 16:9, all sizes in container units so it scales like a monitor */
+  .screen { container-type: inline-size; aspect-ratio: 16 / 9; width: 100%; overflow: hidden; border-radius: 4px; box-shadow: 0 6px 24px rgba(20,33,43,.25); }
+  .screen > .wall { width: 100%; height: 100%; display: flex; flex-direction: column; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---------- Direction A: Board ---------- */
+  .a { --bg:#10293b; --panel:#173549; --line:#2a4d63; --text:#eaf1f4; --dim:#9db4c0; --crit:#ff6352; --warn:#f5b83d; --okq:#2f6f6a; --sync:#8ed4ea;
+       background: var(--bg); color: var(--text); font-family: "Barlow Semi Condensed", "Arial Narrow", sans-serif; }
+  .a .top { display: flex; align-items: baseline; justify-content: space-between; padding: 1.6cqw 2.2cqw 1.1cqw; }
+  .a .name { font-size: 3.1cqw; font-weight: 600; letter-spacing: -.01em; }
+  .a .meta { display: flex; gap: 2.4cqw; font-size: 1.45cqw; color: var(--dim); align-items: baseline; }
+  .a .meta .sync { color: var(--sync); }
+  .a .meta .clock { font-size: 2.2cqw; color: var(--text); font-weight: 500; }
+  .a .jump { background: var(--crit); color: #2a0b07; font-size: 1.55cqw; font-weight: 600; padding: .65cqw 2.2cqw; display: flex; justify-content: space-between; }
+  .a .grid { flex: 1; display: grid; grid-template-columns: repeat(12, 1fr); grid-template-rows: repeat(6, 1fr); gap: 1.1cqw; padding: 1.3cqw 2.2cqw 2cqw; min-height: 0; }
+  .a .panel { background: var(--panel); border-radius: .5cqw; padding: 1.1cqw 1.3cqw; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .a .panel h3 { font-size: 1.35cqw; font-weight: 500; color: var(--dim); margin-bottom: .6cqw; }
+  .a .problems { grid-column: 1 / span 8; grid-row: 1 / span 6; padding: 0; }
+  .a .problems h3 { padding: 1.1cqw 1.3cqw 0; }
+  .a .row { display: grid; grid-template-columns: .7cqw 13cqw 1fr auto; align-items: center; column-gap: 1.3cqw; border-top: 1px solid var(--line); padding-right: 1.3cqw; height: 5.6cqw; }
+  .a .row .bar { align-self: stretch; }
+  .a .row.crit .bar { background: var(--crit); } .a .row.warn .bar { background: var(--warn); }
+  .a .row .host { font-size: 2.5cqw; font-weight: 600; }
+  .a .row .what { font-size: 2cqw; }
+  .a .row .what small { display: block; font-size: 1.25cqw; color: var(--dim); }
+  .a .row .since { font-size: 1.8cqw; color: var(--dim); text-align: right; }
+  .a .row.crit .host { color: var(--crit); } .a .row.warn .host { color: var(--warn); }
+  .a .row.new { background: rgba(255,99,82,.14); }
+  .a .row.acked .host, .a .row.acked .what { color: var(--dim); }
+  .a .states { grid-column: 9 / span 4; grid-row: 1 / span 3; }
+  .a .count { font-size: 3.4cqw; font-weight: 600; line-height: 1; }
+  .a .count span { font-size: 1.5cqw; font-weight: 400; color: var(--dim); }
+  .a .matrix { display: grid; grid-template-columns: repeat(11, 1fr); gap: .35cqw; margin-top: .9cqw; }
+  .a .matrix i { aspect-ratio: 1; border-radius: .2cqw; background: var(--okq); }
+  .a .matrix i.crit { background: var(--crit); } .a .matrix i.warn { background: var(--warn); }
+  .a .graph { grid-column: 9 / span 4; grid-row: 4 / span 2; }
+  .a .graph svg { flex: 1; width: 100%; min-height: 0; }
+  .a .single { grid-column: 9 / span 4; grid-row: 6 / span 1; flex-direction: row; align-items: baseline; justify-content: space-between; }
+  .a .single h3 { margin: 0; } .a .single b { font-size: 2.4cqw; font-weight: 600; }
+
+  /* ---------- Direction B: Status ---------- */
+  .b { --bg:#edf0f3; --surface:#fff; --ink:#14212b; --dim:#5b6b77; --line:#cbd3da; --crit:#d0342c; --warn:#f0a91b; --warnink:#8a5600; --okq:#b9cfc8;
+       background: var(--bg); color: var(--ink); font-family: "Instrument Sans", system-ui, sans-serif; flex-direction: row !important; }
+  .b .state { width: 27%; background: var(--crit); color: #fff; padding: 2cqw 2cqw 1.6cqw; display: flex; flex-direction: column; }
+  .b .state .name { font-size: 2cqw; font-weight: 600; line-height: 1.2; }
+  .b .state .big { font-size: 12cqw; font-weight: 700; line-height: .95; margin-top: 2.2cqw; letter-spacing: -.03em; }
+  .b .state .word { font-size: 3cqw; font-weight: 600; }
+  .b .state .more { font-size: 1.7cqw; margin-top: 1.4cqw; line-height: 1.35; }
+  .b .state .jump { margin-top: auto; font-size: 1.35cqw; line-height: 1.4; border-top: 2px solid rgba(255,255,255,.5); padding-top: 1cqw; }
+  .b .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .b .body { flex: 1; display: grid; grid-template-columns: 1.15fr 1fr; gap: 1.6cqw; padding: 1.8cqw 2cqw 1.2cqw; min-height: 0; }
+  .b h3 { font-size: 1.35cqw; font-weight: 600; color: var(--dim); margin-bottom: .8cqw; }
+  .b .groups { display: grid; grid-template-columns: 1fr 1fr; gap: 1.4cqw 1.6cqw; align-content: start; }
+  .b .group p { font-size: 1.4cqw; font-weight: 600; margin-bottom: .5cqw; }
+  .b .group p span { font-weight: 400; color: var(--dim); }
+  .b .tiles { display: flex; flex-wrap: wrap; gap: .4cqw; }
+  .b .tiles i { width: 2.1cqw; height: 2.1cqw; border-radius: .3cqw; background: var(--okq); }
+  .b .tiles b { height: 2.1cqw; border-radius: .3cqw; padding: 0 .7cqw; font-size: 1.25cqw; font-weight: 700; line-height: 2.1cqw; color: #fff; background: var(--crit); }
+  .b .tiles b.warn { background: var(--warn); color: #2b1c00; }
+  .b .list { background: var(--surface); border-radius: .6cqw; padding: 1.2cqw 1.4cqw; }
+  .b .item { padding: .85cqw 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; column-gap: 1cqw; }
+  .b .item:first-of-type { border-top: 0; }
+  .b .item .host { font-size: 2cqw; font-weight: 700; }
+  .b .item.crit .host { color: var(--crit); } .b .item.warn .host { color: var(--warnink); }
+  .b .item .what { font-size: 1.5cqw; grid-column: 1; }
+  .b .item .since { font-size: 1.4cqw; color: var(--dim); grid-row: 1 / span 2; grid-column: 2; align-self: center; }
+  .b .item.acked .host, .b .item.acked .what { color: var(--dim); }
+  .b .foot { display: flex; justify-content: space-between; font-size: 1.3cqw; color: var(--dim); padding: .8cqw 2cqw 1.1cqw; border-top: 1px solid var(--line); }
+  .b .foot .clock { color: var(--ink); font-weight: 600; }
+
+  .strip { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .strip figure { margin: 0; }
+  .strip figcaption { font-size: 14px; color: #3b4a56; margin-bottom: 6px; }
+  .oos { container-type: inline-size; border-radius: 4px; overflow: hidden; }
+  .oos-a { background: #10293b; color: #eaf1f4; font-family: "Barlow Semi Condensed", sans-serif; }
+  .oos-a .top { display: flex; justify-content: space-between; align-items: baseline; padding: 2.4cqw 3cqw 1.6cqw; font-size: 4.4cqw; font-weight: 600; }
+  .oos-a .top span { font-size: 2.4cqw; font-weight: 400; color: #9db4c0; }
+  .oos-a .band { background: #f5b83d; color: #2b1c00; padding: 1.6cqw 3cqw; font-size: 2.6cqw; font-weight: 600; }
+  .oos-a .band small { display: block; font-size: 2.1cqw; font-weight: 500; }
+  .oos-b { background: #edf0f3; color: #14212b; font-family: "Instrument Sans", sans-serif; display: flex; }
+  .oos-b .state { background: #5b6b77; color: #fff; width: 30%; padding: 2.4cqw; font-size: 2.6cqw; font-weight: 600; }
+  .oos-b .msg { padding: 2.4cqw 3cqw; font-size: 2.2cqw; }
+  .oos-b .msg b { display: block; font-size: 3cqw; color: #8a5600; }
+  @media (max-width: 720px) { .strip { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="intro">
+    <h1>Two directions for the wall dashboard</h1>
+    <p>Both show the same moment: the monitor normally shows "Kunde A – Region 2" and has just switched to "Kunde B – Region 1" because of a critical alarm. Compare how each reads from across the room.</p>
+  </div>
+
+  <section class="direction">
+    <h2>A: Board</h2>
+    <p>Dark, for dim rooms. Works like a departure board: the problem list carries the screen, and colour appears only where something is wrong. A healthy dashboard is almost monochrome.</p>
+    <div class="screen"><div class="wall a">
+      <div class="top">
+        <div class="name">Kunde B – Region 1</div>
+        <div class="meta"><span class="sync">In sync, commit 4f2a9c1, 2 min ago</span><span class="clock num">14:32</span></div>
+      </div>
+      <div class="jump"><span>Switched here from Kunde A – Region 2 because of a critical alarm</span><span>2 more dashboards waiting</span></div>
+      <div class="grid">
+        <div class="panel problems">
+          <h3>Open problems</h3>
+          <div class="row crit new"><div class="bar"></div><div class="host">db-02</div><div class="what">Disk / is 96 % full<small>Critical, not acknowledged</small></div><div class="since num">12 min</div></div>
+          <div class="row crit"><div class="bar"></div><div class="host">web-07</div><div class="what">No data received<small>Critical, not acknowledged</small></div><div class="since num">4 min</div></div>
+          <div class="row warn"><div class="bar"></div><div class="host">app-03</div><div class="what">CPU usage above 90 %<small>Warning, not acknowledged</small></div><div class="since num">31 min</div></div>
+          <div class="row warn acked"><div class="bar"></div><div class="host">edge-01</div><div class="what">Swap usage above 50 %<small>Warning, acknowledged by m.keller</small></div><div class="since num">2 h 10 min</div></div>
+        </div>
+        <div class="panel states">
+          <h3>Hosts</h3>
+          <div class="count num">40 <span>of 44 without problems</span></div>
+          <div class="matrix" id="mA"></div>
+        </div>
+        <div class="panel graph">
+          <h3>db-02, disk / used</h3>
+          <svg viewBox="0 0 300 90" preserveAspectRatio="none" aria-label="Disk usage rising to 96 percent">
+            <line x1="0" y1="14" x2="300" y2="14" stroke="#ff6352" stroke-width="1" stroke-dasharray="4 4"/>
+            <polyline fill="none" stroke="#8ed4ea" stroke-width="2.5" vector-effect="non-scaling-stroke" points="0,62 30,60 60,58 90,55 120,51 150,46 180,40 210,32 240,24 270,15 300,9"/>
+          </svg>
+        </div>
+        <div class="panel single"><h3>web-01, load (1 min)</h3><b class="num">0.42</b></div>
+      </div>
+    </div></div>
+    <button class="pick" data-choice="a-board" onclick="pick(this)">I prefer A</button>
+  </section>
+
+  <section class="direction">
+    <h2>B: Status</h2>
+    <p>Light, for bright offices. The state of the dashboard is one large coloured block you can read from ten metres. Hosts are grouped tiles, and hosts with a problem are written out by name.</p>
+    <div class="screen"><div class="wall b">
+      <div class="state">
+        <div class="name">Kunde B – Region 1</div>
+        <div class="big num">2</div>
+        <div class="word">critical</div>
+        <div class="more">2 warnings<br>40 of 44 hosts without problems</div>
+        <div class="jump">Switched here from Kunde A – Region 2.<br>2 more dashboards waiting.</div>
+      </div>
+      <div class="main">
+        <div class="body">
+          <div>
+            <h3>Hosts by group</h3>
+            <div class="groups">
+              <div class="group"><p>web <span>12</span></p><div class="tiles" data-n="11"><b>web-07</b></div></div>
+              <div class="group"><p>app <span>14</span></p><div class="tiles" data-n="13"><b class="warn">app-03</b></div></div>
+              <div class="group"><p>db <span>8</span></p><div class="tiles" data-n="7"><b>db-02</b></div></div>
+              <div class="group"><p>edge <span>10</span></p><div class="tiles" data-n="9"><b class="warn">edge-01</b></div></div>
+            </div>
+          </div>
+          <div class="list">
+            <h3>Open problems</h3>
+            <div class="item crit"><div class="host">db-02</div><div class="what">Disk / is 96 % full</div><div class="since num">12 min</div></div>
+            <div class="item crit"><div class="host">web-07</div><div class="what">No data received</div><div class="since num">4 min</div></div>
+            <div class="item warn"><div class="host">app-03</div><div class="what">CPU usage above 90 %</div><div class="since num">31 min</div></div>
+            <div class="item warn acked"><div class="host">edge-01</div><div class="what">Swap above 50 %, acknowledged</div><div class="since num">2 h 10 min</div></div>
+          </div>
+        </div>
+        <div class="foot"><span>In sync, commit 4f2a9c1, 2 min ago</span><span class="clock num">14:32</span></div>
+      </div>
+    </div></div>
+    <button class="pick" data-choice="b-status" onclick="pick(this)">I prefer B</button>
+  </section>
+
+  <section class="direction">
+    <h2>Out Of Sync in each direction</h2>
+    <p>The sync state sits in the frame of every dashboard, so it cannot be left out of a layout.</p>
+    <div class="strip">
+      <figure><figcaption>A: a band under the title</figcaption>
+        <div class="oos oos-a"><div class="top">Kunde A – Region 2 <span>14:32</span></div>
+          <div class="band">Out Of Sync since 14:05, showing the configuration from commit 4f2a9c1<small>hosts/kunde-a/db-02.json, line 14: unknown item key "disk.usedpercent"</small></div></div>
+      </figure>
+      <figure><figcaption>B: next to the state block</figcaption>
+        <div class="oos oos-b"><div class="state">Kunde A – Region 2<br>No problems</div>
+          <div class="msg"><b>Out Of Sync since 14:05</b>hosts/kunde-a/db-02.json, line 14: unknown item key "disk.usedpercent". Showing commit 4f2a9c1.</div></div>
+      </figure>
+    </div>
+  </section>
+</div>
+<script>
+  // Host matrix for A: 44 hosts, two critical, two warning.
+  const mA = document.getElementById('mA');
+  for (let i = 0; i < 44; i++) { const s = document.createElement('i'); if (i === 6 || i === 29) s.className = 'crit'; if (i === 15 || i === 38) s.className = 'warn'; mA.appendChild(s); }
+  // Healthy host tiles for B.
+  document.querySelectorAll('.tiles[data-n]').forEach(t => { for (let i = 0; i < +t.dataset.n; i++) t.appendChild(document.createElement('i')); });
+  function pick(btn) {
+    document.querySelectorAll('.pick').forEach(b => b.classList.toggle('selected', b === btn));
+    if (window.toggleSelect) { try { window.toggleSelect(btn); } catch (e) {} }
+  }
+</script>
+</body>
+</html>
