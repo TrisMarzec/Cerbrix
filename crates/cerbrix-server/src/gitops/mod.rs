@@ -5,6 +5,7 @@ mod boards;
 pub mod compile;
 #[cfg(test)]
 mod tests;
+pub mod tree;
 
 use std::collections::BTreeMap;
 
@@ -14,6 +15,7 @@ pub use compile::{
     Compiled, CompiledHost, Document, DocumentKind, EffectiveHost, EffectiveItem, EffectiveTrigger,
     compile,
 };
+pub use tree::{MAX_FILE_BYTES, MAX_FILES, check_config, format_issue, read_tree};
 
 /// The files of one revision of the configuration repository.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
