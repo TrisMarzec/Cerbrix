@@ -21,10 +21,15 @@ StateDirectoryMode=0750
 
 # Hardening. /proc, /sys and the mount table stay readable: the agent needs them for
 # its cpu, memory, disk and network items.
+#
+# Do NOT add options that hide or replace file systems: ProtectHome=true or =tmpfs,
+# PrivateTmp, InaccessiblePaths, TemporaryFileSystem. The agent reads the mount table
+# of its own mount namespace, so such options put inaccessible nodes or tmpfs mounts on
+# top of real partitions (for example a separate /home) and the disk items report wrong
+# sizes or lose the mount. ProtectHome=read-only keeps /home visible.
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
+ProtectHome=read-only
 PrivateDevices=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

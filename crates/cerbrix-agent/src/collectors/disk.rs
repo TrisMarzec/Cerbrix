@@ -1,6 +1,6 @@
 //! Disk collector: size and usage per mounted file system.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
 use sysinfo::Disks;
@@ -36,6 +36,8 @@ pub const DEFAULT_EXCLUDED_FS: &[&str] = &[
 /// One mounted file system as reported by a [`DiskSource`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiskInfo {
+    /// Device name (for example `/dev/sda1`); empty if unknown.
+    pub device: String,
     pub mount: String,
     pub fs: String,
     pub total_bytes: u64,
@@ -66,6 +68,7 @@ impl DiskSource for SysinfoDisks {
         Ok(disks
             .iter()
             .map(|d| DiskInfo {
+                device: d.name().to_string_lossy().into_owned(),
                 mount: d.mount_point().to_string_lossy().into_owned(),
                 fs: d.file_system().to_string_lossy().into_owned(),
                 total_bytes: d.total_space(),
@@ -115,9 +118,8 @@ impl Collector for DiskCollector {
 
     fn collect(&mut self) -> anyhow::Result<Vec<Reading>> {
         let disks = self.source.disks()?;
-        let mut seen = HashSet::new();
         let mut invalid = Vec::new();
-        let mut out = Vec::new();
+        let mut candidates = Vec::new();
         for disk in disks {
             let fs = disk.fs.to_lowercase();
             if self.exclude_fs.contains(&fs)
@@ -130,7 +132,32 @@ impl Collector for DiskCollector {
                 invalid.push(disk.mount);
                 continue;
             }
-            if !seen.insert(disk.mount.clone()) {
+            candidates.push(disk);
+        }
+
+        // A device mounted at several points (bind mounts, also those made by the
+        // service sandbox) is reported once, at its shortest mount point; ties go to
+        // the first listed. Entries without a device name are never merged.
+        let mut shortest: HashMap<&str, usize> = HashMap::new();
+        for (i, disk) in candidates.iter().enumerate() {
+            if disk.device.is_empty() {
+                continue;
+            }
+            let best = shortest.entry(disk.device.as_str()).or_insert(i);
+            if disk.mount.len() < candidates[*best].mount.len() {
+                *best = i;
+            }
+        }
+        let keep: Vec<bool> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, disk)| disk.device.is_empty() || shortest[disk.device.as_str()] == i)
+            .collect();
+
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for (disk, keep) in candidates.into_iter().zip(keep) {
+            if !keep || !seen.insert(disk.mount.clone()) {
                 continue;
             }
             let used = disk.total_bytes.saturating_sub(disk.available_bytes);
@@ -175,7 +202,12 @@ mod tests {
     }
 
     fn info(mount: &str, fs: &str, total: u64, available: u64) -> DiskInfo {
+        info_dev(mount, fs, "", total, available)
+    }
+
+    fn info_dev(mount: &str, fs: &str, device: &str, total: u64, available: u64) -> DiskInfo {
         DiskInfo {
+            device: device.into(),
             mount: mount.into(),
             fs: fs.into(),
             total_bytes: total,
@@ -259,6 +291,53 @@ mod tests {
             &[],
         );
         assert_eq!(c.collect().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn bind_mounts_of_one_device_are_reported_once() {
+        let (mut c, _) = collector(
+            vec![
+                info_dev("/var/lib/cerbrix-agent", "ext4", "/dev/sda1", 100, 50),
+                info_dev("/", "ext4", "/dev/sda1", 100, 50),
+                info_dev("/home", "ext4", "/dev/sda1", 100, 50),
+            ],
+            &[],
+        );
+        assert_eq!(mounts(&c.collect().unwrap()), ["/"]);
+    }
+
+    #[test]
+    fn different_devices_are_all_reported() {
+        let (mut c, _) = collector(
+            vec![
+                info_dev("/", "ext4", "/dev/sda1", 100, 50),
+                info_dev("/home", "ext4", "/dev/sdb1", 100, 50),
+            ],
+            &[],
+        );
+        assert_eq!(mounts(&c.collect().unwrap()), ["/", "/home"]);
+    }
+
+    #[test]
+    fn empty_device_names_are_not_merged() {
+        let (mut c, _) = collector(
+            vec![info("/", "ext4", 100, 50), info("/data", "ext4", 100, 50)],
+            &[],
+        );
+        assert_eq!(mounts(&c.collect().unwrap()), ["/", "/data"]);
+    }
+
+    #[test]
+    fn excluded_mount_does_not_shadow_a_longer_one() {
+        let (mut c, _) = collector(
+            vec![
+                info_dev("/", "ext4", "/dev/sda1", 100, 50),
+                info_dev("/srv/data", "ext4", "/dev/sda1", 100, 50),
+                info_dev("/srv/data/deep", "ext4", "/dev/sda1", 100, 50),
+            ],
+            &["/"],
+        );
+        assert_eq!(mounts(&c.collect().unwrap()), ["/srv/data"]);
     }
 
     #[test]

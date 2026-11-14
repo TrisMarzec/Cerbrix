@@ -166,7 +166,9 @@ if [ "$KEEP_CONFIG" -eq 1 ]; then
 else
     [ -n "$SERVER_URL" ] || die "--server-url is required (no $CONFIG_FILE yet)"
     [ -n "$HOST_NAME" ] || die "--host is required (no $CONFIG_FILE yet)"
-    [ -n "$KEY" ] || die "an enrolment key is required: set CERBRIX_ENROLLMENT_KEY (preferred) or use --enrollment-key"
+    if [ -z "$KEY" ] && [ "$DRY_RUN" -eq 0 ]; then
+        die "an enrolment key is required: set CERBRIX_ENROLLMENT_KEY (preferred) or use --enrollment-key"
+    fi
     # The values are written into a TOML file; allow only characters that need no escaping.
     case $SERVER_URL in
         https://*) ;;
@@ -259,7 +261,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
         if [ -n "$CA_FILE" ]; then
             would "copy $CA_FILE to $CA_DEST (mode 0644, root:root)"
         fi
-        would "write $CONFIG_FILE (mode 0640, root:$SERVICE_USER) with server_url=$SERVER_URL host=$HOST_NAME, an enrolment key (not shown)"
+        if [ -n "$KEY" ]; then
+            would "write $CONFIG_FILE (mode 0640, root:$SERVICE_USER) with server_url=$SERVER_URL host=$HOST_NAME, an enrolment key (not shown)"
+        else
+            would "write $CONFIG_FILE (mode 0640, root:$SERVICE_USER) with server_url=$SERVER_URL host=$HOST_NAME; no enrolment key was given yet (a real run needs CERBRIX_ENROLLMENT_KEY or --enrollment-key)"
+        fi
     fi
     would "install the unit file to $UNIT_PATH (mode 0644)"
     would "run: systemctl daemon-reload"

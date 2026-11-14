@@ -38,7 +38,8 @@ an excluded mount pattern. The default excluded file-system types are:
 `squashfs`, `autofs`, `debugfs`, `tracefs`, `securityfs`, `pstore`, `bpf`,
 `mqueue`, `hugetlbfs`, `fusectl`, `configfs`, `ramfs` and `nsfs`. A mount point
 listed twice is reported once, and file systems with a total size of 0 are
-skipped.
+skipped. A device mounted at several points (bind mounts) is reported once, at its
+shortest mount point.
 
 `net.*` rates are measured between two consecutive collections, so the first
 collection after start-up produces no value, and an interface whose counters

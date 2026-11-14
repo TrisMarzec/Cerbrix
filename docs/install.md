@@ -111,13 +111,14 @@ shell history or in the process list.
 curl -fsSLO https://github.com/TrisMarzec/Cerbrix/releases/latest/download/install-agent.sh
 less install-agent.sh
 sh install-agent.sh --dry-run --server-url https://your-server-name --host web-01
-read -r -s -p 'Enrolment key: ' CERBRIX_ENROLLMENT_KEY && export CERBRIX_ENROLLMENT_KEY
+printf 'Enrolment key: '; stty -echo; read -r CERBRIX_ENROLLMENT_KEY; stty echo; echo
+export CERBRIX_ENROLLMENT_KEY
 sudo --preserve-env=CERBRIX_ENROLLMENT_KEY sh install-agent.sh \
     --server-url https://your-server-name --host web-01
 ```
 
 The `--dry-run` line prints every step as `would: ...` without changing anything (it does
-not need root). Options:
+not need root, and it works before you have entered the key). Options:
 
 | Option | Meaning |
 | --- | --- |
