@@ -32,7 +32,8 @@ pub struct AgentConfig {
     /// Base URL of the server; must be `https` unless `allow_insecure_http` is set.
     pub server_url: Url,
     pub host: String,
-    /// Only needed until the agent has enrolled.
+    /// Needed for the first enrolment, and again if the server ever rejects the
+    /// stored credential.
     pub enrollment_key: Option<String>,
     /// Extra PEM root certificate(s) to trust for the server's TLS certificate.
     pub ca_file: Option<PathBuf>,

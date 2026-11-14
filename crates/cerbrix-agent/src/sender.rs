@@ -119,6 +119,17 @@ impl CredentialStore {
         result
     }
 
+    /// Keeps a credential the server rejected as `credential.rejected`
+    /// (replacing an older one) so that it is no longer used but not lost.
+    /// Succeeds if there is no credential.
+    pub fn reject(&self) -> io::Result<()> {
+        match std::fs::rename(&self.path, self.path.with_extension("rejected")) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Deletes the stored credential. Succeeds if there is none.
     pub fn clear(&self) -> io::Result<()> {
         match std::fs::remove_file(&self.path) {
@@ -155,6 +166,8 @@ pub struct Tuning {
     pub refused_retry: Duration,
     /// Pause when the spool has nothing to send.
     pub idle: Duration,
+    /// Pause after the server refused a batch, before the next one is sent.
+    pub refused_pause: Duration,
 }
 
 impl Default for Tuning {
@@ -164,6 +177,7 @@ impl Default for Tuning {
             backoff_max: Duration::from_secs(60),
             refused_retry: Duration::from_secs(60),
             idle: Duration::from_secs(1),
+            refused_pause: Duration::from_secs(1),
         }
     }
 }
@@ -344,9 +358,12 @@ impl Sender {
                     }
                 }
                 Err(ClientError::Unauthorized) => {
-                    tracing::warn!("the server no longer accepts the credential, enrolling again");
-                    if let Err(e) = self.store.clear() {
-                        tracing::error!(error = %e, "cannot delete the rejected credential");
+                    tracing::error!(
+                        host = %self.enrollment.host,
+                        "the server rejected this host's credential; an administrator must release \n                         the host's binding on the server or provide an enrollment_key; the \n                         rejected credential is kept as credential.rejected"
+                    );
+                    if let Err(e) = self.store.reject() {
+                        tracing::error!(error = %e, "cannot set the rejected credential aside");
                     }
                     if self.sleep(self.tuning.idle).await {
                         return Outcome::Shutdown;
@@ -358,6 +375,10 @@ impl Sender {
                     tracing::warn!(%code, %message, dropped = count, "the server refused a batch, dropping it");
                     backoff.reset();
                     if self.acknowledge(count).await {
+                        return Outcome::Shutdown;
+                    }
+                    // A server that refuses everything must not drain the spool at full speed.
+                    if self.sleep(self.tuning.refused_pause).await {
                         return Outcome::Shutdown;
                     }
                 }
@@ -431,6 +452,7 @@ mod tests {
             backoff_max: Duration::from_millis(40),
             refused_retry: Duration::from_millis(30),
             idle: Duration::from_millis(10),
+            refused_pause: Duration::from_millis(10),
         }
     }
 
@@ -748,7 +770,7 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/agent/v1/values"))
-            .respond_with(ResponseTemplate::new(401))
+            .respond_with(unauthorized())
             .mount(&server)
             .await;
         let fx = fixture(&server);
@@ -764,6 +786,95 @@ mod tests {
         assert_eq!(batches.last().unwrap().values, pushed);
     }
 
+    fn unauthorized() -> ResponseTemplate {
+        ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": "unauthorized", "message": "missing or invalid credential"
+        }))
+    }
+
+    #[tokio::test]
+    async fn proxy_404_keeps_values_in_the_spool() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("<html>nginx</html>"))
+            .mount(&server)
+            .await;
+        let fx = fixture(&server);
+        fx.store.save("cred").unwrap();
+        let pushed = values(0..20);
+        fx.push(&pushed);
+        let spool = Arc::clone(&fx.spool);
+        let running = fx.start(None);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let _dir = running.stop().await;
+        assert_eq!(spool.lock().unwrap().peek(100).unwrap(), pushed);
+    }
+
+    #[tokio::test]
+    async fn foreign_401_does_not_touch_the_credential() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("<html>login</html>"))
+            .mount(&server)
+            .await;
+        let fx = fixture(&server);
+        fx.store.save("cred").unwrap();
+        let pushed = values(0..3);
+        fx.push(&pushed);
+        let spool = Arc::clone(&fx.spool);
+        let store = fx.store.clone();
+        let dir = fx.dir.path().to_path_buf();
+        let running = fx.start(Some("the-key"));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _dir = running.stop().await;
+        assert_eq!(store.load().unwrap().as_deref(), Some("cred"));
+        assert!(!dir.join("credential.rejected").exists());
+        assert_eq!(spool.lock().unwrap().peek(10).unwrap(), pushed);
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.iter().all(|r| r.url.path().ends_with("/values")));
+    }
+
+    #[tokio::test]
+    async fn rejected_credential_is_kept_as_credential_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/agent/v1/enroll"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "already_bound", "message": "host is already enrolled"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/agent/v1/values"))
+            .respond_with(unauthorized())
+            .mount(&server)
+            .await;
+        let fx = fixture(&server);
+        fx.store.save("old-cred").unwrap();
+        fx.push(&values(0..2));
+        let spool = Arc::clone(&fx.spool);
+        let running = fx.start(None);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let dir = running.stop().await;
+        let rejected = std::fs::read_to_string(dir.path().join("credential.rejected")).unwrap();
+        assert_eq!(rejected, "old-cred");
+        assert!(!dir.path().join("credential").exists());
+        assert_eq!(spool.lock().unwrap().peek(10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reject_replaces_an_older_rejected_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(dir.path());
+        store.reject().unwrap();
+        store.save("one").unwrap();
+        store.reject().unwrap();
+        store.save("two").unwrap();
+        store.reject().unwrap();
+        assert_eq!(store.load().unwrap(), None);
+        let kept = std::fs::read_to_string(dir.path().join("credential.rejected")).unwrap();
+        assert_eq!(kept, "two");
+    }
     #[tokio::test]
     async fn refused_batch_is_dropped_and_sending_continues() {
         let server = MockServer::start().await;

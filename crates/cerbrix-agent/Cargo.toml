@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-anyhow = "1.0.104"
+anyhow.workspace = true
 cerbrix-common = { version = "0.1.0", path = "../cerbrix-common" }
 clap.workspace = true
 figment.workspace = true
@@ -21,15 +21,15 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["signal", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-url = { version = "2.5.8", features = ["serde"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-axum = "0.8.9"
-axum-server = { version = "0.9.2", features = ["tls-rustls-no-provider"] }
+axum.workspace = true
+axum-server.workspace = true
 figment = { workspace = true, features = ["test"] }
-rcgen = "0.14.10"
-rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
-tempfile = "3.27.0"
+rcgen.workspace = true
+rustls.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-wiremock = "0.6.5"
+wiremock.workspace = true

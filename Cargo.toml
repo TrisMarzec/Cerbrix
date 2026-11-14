@@ -27,3 +27,12 @@ time = "0.3.55"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "query"] }
 tokio-util = "0.7.20"
 tracing = "0.1.44"
+anyhow = "1.0.104"
+axum = "0.8.9"
+axum-server = { version = "0.9.2", features = ["tls-rustls-no-provider"] }
+rcgen = "0.14.10"
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
+tempfile = "3.27.0"
+tracing-subscriber = "0.3.23"
+url = "2.5.8"
+wiremock = "0.6.5"

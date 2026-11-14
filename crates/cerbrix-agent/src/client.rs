@@ -20,7 +20,7 @@ pub enum ClientError {
     /// Worth trying again later: network trouble, timeouts, 5xx, 429.
     #[error("server not reachable or busy: {0}")]
     Retryable(String),
-    /// The server does not accept the credential.
+    /// The server says it does not know this credential (401, code `unauthorized`).
     #[error("the server rejected the credential")]
     Unauthorized,
     /// The server refused the request and will keep doing so.
@@ -129,6 +129,11 @@ async fn send_request(request: reqwest::RequestBuilder) -> Result<Response, Clie
 }
 
 /// Passes `response` on if it has the `expected` status, otherwise maps it to an error.
+///
+/// Only an answer that carries Cerbrix's `ErrorBody` is a verdict of the server
+/// (`Refused`, or `Unauthorized` for the code `unauthorized`). A 4xx without one
+/// came from something else on the path (proxy, wrong URL) and, like 408 and
+/// 429, is transient from the agent's point of view.
 async fn check_status(
     response: Response,
     expected: StatusCode,
@@ -138,28 +143,28 @@ async fn check_status(
     if status == expected {
         return Ok(response);
     }
-    if status == StatusCode::UNAUTHORIZED && unauthorized_is_credential {
-        return Err(ClientError::Unauthorized);
-    }
-    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+    let transient = status.is_server_error()
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::REQUEST_TIMEOUT;
+    if transient || !status.is_client_error() {
         return Err(ClientError::Retryable(format!("server answered {status}")));
     }
-    if status.is_client_error() {
-        let body: Option<ErrorBody> = response.json().await.ok();
-        return Err(match body {
-            Some(b) => ClientError::Refused {
-                code: b.error,
-                message: b.message,
-            },
-            None => ClientError::Refused {
-                code: format!("http_{}", status.as_u16()),
-                message: format!("server answered {status}"),
-            },
-        });
+    match response.json::<ErrorBody>().await {
+        Ok(body)
+            if status == StatusCode::UNAUTHORIZED
+                && unauthorized_is_credential
+                && body.error == "unauthorized" =>
+        {
+            Err(ClientError::Unauthorized)
+        }
+        Ok(body) => Err(ClientError::Refused {
+            code: body.error,
+            message: body.message,
+        }),
+        Err(_) => Err(ClientError::Retryable(format!(
+            "answer {status} did not come from a Cerbrix server"
+        ))),
     }
-    Err(ClientError::Retryable(format!(
-        "unexpected answer {status}"
-    )))
 }
 
 #[cfg(test)]
@@ -241,7 +246,10 @@ mod tests {
             client.send("c", &[value()]).await,
             Err(ClientError::Retryable(_))
         ));
-        respond(ResponseTemplate::new(401)).await;
+        respond(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": "unauthorized", "message": "missing or invalid credential"
+        })))
+        .await;
         assert!(matches!(
             client.send("c", &[value()]).await,
             Err(ClientError::Unauthorized)
@@ -260,12 +268,6 @@ mod tests {
             Err(ClientError::Refused { code, .. }) => assert_eq!(code, "invalid_key"),
             other => panic!("expected Refused, got {other:?}"),
         }
-        // A 4xx without a readable body is still a refusal.
-        respond(ResponseTemplate::new(400)).await;
-        match client.send("c", &[value()]).await {
-            Err(ClientError::Refused { code, .. }) => assert_eq!(code, "http_400"),
-            other => panic!("expected Refused, got {other:?}"),
-        }
         respond(ResponseTemplate::new(202).set_body_json(serde_json::json!({
             "accepted": 1, "rejected": 0
         })))
@@ -274,6 +276,70 @@ mod tests {
         assert_eq!((ok.accepted, ok.rejected), (1, 0));
     }
 
+    async fn answer_once(template: ResponseTemplate) -> (MockServer, ServerClient) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(template)
+            .mount(&server)
+            .await;
+        let client = ServerClient::new(&cfg(&server.uri())).unwrap();
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn bodyless_4xx_is_retryable() {
+        for template in [
+            ResponseTemplate::new(404),
+            ResponseTemplate::new(403),
+            ResponseTemplate::new(405),
+            ResponseTemplate::new(400),
+            ResponseTemplate::new(404).set_body_string("<html>Not Found</html>"),
+            ResponseTemplate::new(403).set_body_string("<html>Forbidden</html>"),
+            // Another service's 401 is not a verdict on the credential.
+            ResponseTemplate::new(401),
+            ResponseTemplate::new(401).set_body_string("<html>login</html>"),
+        ] {
+            let (_server, client) = answer_once(template).await;
+            assert!(matches!(
+                client.send("c", &[value()]).await,
+                Err(ClientError::Retryable(_))
+            ));
+            assert!(matches!(
+                client.enroll("web-01", "k").await,
+                Err(ClientError::Retryable(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn request_timeout_408_is_retryable() {
+        for status in [408, 429] {
+            let body = serde_json::json!({ "error": "slow", "message": "later" });
+            let (_server, client) =
+                answer_once(ResponseTemplate::new(status).set_body_json(body)).await;
+            assert!(matches!(
+                client.send("c", &[value()]).await,
+                Err(ClientError::Retryable(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_requires_an_error_body() {
+        let body = serde_json::json!({ "error": "batch_too_large", "message": "too many" });
+        let (_server, client) = answer_once(ResponseTemplate::new(413).set_body_json(body)).await;
+        match client.send("c", &[value()]).await {
+            Err(ClientError::Refused { code, .. }) => assert_eq!(code, "batch_too_large"),
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        // A 401 with another error code is not "unauthorized" either.
+        let body = serde_json::json!({ "error": "invalid_key", "message": "x" });
+        let (_server, client) = answer_once(ResponseTemplate::new(401).set_body_json(body)).await;
+        assert!(matches!(
+            client.send("c", &[value()]).await,
+            Err(ClientError::Refused { .. })
+        ));
+    }
     #[tokio::test]
     async fn send_carries_bearer_credential_and_protocol_version() {
         let server = MockServer::start().await;
