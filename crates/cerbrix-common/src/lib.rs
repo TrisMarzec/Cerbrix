@@ -7,6 +7,7 @@ mod error;
 pub mod interval;
 pub mod items;
 mod metric;
+pub mod trigger;
 
 pub use agent_config::{ConfiguredItem, ItemConfig};
 pub use config::host::{HostFile, ItemEntry, NotificationFile, TemplateFile, TriggerEntry};
@@ -19,3 +20,4 @@ pub use metric::{
     IngestResponse, MAX_BATCH_VALUES, MAX_ITEM_KEY_LEN, MAX_PARAM_VALUE_LEN, MAX_PARAMS,
     MetricValue, PROTOCOL_VERSION, ValueBatch, validate_item_key, validate_param_name,
 };
+pub use trigger::{Comparison, Selector, TriggerExpr, TriggerParseError, parse_trigger};
