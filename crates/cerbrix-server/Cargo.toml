@@ -11,6 +11,7 @@ workspace = true
 anyhow = "1.0.104"
 async-trait = "0.1.92"
 axum = "0.8.9"
+axum-server = { version = "0.9.2", features = ["tls-rustls-no-provider"] }
 base64 = "0.23.1"
 cerbrix-common = { version = "0.1.0", path = "../cerbrix-common" }
 clap.workspace = true
@@ -18,19 +19,24 @@ figment.workspace = true
 http-body-util = "0.1.5"
 rand = "0.10.3"
 reqwest.workspace = true
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "uuid", "time", "macros"] }
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal", "fs", "sync", "time", "net"] }
+tower-http = { version = "0.7.1", features = ["timeout"] }
 tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
 url = "2.5.8"
 uuid.workspace = true
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+rcgen = "0.14.10"
+tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6.5"
 

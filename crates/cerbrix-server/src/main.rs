@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context;
 use cerbrix_server::admin::{self, AdminCommand};
 use cerbrix_server::config::Config;
 use cerbrix_server::state::StateStore;
+use cerbrix_server::tls;
 use clap::{Parser, Subcommand};
 use time::OffsetDateTime;
 
@@ -29,6 +31,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    tracing_subscriber::fmt().init();
     let cli = Cli::parse();
 
     let config = match Config::load(cli.config.as_deref()) {
@@ -40,10 +43,13 @@ async fn main() -> ExitCode {
     };
 
     match cli.command {
-        Command::Serve => {
-            eprintln!("cerbrix-server serve: not implemented yet");
-            ExitCode::from(1)
-        }
+        Command::Serve => match run_server(config).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::from(1)
+            }
+        },
         Command::Admin(command) => {
             let result = async {
                 let store = StateStore::connect(&config.database.url).await?;
@@ -62,4 +68,10 @@ async fn main() -> ExitCode {
             }
         }
     }
+}
+
+async fn run_server(config: Config) -> anyhow::Result<()> {
+    let listener = std::net::TcpListener::bind(config.server.listen)
+        .with_context(|| format!("cannot listen on {}", config.server.listen))?;
+    tls::serve(config, listener, tls::shutdown_signal()).await
 }
