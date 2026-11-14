@@ -1,0 +1,251 @@
+{
+  "$defs": {
+    "HostSelector": {
+      "additionalProperties": false,
+      "description": "Selects the hosts a dashboard is about.\n\nA host must be in all `groups`; `names` adds single hosts. With both empty\nevery host is selected.",
+      "properties": {
+        "groups": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Interval": {
+      "description": "Collection interval between 1s and 24h, for example \"30s\", \"5m\" or \"1h\".",
+      "pattern": "^[0-9]+[smhd]$",
+      "type": "string"
+    },
+    "Panel": {
+      "description": "A dashboard panel. `type` selects the kind; x, y, w and h place it on the 12x6 grid.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "h": {
+              "maximum": 6,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "problems"
+            },
+            "w": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "x": {
+              "maximum": 11,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "y": {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "h": {
+              "maximum": 6,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "host-states"
+            },
+            "w": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "x": {
+              "maximum": 11,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "y": {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "h": {
+              "maximum": 6,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "host": {
+              "type": "string"
+            },
+            "item": {
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "range": {
+              "$ref": "#/$defs/Interval"
+            },
+            "type": {
+              "const": "graph"
+            },
+            "w": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "x": {
+              "maximum": 11,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "y": {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "host",
+            "item",
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "h": {
+              "maximum": 6,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "host": {
+              "type": "string"
+            },
+            "item": {
+              "type": "string"
+            },
+            "params": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "value"
+            },
+            "w": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "x": {
+              "maximum": 11,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "y": {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "host",
+            "item",
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/dashboard.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A file in `dashboards/`. The file name without `.json` is the dashboard id.",
+  "properties": {
+    "hosts": {
+      "$ref": "#/$defs/HostSelector",
+      "default": {
+        "groups": [],
+        "names": []
+      }
+    },
+    "name": {
+      "type": "string"
+    },
+    "panels": {
+      "items": {
+        "$ref": "#/$defs/Panel"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "priority": {
+      "default": 0,
+      "format": "int32",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "DashboardFile",
+  "type": "object"
+}

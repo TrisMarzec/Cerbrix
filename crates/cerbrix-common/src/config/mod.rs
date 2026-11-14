@@ -20,7 +20,26 @@ pub enum Severity {
     Critical,
 }
 
-/// Validates a group or template name: `^[a-z0-9][a-z0-9_-]{0,62}$`.
+/// The published JSON Schema of a file type, pretty-printed with a trailing
+/// newline. The `$id` is derived from the type name (`HostFile` becomes
+/// `host.schema.json`).
+pub fn schema_json<T: JsonSchema>() -> String {
+    let name = T::schema_name().trim_end_matches("File").to_lowercase();
+    let mut value = serde_json::to_value(schemars::schema_for!(T)).expect("schema is JSON");
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "$id".to_string(),
+            serde_json::Value::String(format!(
+                "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/{name}.schema.json"
+            )),
+        );
+    }
+    let mut text = serde_json::to_string_pretty(&value).expect("schema is JSON");
+    text.push('\n');
+    text
+}
+
+/// Validates a group or template name:`^[a-z0-9][a-z0-9_-]{0,62}$`.
 pub fn validate_name(s: &str) -> Result<(), ValidationError> {
     let b = s.as_bytes();
     let ok = !b.is_empty()

@@ -1,0 +1,9 @@
+{
+  "host": "db-01",
+  "address": "10.0.5.21",
+  "groups": ["production", "db"],
+  "templates": ["linux-base"],
+  "items": [
+    { "key": "disk.used_percent", "params": { "mount": "/" }, "interval": "1m" }
+  ]
+}

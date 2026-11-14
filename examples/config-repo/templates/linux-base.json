@@ -1,0 +1,20 @@
+{
+  "template": "linux-base",
+  "items": [
+    { "key": "cpu.usage", "interval": "30s" },
+    { "key": "memory.used_percent", "interval": "30s" },
+    { "key": "disk.used_percent", "interval": "5m" }
+  ],
+  "triggers": [
+    {
+      "name": "Disk almost full",
+      "expression": "disk.used_percent > 90 for 10m",
+      "severity": "high"
+    },
+    {
+      "name": "Agent silent",
+      "expression": "no data for 3m",
+      "severity": "critical"
+    }
+  ]
+}

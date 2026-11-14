@@ -1,0 +1,6 @@
+{
+  "name": "ops",
+  "email": ["ops@example.com"],
+  "min_severity": "high",
+  "groups": ["production"]
+}

@@ -1,0 +1,5 @@
+{
+  "name": "NOC",
+  "show": { "dashboard": "production" },
+  "switch_on_alarm": { "min_severity": "critical" }
+}

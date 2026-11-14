@@ -1,0 +1,46 @@
+{
+  "$defs": {
+    "Severity": {
+      "description": "Problem severity. Ordered from least to most severe.",
+      "enum": [
+        "info",
+        "warning",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/notification.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A file in `notifications/`.",
+  "properties": {
+    "email": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "groups": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "min_severity": {
+      "$ref": "#/$defs/Severity"
+    },
+    "name": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "email",
+    "min_severity"
+  ],
+  "title": "NotificationFile",
+  "type": "object"
+}
