@@ -39,7 +39,9 @@ an excluded mount pattern. The default excluded file-system types are:
 `mqueue`, `hugetlbfs`, `fusectl`, `configfs`, `ramfs` and `nsfs`. A mount point
 listed twice is reported once, and file systems with a total size of 0 are
 skipped. A device mounted at several points (bind mounts) is reported once, at its
-shortest mount point.
+shortest mount point. File systems that expose several mount points from one device, such as
+btrfs subvolumes, are reported once as well (for example only `/` on a default Fedora or
+openSUSE layout).
 
 `net.*` rates are measured between two consecutive collections, so the first
 collection after start-up produces no value, and an interface whose counters

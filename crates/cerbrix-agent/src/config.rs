@@ -163,18 +163,9 @@ impl AgentConfig {
         }
         figment = figment.merge(Env::prefixed("CERBRIX_AGENT_").split("__"));
 
-        let config: AgentConfig = figment.extract().map_err(|e| {
-            // A mistyped enrolment key would otherwise be echoed back in the message.
-            let touches_key = e
-                .clone()
-                .into_iter()
-                .any(|e| e.path.last().is_some_and(|s| s == "enrollment_key"));
-            if touches_key {
-                ConfigError::Invalid("enrollment_key is not a valid string".into())
-            } else {
-                ConfigError::Invalid(e.to_string())
-            }
-        })?;
+        let config: AgentConfig = figment
+            .extract()
+            .map_err(|e| ConfigError::Invalid(describe_figment_error(e)))?;
         config.validate()?;
         Ok(config)
     }
@@ -228,6 +219,60 @@ impl AgentConfig {
         })?;
         Ok(())
     }
+}
+
+/// Describes a figment error without echoing configured values. The error's own
+/// `Display` cannot be used: TOML syntax errors quote the offending source line
+/// and type errors print the value, and those may be secrets. Only the kind of
+/// problem, the key path and the source (file path) are reported.
+fn describe_figment_error(error: figment::Error) -> String {
+    error
+        .into_iter()
+        .map(|e| describe_one(&e))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn describe_one(e: &figment::Error) -> String {
+    use figment::error::Kind;
+
+    let mut out = match &e.kind {
+        Kind::Message(msg) => match toml_error_position(msg) {
+            Some((line, column)) => format!("invalid TOML syntax at line {line}, column {column}"),
+            None => "invalid value".to_owned(),
+        },
+        Kind::InvalidType(_, expected) => format!("wrong type, expected {expected}"),
+        Kind::InvalidValue(_, expected) => format!("invalid value, expected {expected}"),
+        Kind::InvalidLength(_, expected) => format!("invalid length, expected {expected}"),
+        // These name keys, never values.
+        Kind::UnknownField(..) | Kind::MissingField(_) | Kind::DuplicateField(_) => {
+            e.kind.to_string()
+        }
+        Kind::UnknownVariant(..) => "unknown variant".to_owned(),
+        Kind::ISizeOutOfRange(_) | Kind::USizeOutOfRange(_) => "number out of range".to_owned(),
+        _ => "unsupported value".to_owned(),
+    };
+    if !e.path.is_empty() {
+        out.push_str(&format!(" for key {:?}", e.path.join(".")));
+    }
+    if let Some(md) = &e.metadata {
+        match &md.source {
+            Some(source) => out.push_str(&format!(" in {source} {}", md.name)),
+            None => out.push_str(&format!(" in {}", md.name)),
+        }
+    }
+    out
+}
+
+/// Line and column from the first line of a TOML parse error message
+/// (`TOML parse error at line 3, column 38`); the rest quotes the source.
+fn toml_error_position(message: &str) -> Option<(usize, usize)> {
+    let first = message
+        .lines()
+        .next()?
+        .strip_prefix("TOML parse error at line ")?;
+    let (line, column) = first.split_once(", column ")?;
+    Some((line.parse().ok()?, column.trim().parse().ok()?))
 }
 
 #[cfg(test)]
@@ -356,6 +401,41 @@ mod tests {
             );
             let bad = format!("{MINIMAL}enrollment_key = 123456789\n");
             assert!(!invalid(load_str(jail, &bad)).contains("123456789"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn syntax_error_does_not_echo_the_secret_line() {
+        Jail::expect_with(|jail| {
+            let broken =
+                format!("{MINIMAL}enrollment_key = \"cbx_ek_SECRETSECRET\nspool_max_bytes = 5\n");
+            let msg = invalid(load_str(jail, &broken));
+            assert!(!msg.contains("SECRETSECRET"), "{msg}");
+            assert!(!msg.contains("enrollment_key ="), "{msg}");
+            assert!(msg.contains("agent.toml"), "{msg}");
+            assert!(msg.contains("line 3"), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn wrong_typed_values_are_not_echoed() {
+        Jail::expect_with(|jail| {
+            let key = format!("{MINIMAL}enrollment_key = 12345678\n");
+            let msg = invalid(load_str(jail, &key));
+            assert!(!msg.contains("12345678"), "{msg}");
+            assert!(
+                msg.contains("enrollment_key") && msg.contains("agent.toml"),
+                "{msg}"
+            );
+            let other = format!("{MINIMAL}state_dir = 87654321\n");
+            let msg = invalid(load_str(jail, &other));
+            assert!(!msg.contains("87654321"), "{msg}");
+            assert!(msg.contains("state_dir"), "{msg}");
+            jail.set_env("CERBRIX_AGENT_SPOOL_MAX_BYTES", "ENVSECRET");
+            let msg = invalid(load_str(jail, MINIMAL));
+            assert!(!msg.contains("ENVSECRET"), "{msg}");
             Ok(())
         });
     }

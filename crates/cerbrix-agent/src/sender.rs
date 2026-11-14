@@ -21,6 +21,10 @@ const MAX_BATCH_VALUES: usize = 1000;
 /// leaves room for the envelope and for a server configured a bit lower.
 const MAX_BODY_BYTES: usize = 1_500_000;
 
+/// Refusal codes of the values route that are about the batch itself (see
+/// `api/agent.rs` in the server). Only these are acknowledged and dropped.
+const DROPPABLE_REFUSALS: [&str; 3] = ["malformed", "batch_too_large", "body_too_large"];
+
 /// Delays between attempts that follow each other: 1 s, 2 s, 4 s, ... up to 60 s.
 #[derive(Debug, Clone)]
 pub struct Backoff {
@@ -360,7 +364,9 @@ impl Sender {
                 Err(ClientError::Unauthorized) => {
                     tracing::error!(
                         host = %self.enrollment.host,
-                        "the server rejected this host's credential; an administrator must release \n                         the host's binding on the server or provide an enrollment_key; the \n                         rejected credential is kept as credential.rejected"
+                        "the server rejected this host's credential; an administrator must release \
+                         the host's binding on the server or provide an enrollment_key; the \
+                         rejected credential is kept as credential.rejected"
                     );
                     if let Err(e) = self.store.reject() {
                         tracing::error!(error = %e, "cannot set the rejected credential aside");
@@ -371,11 +377,17 @@ impl Sender {
                     return Outcome::Reenrol;
                 }
                 Err(ClientError::Refused { code, message }) => {
-                    // The same batch would be refused every time.
-                    tracing::warn!(%code, %message, dropped = count, "the server refused a batch, dropping it");
-                    backoff.reset();
-                    if self.acknowledge(count).await {
-                        return Outcome::Shutdown;
+                    if DROPPABLE_REFUSALS.contains(&code.as_str()) {
+                        // The batch itself is bad: the same one would be refused every time.
+                        tracing::warn!(%code, %message, dropped = count, "the server refused a batch, dropping it");
+                        backoff.reset();
+                        if self.acknowledge(count).await {
+                            return Outcome::Shutdown;
+                        }
+                    } else {
+                        // Not about the batch (e.g. `unsupported_protocol`): the values
+                        // may be accepted after an upgrade, so they stay in the spool.
+                        tracing::error!(%code, %message, kept = count, "the server refused a batch for a reason that is not the batch's fault, keeping it");
                     }
                     // A server that refuses everything must not drain the spool at full speed.
                     if self.sleep(self.tuning.refused_pause).await {
@@ -909,6 +921,31 @@ mod tests {
         assert_eq!(batches.len(), 2, "refused batch must not be sent again");
         assert_eq!(batches[0].values, first);
         assert_eq!(batches[1].values, second);
+    }
+
+    #[tokio::test]
+    async fn unsupported_protocol_keeps_values_in_the_spool() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/agent/v1/values"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "unsupported_protocol", "message": "protocol version not supported"
+            })))
+            .mount(&server)
+            .await;
+        let fx = fixture(&server);
+        fx.store.save("cred").unwrap();
+        let pushed = values(0..5);
+        fx.push(&pushed);
+        let spool = Arc::clone(&fx.spool);
+        let running = fx.start(None);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _dir = running.stop().await;
+
+        let attempts = value_requests(&server.received_requests().await.unwrap());
+        assert!(attempts.len() >= 2, "the batch must be retried");
+        assert!(attempts.iter().all(|b| b.values == pushed));
+        assert_eq!(spool.lock().unwrap().peek(100).unwrap(), pushed);
     }
 
     #[tokio::test]

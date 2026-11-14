@@ -13,6 +13,7 @@ These three commands must pass before every commit and pull request:
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --locked
 cargo test --workspace
 ```
 

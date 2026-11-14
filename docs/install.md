@@ -167,3 +167,12 @@ Then release the host on the server (`admin host release <name>`) if it will enr
 `scripts/e2e.sh` starts a separate throw-away stack, enrols a locally built agent and checks
 that its values arrive in VictoriaMetrics. It needs Docker, curl and a Rust toolchain; CI runs
 it on every push.
+
+## Troubleshooting
+
+**The agent logs `already_bound`.** The host name is already tied to an earlier credential,
+usually after a failed first enrolment or a reinstall. Run
+`cerbrix-server admin host release <name>` on the server, then restart the agent.
+
+**`docker compose up` fails with postgres unhealthy.** Check `docker compose logs postgres`.
+The database password in `deploy/server.env` is probably empty.

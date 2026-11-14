@@ -116,7 +116,7 @@ impl Config {
 
         let config: Config = figment
             .extract()
-            .map_err(|e| ConfigError::Invalid(e.to_string()))?;
+            .map_err(|e| ConfigError::Invalid(describe_figment_error(e)))?;
         config.validate()?;
         Ok(config)
     }
@@ -159,6 +159,60 @@ fn check_url(key: &str, value: &str) -> Result<(), ConfigError> {
     }
     Ok(())
 }
+/// Describes a figment error without echoing configured values. The error's own
+/// `Display` cannot be used: TOML syntax errors quote the offending source line
+/// and type errors print the value, and those may be secrets. Only the kind of
+/// problem, the key path and the source (file path) are reported.
+fn describe_figment_error(error: figment::Error) -> String {
+    error
+        .into_iter()
+        .map(|e| describe_one(&e))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn describe_one(e: &figment::Error) -> String {
+    use figment::error::Kind;
+
+    let mut out = match &e.kind {
+        Kind::Message(msg) => match toml_error_position(msg) {
+            Some((line, column)) => format!("invalid TOML syntax at line {line}, column {column}"),
+            None => "invalid value".to_owned(),
+        },
+        Kind::InvalidType(_, expected) => format!("wrong type, expected {expected}"),
+        Kind::InvalidValue(_, expected) => format!("invalid value, expected {expected}"),
+        Kind::InvalidLength(_, expected) => format!("invalid length, expected {expected}"),
+        // These name keys, never values.
+        Kind::UnknownField(..) | Kind::MissingField(_) | Kind::DuplicateField(_) => {
+            e.kind.to_string()
+        }
+        Kind::UnknownVariant(..) => "unknown variant".to_owned(),
+        Kind::ISizeOutOfRange(_) | Kind::USizeOutOfRange(_) => "number out of range".to_owned(),
+        _ => "unsupported value".to_owned(),
+    };
+    if !e.path.is_empty() {
+        out.push_str(&format!(" for key {:?}", e.path.join(".")));
+    }
+    if let Some(md) = &e.metadata {
+        match &md.source {
+            Some(source) => out.push_str(&format!(" in {source} {}", md.name)),
+            None => out.push_str(&format!(" in {}", md.name)),
+        }
+    }
+    out
+}
+
+/// Line and column from the first line of a TOML parse error message
+/// (`TOML parse error at line 3, column 38`); the rest quotes the source.
+fn toml_error_position(message: &str) -> Option<(usize, usize)> {
+    let first = message
+        .lines()
+        .next()?
+        .strip_prefix("TOML parse error at line ")?;
+    let (line, column) = first.split_once(", column ")?;
+    Some((line.parse().ok()?, column.trim().parse().ok()?))
+}
+
 #[cfg(test)]
 // `figment::Jail` closures must return `figment::Error`, which is large.
 #[allow(clippy::result_large_err)]
@@ -260,6 +314,39 @@ mod tests {
             let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
             assert!(msg.contains("database.url"), "{msg}");
             assert!(!msg.contains("s3cret"), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn syntax_error_does_not_echo_the_secret_line() {
+        Jail::expect_with(|jail| {
+            let toml = "[server]\ninsecure_http = true\n[database]\nurl = \"postgres://cerbrix:SECRETPW@db/cerbrix\n[metrics]\nurl = \"http://vm\"\n";
+            jail.create_file("cerbrix.toml", toml)?;
+            let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
+            assert!(!msg.contains("SECRETPW"), "{msg}");
+            assert!(!msg.contains("url ="), "{msg}");
+            assert!(msg.contains("cerbrix.toml"), "{msg}");
+            assert!(msg.contains("line 4"), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn wrong_typed_values_are_not_echoed() {
+        Jail::expect_with(|jail| {
+            let toml = "[server]\ninsecure_http = true\n[database]\nurl = 99999\n[metrics]\nurl = \"http://vm\"\n";
+            jail.create_file("cerbrix.toml", toml)?;
+            let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
+            assert!(!msg.contains("99999"), "{msg}");
+            assert!(
+                msg.contains("database.url") && msg.contains("cerbrix.toml"),
+                "{msg}"
+            );
+            jail.set_env("CERBRIX_SERVER__LISTEN", "ENVSECRET");
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
+            assert!(!msg.contains("ENVSECRET"), "{msg}");
             Ok(())
         });
     }
