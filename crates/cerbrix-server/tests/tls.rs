@@ -176,3 +176,17 @@ async fn insecure_http_serves_plain_http_when_enabled() {
 
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn half_configured_tls_pair_fails_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("cert.pem");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let cfg = config(listener.local_addr().unwrap(), Some(&cert), None, true);
+
+    let err = serve(cfg, listener, std::future::pending())
+        .await
+        .expect_err("start must fail");
+    let message = format!("{err:#}");
+    assert!(message.contains("server.tls_key"), "{message}");
+}

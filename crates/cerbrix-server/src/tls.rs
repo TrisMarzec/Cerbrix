@@ -35,6 +35,8 @@ pub async fn serve(
     // Load the certificate first so a bad file stops the start before any connection is made.
     let tls = match (&config.server.tls_cert, &config.server.tls_key) {
         (Some(cert), Some(key)) => Some(load_tls(cert, key).await?),
+        (Some(_), None) => anyhow::bail!("server.tls_cert is set but server.tls_key is missing"),
+        (None, Some(_)) => anyhow::bail!("server.tls_key is set but server.tls_cert is missing"),
         _ if config.server.insecure_http => {
             tracing::warn!(
                 "serving plain HTTP; use only for development or behind a TLS-terminating reverse proxy"

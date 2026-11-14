@@ -31,7 +31,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
 
     let config = match Config::load(cli.config.as_deref()) {
