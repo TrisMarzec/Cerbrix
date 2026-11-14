@@ -8,7 +8,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
 base64 = "0.23.1"
+cerbrix-common = { version = "0.1.0", path = "../cerbrix-common" }
 clap.workspace = true
 figment.workspace = true
 rand = "0.10.3"
@@ -16,7 +18,7 @@ serde.workspace = true
 sha2 = "0.11.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "uuid", "time", "macros"] }
 thiserror.workspace = true
-time.workspace = true
+time = { workspace = true, features = ["formatting"] }
 tokio.workspace = true
 url = "2.5.8"
 uuid.workspace = true

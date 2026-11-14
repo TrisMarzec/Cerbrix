@@ -1,0 +1,202 @@
+//! Agent enrolment rules.
+
+use cerbrix_common::{EnrollRequest, EnrollResponse, validate_host_name};
+use time::OffsetDateTime;
+
+use crate::state::{StateError, StateStore};
+
+/// Why an enrolment was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum EnrollError {
+    #[error("invalid host name")]
+    InvalidHostName,
+    #[error("invalid enrolment key")]
+    InvalidKey,
+    #[error("unknown host")]
+    UnknownHost,
+    #[error("host is already enrolled")]
+    AlreadyBound,
+    #[error(transparent)]
+    State(#[from] StateError),
+}
+
+impl EnrollError {
+    /// Stable machine-readable code for the HTTP layer.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidHostName => "invalid_host_name",
+            Self::InvalidKey => "invalid_key",
+            Self::UnknownHost => "unknown_host",
+            Self::AlreadyBound => "already_bound",
+            Self::State(_) => "internal",
+        }
+    }
+}
+
+/// Enrols a host and returns its new credential.
+///
+/// Checks run in this order: host name format, key validity, host lookup. Only a request with
+/// a valid name and a valid key is recorded as an unknown agent, so callers without a key
+/// cannot fill the list.
+pub async fn enroll(
+    store: &StateStore,
+    req: &EnrollRequest,
+    now: OffsetDateTime,
+) -> Result<EnrollResponse, EnrollError> {
+    validate_host_name(&req.host).map_err(|_| EnrollError::InvalidHostName)?;
+    if !store.enrollment_key_valid(&req.enrollment_key, now).await? {
+        return Err(EnrollError::InvalidKey);
+    }
+    let host = match store.host_by_name(&req.host).await? {
+        Some(host) if host.active => host,
+        _ => {
+            store.record_unknown_agent(&req.host, now).await?;
+            return Err(EnrollError::UnknownHost);
+        }
+    };
+    match store.bind_credential(host.id).await {
+        Ok(credential) => Ok(EnrollResponse { credential }),
+        Err(StateError::Conflict(_)) => Err(EnrollError::AlreadyBound),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::StateStore;
+    use cerbrix_common::EnrollRequest;
+    use sqlx::PgPool;
+    use time::{Duration, OffsetDateTime};
+
+    fn now() -> OffsetDateTime {
+        OffsetDateTime::now_utc()
+    }
+
+    fn req(host: &str, key: &str) -> EnrollRequest {
+        EnrollRequest {
+            host: host.to_owned(),
+            enrollment_key: key.to_owned(),
+            agent_version: "0.1.0".to_owned(),
+        }
+    }
+
+    async fn setup(pool: PgPool) -> (StateStore, String) {
+        let store = StateStore::from_pool(pool);
+        let (_, key) = store
+            .create_enrollment_key("t", now() + Duration::hours(1))
+            .await
+            .unwrap();
+        (store, key)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn enrols_known_host_with_valid_key(pool: PgPool) {
+        let (store, key) = setup(pool).await;
+        let host = store.create_host("web-01").await.unwrap();
+        let resp = enroll(&store, &req("web-01", &key), now()).await.unwrap();
+        assert!(resp.credential.starts_with("cbx_ac_"));
+        let found = store.host_for_credential(&resp.credential).await.unwrap();
+        assert_eq!(found, Some(host));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn expired_key_is_invalid(pool: PgPool) {
+        let (store, key) = setup(pool).await;
+        store.create_host("web-01").await.unwrap();
+        let later = now() + Duration::hours(2);
+        let r = enroll(&store, &req("web-01", &key), later).await;
+        assert!(matches!(r, Err(EnrollError::InvalidKey)));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn revoked_key_is_invalid(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        store.create_host("web-01").await.unwrap();
+        let (id, key) = store
+            .create_enrollment_key("t", now() + Duration::hours(1))
+            .await
+            .unwrap();
+        store.revoke_enrollment_key(id).await.unwrap();
+        let r = enroll(&store, &req("web-01", &key), now()).await;
+        assert!(matches!(r, Err(EnrollError::InvalidKey)));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn second_enrolment_is_rejected_and_first_credential_still_works(pool: PgPool) {
+        let (store, key) = setup(pool).await;
+        store.create_host("web-01").await.unwrap();
+        let first = enroll(&store, &req("web-01", &key), now()).await.unwrap();
+        let r = enroll(&store, &req("web-01", &key), now()).await;
+        assert!(matches!(r, Err(EnrollError::AlreadyBound)));
+        let found = store.host_for_credential(&first.credential).await.unwrap();
+        assert_eq!(found.map(|h| h.name), Some("web-01".to_owned()));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn release_allows_new_enrolment_and_invalidates_old_credential(pool: PgPool) {
+        let (store, key) = setup(pool).await;
+        let host = store.create_host("web-01").await.unwrap();
+        let first = enroll(&store, &req("web-01", &key), now()).await.unwrap();
+        store.release_binding(host.id).await.unwrap();
+        assert!(
+            store
+                .host_for_credential(&first.credential)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let second = enroll(&store, &req("web-01", &key), now()).await.unwrap();
+        assert_ne!(first.credential, second.credential);
+        assert!(
+            store
+                .host_for_credential(&second.credential)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn unknown_host_is_recorded_only_with_valid_key(pool: PgPool) {
+        let (store, key) = setup(pool).await;
+        let r = enroll(&store, &req("ghost", &key), now()).await;
+        assert!(matches!(r, Err(EnrollError::UnknownHost)));
+        assert_eq!(store.unknown_agents().await.unwrap().len(), 1);
+        let r = enroll(&store, &req("ghost2", "cbx_ek_wrong"), now()).await;
+        assert!(matches!(r, Err(EnrollError::InvalidKey)));
+        assert_eq!(store.unknown_agents().await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inactive_host_counts_as_unknown(pool: PgPool) {
+        let (store, key) = setup(pool).await;
+        let host = store.create_host("web-01").await.unwrap();
+        store.set_host_active(host.id, false).await.unwrap();
+        let r = enroll(&store, &req("web-01", &key), now()).await;
+        assert!(matches!(r, Err(EnrollError::UnknownHost)));
+        let list = store.unknown_agents().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].host_name, "web-01");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn bad_host_name_is_rejected_before_key_check(pool: PgPool) {
+        let (store, _) = setup(pool).await;
+        let r = enroll(&store, &req("web 01", "cbx_ek_wrong"), now()).await;
+        assert!(matches!(r, Err(EnrollError::InvalidHostName)));
+        assert!(store.unknown_agents().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn error_codes() {
+        assert_eq!(EnrollError::InvalidHostName.code(), "invalid_host_name");
+        assert_eq!(EnrollError::InvalidKey.code(), "invalid_key");
+        assert_eq!(EnrollError::UnknownHost.code(), "unknown_host");
+        assert_eq!(EnrollError::AlreadyBound.code(), "already_bound");
+        assert_eq!(
+            EnrollError::State(crate::state::StateError::NotFound).code(),
+            "internal"
+        );
+    }
+}

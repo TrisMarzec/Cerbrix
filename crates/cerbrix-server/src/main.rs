@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use cerbrix_server::admin::{self, AdminCommand};
 use cerbrix_server::config::Config;
+use cerbrix_server::state::StateStore;
 use clap::{Parser, Subcommand};
+use time::OffsetDateTime;
 
 #[derive(Debug, Parser)]
 #[command(name = "cerbrix-server", version, about = "Cerbrix monitoring server")]
@@ -20,13 +23,15 @@ enum Command {
     /// Run the server.
     Serve,
     /// Administrative commands.
-    Admin,
+    #[command(subcommand)]
+    Admin(AdminCommand),
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let _config = match Config::load(cli.config.as_deref()) {
+    let config = match Config::load(cli.config.as_deref()) {
         Ok(config) => config,
         Err(err) => {
             eprintln!("configuration error: {err}");
@@ -34,10 +39,27 @@ fn main() -> ExitCode {
         }
     };
 
-    let name = match cli.command {
-        Command::Serve => "serve",
-        Command::Admin => "admin",
-    };
-    eprintln!("cerbrix-server {name}: not implemented yet");
-    ExitCode::from(1)
+    match cli.command {
+        Command::Serve => {
+            eprintln!("cerbrix-server serve: not implemented yet");
+            ExitCode::from(1)
+        }
+        Command::Admin(command) => {
+            let result = async {
+                let store = StateStore::connect(&config.database.url).await?;
+                admin::run(&store, command, OffsetDateTime::now_utc()).await
+            }
+            .await;
+            match result {
+                Ok(text) => {
+                    println!("{text}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+    }
 }
