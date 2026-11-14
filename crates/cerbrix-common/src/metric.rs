@@ -33,9 +33,7 @@ impl MetricValue {
             return Err(ValidationError::TooManyParams);
         }
         for (name, val) in &self.params {
-            if !is_identifier(name) {
-                return Err(ValidationError::ParamName(name.clone()));
-            }
+            validate_param_name(name)?;
             if val.is_empty()
                 || val.len() > MAX_PARAM_VALUE_LEN
                 || val.chars().any(char::is_control)
@@ -71,6 +69,15 @@ pub fn validate_item_key(key: &str) -> Result<(), ValidationError> {
         Ok(())
     } else {
         Err(ValidationError::ItemKey(key.to_owned()))
+    }
+}
+
+/// Param names are identifiers: `^[a-z][a-z0-9_]*$`.
+pub fn validate_param_name(name: &str) -> Result<(), ValidationError> {
+    if is_identifier(name) {
+        Ok(())
+    } else {
+        Err(ValidationError::ParamName(name.to_owned()))
     }
 }
 
@@ -149,6 +156,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn param_name_validation() {
+        assert!(validate_param_name("mount").is_ok());
+        assert!(validate_param_name("p_1").is_ok());
+        for bad in [
+            "",
+            "Mount",
+            "1a",
+            "a-b",
+            "a}",
+            "a,b",
+            "a\"b",
+            "a b",
+            "m=~\".+\"",
+        ] {
+            assert_eq!(
+                validate_param_name(bad),
+                Err(ValidationError::ParamName(bad.to_owned())),
+                "{bad}"
+            );
+        }
+    }
     #[test]
     fn rejects_non_finite_values() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {

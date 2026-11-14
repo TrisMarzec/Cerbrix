@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use cerbrix_common::MetricValue;
+use cerbrix_common::{MetricValue, validate_item_key, validate_param_name};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::Deserialize;
 
@@ -60,7 +60,21 @@ fn escape_selector_value(value: &str) -> String {
     out
 }
 
-fn selector(query: &RangeQuery) -> String {
+/// The store does not trust its callers: key and param names end up in series
+/// names and in PromQL selectors, so they must match the shared wire rules.
+fn validate_series<'a>(
+    key: &str,
+    param_names: impl Iterator<Item = &'a String>,
+) -> Result<(), MetricsError> {
+    validate_item_key(key).map_err(|e| MetricsError::Rejected(e.to_string()))?;
+    for name in param_names {
+        validate_param_name(name).map_err(|e| MetricsError::Rejected(e.to_string()))?;
+    }
+    Ok(())
+}
+
+fn selector(query: &RangeQuery) -> Result<String, MetricsError> {
+    validate_series(&query.key, query.params.keys())?;
     let mut s = format!(
         "{}{{host=\"{}\"",
         series_name(&query.key),
@@ -70,10 +84,11 @@ fn selector(query: &RangeQuery) -> String {
         s.push_str(&format!(",p_{name}=\"{}\"", escape_selector_value(value)));
     }
     s.push('}');
-    s
+    Ok(s)
 }
 
 fn import_line(host: &str, v: &MetricValue) -> Result<String, MetricsError> {
+    validate_series(&v.key, v.params.keys())?;
     if !v.value.is_finite() {
         return Err(MetricsError::Rejected(format!(
             "value of {} is not finite",
@@ -165,7 +180,7 @@ impl MetricsStore for VictoriaMetrics {
             .client
             .get(self.endpoint("api/v1/query_range")?)
             .query(&[
-                ("query", selector(query)),
+                ("query", selector(query)?),
                 ("start", secs(query.from_ms)),
                 ("end", secs(query.to_ms)),
                 ("step", query.step_secs.to_string()),
@@ -399,6 +414,50 @@ mod tests {
         let vm = VictoriaMetrics::new(&server.uri()).unwrap();
         vm.write("web-01", &[]).await.unwrap();
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    async fn no_request_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn hostile_key_never_reaches_the_server() {
+        let server = no_request_server().await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        for key in [r#"x{host=~".+"} or cerbrix_y"#, "a}", "A.b", "a..b", ""] {
+            let err = vm
+                .write("web-01", &[mv(key, &[], 1, 1.0)])
+                .await
+                .unwrap_err();
+            assert!(matches!(err, MetricsError::Rejected(_)), "{key}: {err:?}");
+            let mut q = range(&[]);
+            q.key = key.into();
+            let err = vm.query_range(&q).await.unwrap_err();
+            assert!(matches!(err, MetricsError::Rejected(_)), "{key}: {err:?}");
+        }
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn hostile_param_name_never_reaches_the_server() {
+        let server = no_request_server().await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        for name in [r#"m=~".+",x"#, "a}", "a,b", "a\"b", "Mount", ""] {
+            let err = vm
+                .write("web-01", &[mv("cpu.usage", &[(name, "v")], 1, 1.0)])
+                .await
+                .unwrap_err();
+            assert!(matches!(err, MetricsError::Rejected(_)), "{name}: {err:?}");
+            let err = vm.query_range(&range(&[(name, "v")])).await.unwrap_err();
+            assert!(matches!(err, MetricsError::Rejected(_)), "{name}: {err:?}");
+        }
+        server.verify().await;
     }
 
     #[tokio::test]
