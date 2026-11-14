@@ -4,6 +4,7 @@
 
 - Rust (stable); `rust-toolchain.toml` installs `rustfmt` and `clippy` automatically via rustup
 - Docker with Docker Compose, for the development databases
+- bash and curl, for the end-to-end check `scripts/e2e.sh` (Git Bash on Windows)
 
 ## Checks
 
@@ -28,3 +29,10 @@ Database tests need this environment variable:
 ```sh
 export DATABASE_URL=postgres://cerbrix:cerbrix@localhost:5432/cerbrix
 ```
+
+## End-to-end check
+
+`scripts/e2e.sh` builds the server image, starts its own Compose stack (project
+`cerbrix-e2e`, host ports 18443 and 18428, configurable with `CERBRIX_SERVER_PORT` and
+`CERBRIX_VM_PORT`), runs an agent against it and checks that values arrive. It does not touch
+the development databases and removes its stack when done.

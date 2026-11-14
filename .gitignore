@@ -25,3 +25,6 @@ rustc-ice-*.txt
 
 # Local planning artifacts
 .superpowers/
+
+# Operator configuration with real credentials
+deploy/server.env

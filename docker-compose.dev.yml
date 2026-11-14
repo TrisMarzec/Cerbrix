@@ -11,7 +11,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
 
   victoriametrics:
-    image: victoriametrics/victoria-metrics
+    image: victoriametrics/victoria-metrics:v1.156.0
     ports:
       - "8428:8428"
     volumes:
