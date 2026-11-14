@@ -163,14 +163,25 @@ impl Spool {
     }
 
     /// Appends values. They are in the OS buffers (not fsynced) on return.
+    /// Values that are not finite cannot be represented and are skipped.
+    ///
+    /// `Err` means nothing was stored, so the caller may retry.
     pub fn push(&mut self, values: &[MetricValue]) -> io::Result<()> {
-        if values.is_empty() {
-            return Ok(());
-        }
         let mut buf = Vec::with_capacity(values.len() * 128);
-        for value in values {
+        let mut count = 0usize;
+        for value in values.iter().filter(|v| v.value.is_finite()) {
             serde_json::to_writer(&mut buf, value).map_err(io::Error::other)?;
             buf.push(b'\n');
+            count += 1;
+        }
+        if count < values.len() {
+            tracing::warn!(
+                skipped = values.len() - count,
+                "skipping non-finite values in spool push"
+            );
+        }
+        if count == 0 {
+            return Ok(());
         }
 
         if self
@@ -187,6 +198,7 @@ impl Spool {
         self.writer = Some(writer);
         let writer = self.writer.as_mut().expect("just set");
         let segment = writer.segment;
+        let previous_len = self.segments[&segment].size;
 
         let result = writer
             .file
@@ -197,23 +209,40 @@ impl Spool {
                 let info = self.segments.get_mut(&segment).expect("writer segment");
                 info.size += buf.len() as u64;
                 if let Some(lines) = &mut info.lines {
-                    *lines += values.len();
+                    *lines += count;
                 }
             }
             Err(e) => {
-                // A partial line may be on disk: never append to this segment again.
-                self.writer = None;
-                self.next_segment = segment + 1;
-                let path = self.segment_path(segment);
-                let info = self.segments.get_mut(&segment).expect("writer segment");
-                if let Ok(meta) = fs::metadata(&path) {
-                    info.size = meta.len();
-                }
-                info.lines = count_lines(&path).ok().map(|(lines, _)| lines);
+                self.truncate_and_seal(previous_len);
                 return Err(e);
             }
         }
-        self.enforce_limit()
+        self.enforce_limit();
+        Ok(())
+    }
+
+    /// Undoes a failed batch write: cuts the writer's segment back to
+    /// `previous_len` and seals it, so the next push starts a new segment.
+    /// If the truncation fails, a left-over fragment is ignored on reads and
+    /// never extended.
+    fn truncate_and_seal(&mut self, previous_len: u64) {
+        let Some(writer) = self.writer.take() else {
+            return;
+        };
+        let segment = writer.segment;
+        drop(writer); // close the append handle; truncate through a plain write handle
+        let path = self.segment_path(segment);
+        let truncated = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(previous_len));
+        if let Err(e) = truncated {
+            tracing::warn!(segment, error = %e, "cannot truncate failed spool write");
+        }
+        self.next_segment = self.next_segment.max(segment + 1);
+        let info = self.segments.get_mut(&segment).expect("writer segment");
+        info.size = fs::metadata(&path).map_or(previous_len, |m| m.len());
+        info.lines = count_lines(&path).ok().map(|(lines, _)| lines);
     }
 
     /// Returns up to `max` of the oldest unacknowledged values without
@@ -221,6 +250,7 @@ impl Spool {
     pub fn peek(&mut self, max: usize) -> io::Result<Vec<MetricValue>> {
         let mut values = Vec::new();
         let mut positions = Vec::new();
+        let mut skipped = false;
         'segments: for (&number, _) in self.segments.range(self.cursor.segment..) {
             if values.len() >= max {
                 break;
@@ -256,6 +286,7 @@ impl Spool {
                         });
                     }
                     Err(e) => {
+                        skipped = true;
                         tracing::warn!(segment = number, line = index, error = %e,
                             "skipping unparseable spool line");
                     }
@@ -263,7 +294,29 @@ impl Spool {
             }
         }
         self.pending = Some(positions);
+        if values.is_empty() && skipped {
+            self.consume_unparseable_tail();
+        }
         Ok(values)
+    }
+
+    /// Called when a peek scanned to the end of the data and found no value:
+    /// everything left is unparseable, so move the cursor past it.
+    fn consume_unparseable_tail(&mut self) {
+        let Some((&newest, info)) = self.segments.iter().next_back() else {
+            return;
+        };
+        let Some(lines) = info.lines else {
+            return;
+        };
+        self.cursor = Pos {
+            segment: newest,
+            line: lines,
+        };
+        if let Err(e) = self.write_cursor() {
+            tracing::warn!(error = %e, "cannot persist spool cursor");
+        }
+        self.delete_consumed_segments();
     }
 
     /// Acknowledges the `count` oldest values of the last [`peek`](Self::peek).
@@ -416,7 +469,7 @@ impl Spool {
 
     /// Deletes the oldest segments while the spool is over its limit. The
     /// newest segment is never deleted.
-    fn enforce_limit(&mut self) -> io::Result<()> {
+    fn enforce_limit(&mut self) {
         let mut dropped_values = 0usize;
         let mut dropped_segments = 0usize;
         while self.size_bytes() > self.max_bytes && self.segments.len() > 1 {
@@ -439,7 +492,7 @@ impl Spool {
             };
         }
         if dropped_segments == 0 {
-            return Ok(());
+            return;
         }
         tracing::warn!(
             dropped_values,
@@ -453,9 +506,10 @@ impl Spool {
                 segment: oldest,
                 line: 0,
             };
-            self.write_cursor()?;
+            if let Err(e) = self.write_cursor() {
+                tracing::warn!(error = %e, "cannot persist spool cursor after dropping segments");
+            }
         }
-        Ok(())
     }
 }
 
@@ -789,5 +843,62 @@ mod tests {
         drop(spool);
         let mut spool = Spool::open(dir.path(), max).unwrap();
         assert_eq!(spool.peek(1).unwrap(), vec![fat_value(4000)]);
+    }
+
+    #[test]
+    fn unparseable_tail_is_consumed_by_peek() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("00000001.jsonl"), "garbage\nnull\n").unwrap();
+        let mut spool = Spool::open(dir.path(), 10 * SEGMENT_BYTES).unwrap();
+        assert!(!spool.is_empty());
+        assert!(spool.peek(10).unwrap().is_empty());
+        assert!(spool.is_empty());
+        drop(spool);
+        let mut spool = Spool::open(dir.path(), 10 * SEGMENT_BYTES).unwrap();
+        assert!(spool.is_empty());
+        assert!(spool.peek(10).unwrap().is_empty());
+        spool.push(&values(0..1)).unwrap();
+        assert_eq!(spool.peek(10).unwrap(), values(0..1));
+        spool.ack(1).unwrap();
+        assert!(spool.is_empty());
+    }
+
+    #[test]
+    fn push_skips_non_finite_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spool = Spool::open(dir.path(), 10 * SEGMENT_BYTES).unwrap();
+        let mut batch = values(0..4);
+        batch[1].value = f64::NAN;
+        batch[2].value = f64::INFINITY;
+        spool.push(&batch).unwrap();
+        assert_eq!(spool.peek(10).unwrap(), vec![value(0), value(3)]);
+        let text = fs::read_to_string(dir.path().join("00000001.jsonl")).unwrap();
+        assert!(!text.contains("null"));
+        // A batch of only non-finite values stores nothing.
+        let mut bad = value(9);
+        bad.value = f64::NEG_INFINITY;
+        spool.push(&[bad]).unwrap();
+        assert_eq!(spool.peek(10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn failed_write_is_truncated_back_and_sealed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spool = Spool::open(dir.path(), 10 * SEGMENT_BYTES).unwrap();
+        spool.push(&values(0..2)).unwrap();
+        let previous_len = spool.size_bytes();
+        // Simulate a batch that failed after two complete lines and a fragment.
+        let writer = spool.writer.as_mut().unwrap();
+        writer
+            .file
+            .write_all(b"{\"a\":1}\n{\"a\":2}\n{\"ke")
+            .unwrap();
+        spool.truncate_and_seal(previous_len);
+        let path = dir.path().join("00000001.jsonl");
+        assert_eq!(fs::metadata(&path).unwrap().len(), previous_len);
+        assert_eq!(spool.size_bytes(), previous_len);
+        spool.push(&values(2..3)).unwrap();
+        assert_eq!(segment_files(dir.path()).len(), 2);
+        assert_eq!(spool.peek(10).unwrap(), values(0..3));
     }
 }
