@@ -4,8 +4,12 @@
 
 mod enrollment;
 mod hosts;
+mod sync;
 
 pub use enrollment::UnknownAgent;
+pub use sync::{
+    ApplyError, ChangeSet, SyncChanges, SyncHistoryEntry, SyncLock, SyncState, SyncStatus,
+};
 
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
