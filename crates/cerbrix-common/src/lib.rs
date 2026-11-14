@@ -10,6 +10,10 @@ mod metric;
 pub mod trigger;
 
 pub use agent_config::{ConfiguredItem, ItemConfig};
+pub use config::dashboard::{
+    DashboardFile, DisplayFile, GRID_COLUMNS, GRID_ROWS, HostSelector, Panel, Placement, Show,
+    SwitchOnAlarm,
+};
 pub use config::host::{HostFile, ItemEntry, NotificationFile, TemplateFile, TriggerEntry};
 pub use config::{Severity, validate_name};
 pub use enroll::{EnrollRequest, EnrollResponse, validate_host_name};

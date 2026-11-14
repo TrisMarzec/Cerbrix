@@ -1,5 +1,6 @@
 //! Serde types for the files of a configuration repository.
 
+pub mod dashboard;
 pub mod host;
 
 use schemars::JsonSchema;
