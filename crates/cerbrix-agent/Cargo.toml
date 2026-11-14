@@ -10,12 +10,26 @@ workspace = true
 [dependencies]
 anyhow = "1.0.104"
 cerbrix-common = { version = "0.1.0", path = "../cerbrix-common" }
+clap.workspace = true
+figment.workspace = true
+humantime-serde = "1.1.1"
+reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sysinfo = { version = "0.40.3", default-features = false, features = ["disk", "network", "system"] }
-tokio = { workspace = true, features = ["sync", "time"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["signal", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = { version = "2.5.8", features = ["serde"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+axum = "0.8.9"
+axum-server = { version = "0.9.2", features = ["tls-rustls-no-provider"] }
+figment = { workspace = true, features = ["test"] }
+rcgen = "0.14.10"
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
 tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6.5"
