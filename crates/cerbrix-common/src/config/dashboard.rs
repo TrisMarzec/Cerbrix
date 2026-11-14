@@ -135,7 +135,11 @@ impl<'de> Deserialize<'de> for Panel {
                 host: require(&mut map, "host")?,
                 item: require(&mut map, "item")?,
                 params: take(&mut map, "params")?,
-                range: take(&mut map, "range")?.unwrap_or_else(six_hours),
+                range: match map.remove("range") {
+                    None => six_hours(),
+                    Some(v) => serde_json::from_value(v)
+                        .map_err(|e| D::Error::custom(format!("field `range`: {e}")))?,
+                },
                 at: placement(map)?,
             },
             "value" => Panel::Value {
@@ -432,5 +436,72 @@ mod tests {
             r#"{"name":"x","show":{"dashboard":"a","rotate":["b"],"every":"30s"}}"#,
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn graph_panel_rejects_null_range() {
+        let e = serde_json::from_str::<Panel>(
+            r#"{"type":"graph","host":"h","item":"i","range":null,"x":0,"y":0,"w":2,"h":2}"#,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("range"), "{e}");
+        // params stays nullable, as the schema declares.
+        assert!(
+            serde_json::from_str::<Panel>(
+                r#"{"type":"value","host":"h","item":"i","params":null,"x":0,"y":0,"w":2,"h":2}"#
+            )
+            .is_ok()
+        );
+    }
+
+    fn validator<T: JsonSchema>() -> jsonschema::Validator {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        jsonschema::validator_for(&schema).unwrap()
+    }
+
+    #[test]
+    fn schema_and_parser_agree() {
+        let dash = validator::<DashboardFile>();
+        let disp = validator::<DisplayFile>();
+        let parse_dash = |s: &str| serde_json::from_str::<DashboardFile>(s).is_ok();
+        let parse_disp = |s: &str| serde_json::from_str::<DisplayFile>(s).is_ok();
+        let json = |s: &str| serde_json::from_str::<Value>(s).unwrap();
+
+        for s in [DASHBOARD, r#"{"name":"A","hosts":{"groups":["kunde-a"]}}"#] {
+            assert!(dash.is_valid(&json(s)), "schema rejects {s}");
+            assert!(parse_dash(s), "parser rejects {s}");
+        }
+        for s in [DISPLAY, r#"{"name":"x","show":{"dashboard":"a"}}"#] {
+            assert!(disp.is_valid(&json(s)), "schema rejects {s}");
+            assert!(parse_disp(s), "parser rejects {s}");
+        }
+
+        let dash_with = |panel: &str| format!(r#"{{"name":"A","panels":[{panel}]}}"#);
+        let bad_panels = [
+            r#"{"type":"problems","x":0,"y":0,"w":1,"h":1,"colour":"red"}"#,
+            r#"{"type":"pie","x":0,"y":0,"w":1,"h":1}"#,
+            r#"{"type":"graph","item":"i","x":0,"y":0,"w":1,"h":1}"#,
+            r#"{"type":"graph","host":"h","item":"i","range":null,"x":0,"y":0,"w":1,"h":1}"#,
+            r#"{"type":"graph","host":"h","item":"i","range":"1 hour","x":0,"y":0,"w":1,"h":1}"#,
+        ];
+        for p in bad_panels {
+            let s = dash_with(p);
+            assert!(!dash.is_valid(&json(&s)), "schema accepts {p}");
+            assert!(!parse_dash(&s), "parser accepts {p}");
+        }
+        let good = dash_with(
+            r#"{"type":"graph","host":"h","item":"i","range":"1h","x":0,"y":0,"w":1,"h":1}"#,
+        );
+        assert!(dash.is_valid(&json(&good)));
+        assert!(parse_dash(&good));
+
+        let bad_shows = [
+            r#"{"name":"x","show":{"dashboard":"a","rotate":["b"],"every":"30s"}}"#,
+            r#"{"name":"x","show":{"dashbord":"a"}}"#,
+        ];
+        for s in bad_shows {
+            assert!(!disp.is_valid(&json(s)), "schema accepts {s}");
+            assert!(!parse_disp(s), "parser accepts {s}");
+        }
     }
 }
