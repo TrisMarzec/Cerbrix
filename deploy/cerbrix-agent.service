@@ -1,0 +1,43 @@
+[Unit]
+Description=Cerbrix monitoring agent
+Documentation=https://github.com/TrisMarzec/Cerbrix
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=cerbrix
+Group=cerbrix
+ExecStart=/usr/local/bin/cerbrix-agent --config /etc/cerbrix/agent.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# systemd creates /var/lib/cerbrix-agent owned by the service user; this is the agent's
+# default state_dir. It is the only place the service may write to.
+StateDirectory=cerbrix-agent
+StateDirectoryMode=0750
+
+# Hardening. /proc, /sys and the mount table stay readable: the agent needs them for
+# its cpu, memory, disk and network items.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

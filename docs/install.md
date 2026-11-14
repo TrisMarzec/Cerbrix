@@ -96,20 +96,70 @@ listens on port 443 and forwards to `127.0.0.1:8443`. Agents then use
 
 ## Agent installation
 
-Installing agents on the monitored hosts will be done with an install script that arrives
-with the release tooling. Until then you can run the agent binary by hand. Build it with
-`cargo build --release -p cerbrix-agent`, then write a configuration file, for example
-`/etc/cerbrix/agent.toml` (the default location):
+The agent runs on every monitored Linux host (x86_64 or aarch64, with systemd) as a
+systemd service under its own `cerbrix` user. The install script downloads the release
+binary, verifies its SHA-256 checksum, creates the user and the configuration and starts
+the service. You need the host name and the enrolment key from
+[step 3](#3-create-a-host-and-an-enrolment-key), and the server must be reachable over
+`https` ([Making the server reachable for agents](#making-the-server-reachable-for-agents)).
 
-```toml
-server_url = "https://your-server-name"
-host = "web-01"
-enrollment_key = "<the key from step 3>"
+Download the script, read it, then run it as root. Pass the key through the environment
+variable `CERBRIX_ENROLLMENT_KEY`: unlike `--enrollment-key` it does not end up in the
+shell history or in the process list.
+
+```sh
+curl -fsSLO https://github.com/TrisMarzec/Cerbrix/releases/latest/download/install-agent.sh
+less install-agent.sh
+sh install-agent.sh --dry-run --server-url https://your-server-name --host web-01
+read -r -s -p 'Enrolment key: ' CERBRIX_ENROLLMENT_KEY && export CERBRIX_ENROLLMENT_KEY
+sudo --preserve-env=CERBRIX_ENROLLMENT_KEY sh install-agent.sh \
+    --server-url https://your-server-name --host web-01
 ```
 
-and start it with `cerbrix-agent --config /etc/cerbrix/agent.toml`. After the first
-successful enrolment the agent keeps its own credential in its state directory
-(`/var/lib/cerbrix-agent` by default) and the enrolment key is no longer needed.
+The `--dry-run` line prints every step as `would: ...` without changing anything (it does
+not need root). Options:
+
+| Option | Meaning |
+| --- | --- |
+| `--server-url URL` | `https` URL of the server (required on first install) |
+| `--host NAME` | the host name registered with `admin host add` (required on first install) |
+| `--enrollment-key KEY` | the enrolment key; prefer `CERBRIX_ENROLLMENT_KEY` |
+| `--ca-file PATH` | PEM certificate of the CA that signed the server certificate; copied to `/etc/cerbrix/ca.pem` |
+| `--version X.Y.Z` | agent version, default: the latest release |
+| `--dry-run` | show the steps only |
+
+The script installs `/usr/local/bin/cerbrix-agent`, the unit
+`/etc/systemd/system/cerbrix-agent.service` and the configuration
+`/etc/cerbrix/agent.toml` (mode 0640, owner `root:cerbrix`). After the first successful
+enrolment the agent keeps its own credential in `/var/lib/cerbrix-agent`, and the
+enrolment key stays in the configuration for the case that the server rejects the stored
+credential. Further settings (collection intervals, excluded mounts and interfaces) are
+keys of `agent.toml`; edit the file and run `sudo systemctl restart cerbrix-agent`. To
+change the unit, use `sudo systemctl edit cerbrix-agent` instead of editing the unit file.
+
+**Check it and read the log:**
+
+```sh
+systemctl status cerbrix-agent
+journalctl -u cerbrix-agent -f
+```
+
+**Upgrade:** run the script again, with `--version` for a specific release. It replaces
+the binary and the unit file, restarts the service and keeps an existing
+`/etc/cerbrix/agent.toml` unchanged, so `--server-url`, `--host` and the key are not needed
+(they are ignored if given).
+
+**Uninstall:**
+
+```sh
+sudo systemctl disable --now cerbrix-agent
+sudo rm /etc/systemd/system/cerbrix-agent.service /usr/local/bin/cerbrix-agent
+sudo systemctl daemon-reload
+sudo rm -r /etc/cerbrix /var/lib/cerbrix-agent
+sudo userdel cerbrix
+```
+
+Then release the host on the server (`admin host release <name>`) if it will enrol again.
 
 ## Verifying an installation
 
