@@ -3,3 +3,4 @@
 pub mod collector;
 pub mod collectors;
 pub mod scheduler;
+pub mod spool;

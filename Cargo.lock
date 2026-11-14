@@ -360,7 +360,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cerbrix-common",
+ "serde_json",
  "sysinfo",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
