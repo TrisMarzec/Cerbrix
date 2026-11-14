@@ -10,6 +10,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_BATCH_VALUES: usize = 5000;
 pub const MAX_PARAMS: usize = 8;
 pub const MAX_PARAM_VALUE_LEN: usize = 256;
+pub const MAX_ITEM_KEY_LEN: usize = 128;
 
 /// One measurement of one item on one host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,9 +64,10 @@ pub struct IngestResponse {
     pub rejected: usize,
 }
 
-/// Item keys are dot-separated identifiers: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$`.
+/// Item keys are at most `MAX_ITEM_KEY_LEN` bytes of dot-separated identifiers:
+/// `^[a-z][a-z0-9_]*(.[a-z][a-z0-9_]*)*$`.
 pub fn validate_item_key(key: &str) -> Result<(), ValidationError> {
-    if key.split('.').all(is_identifier) {
+    if key.len() <= MAX_ITEM_KEY_LEN && key.split('.').all(is_identifier) {
         Ok(())
     } else {
         Err(ValidationError::ItemKey(key.to_owned()))
@@ -135,6 +137,18 @@ mod tests {
             assert_eq!(back.params["mount"], mount);
         }
     }
+    #[test]
+    fn item_key_length_limit() {
+        let at_limit = format!("a{}", "b".repeat(MAX_ITEM_KEY_LEN - 1));
+        assert_eq!(at_limit.len(), 128);
+        assert!(validate_item_key(&at_limit).is_ok());
+        let over = format!("{at_limit}b");
+        assert!(matches!(
+            validate_item_key(&over),
+            Err(ValidationError::ItemKey(_))
+        ));
+    }
+
     #[test]
     fn rejects_non_finite_values() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
