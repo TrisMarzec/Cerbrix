@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cerbrix desk views</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#10293b; --panel:#173549; --raise:#1d4059; --line:#2a4d63; --text:#eaf1f4; --dim:#9db4c0; --crit:#ff6352; --warn:#f5b83d; --okq:#2f6f6a; --ok:#6fcbb8; --sync:#8ed4ea; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 17px/1.45 "Barlow Semi Condensed", "Arial Narrow", sans-serif; display: grid; grid-template-rows: auto 1fr; }
+  .num { font-variant-numeric: tabular-nums; }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--sync); outline-offset: 2px; }
+
+  .note { background: #0b1e2c; color: var(--dim); font-size: 14px; padding: 6px 20px; }
+  .app { display: grid; grid-template-columns: 208px 1fr; min-height: 0; }
+  nav { border-right: 1px solid var(--line); padding: 18px 12px; display: flex; flex-direction: column; gap: 2px; }
+  nav .brand { font-size: 24px; font-weight: 700; padding: 0 10px 16px; letter-spacing: -.01em; }
+  nav button { text-align: left; background: none; border: 0; border-radius: 6px; padding: 8px 10px; font-size: 18px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; color: var(--dim); }
+  nav button:hover { background: var(--panel); color: var(--text); }
+  nav button[aria-current="page"] { background: var(--raise); color: var(--text); font-weight: 600; }
+  nav .badge { background: var(--crit); color: #2a0b07; font-size: 14px; font-weight: 700; border-radius: 10px; padding: 0 7px; }
+  nav .who { margin-top: auto; padding: 10px; font-size: 15px; color: var(--dim); border-top: 1px solid var(--line); }
+
+  main { min-width: 0; overflow: auto; }
+  .bar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 24px; border-bottom: 1px solid var(--line); font-size: 15px; color: var(--dim); }
+  .bar .sync { color: var(--sync); }
+  .bar .git { border: 1px solid var(--line); border-radius: 4px; padding: 1px 8px; }
+  .view { display: none; padding: 22px 24px 40px; max-width: 1180px; }
+  .view.on { display: block; }
+  h1 { font-size: 30px; font-weight: 600; letter-spacing: -.01em; }
+  .sub { color: var(--dim); margin-top: 2px; }
+  .tools { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0 12px; align-items: center; }
+  .tools input, .tools select { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; }
+  .tools input { width: 260px; }
+  .tabs { display: flex; gap: 4px; }
+  .tabs button { background: none; border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px; cursor: pointer; color: var(--dim); }
+  .tabs button.on { background: var(--raise); color: var(--text); font-weight: 600; }
+  .btn { background: var(--raise); border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; cursor: pointer; white-space: nowrap; }
+  .btn:hover { border-color: var(--sync); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  th { text-align: left; font-weight: 500; color: var(--dim); font-size: 15px; padding: 9px 14px; }
+  td { padding: 11px 14px; border-top: 1px solid var(--line); vertical-align: middle; }
+  tr.link { cursor: pointer; } tr.link:hover td { background: var(--raise); }
+  td.sev { width: 6px; padding: 0; } tr.crit td.sev { background: var(--crit); } tr.warn td.sev { background: var(--warn); }
+  .view > table { min-width: 780px; }
+  .host { font-weight: 600; font-size: 19px; white-space: nowrap; }
+  tr.crit .host, .crit-t { color: var(--crit); } tr.warn .host, .warn-t { color: var(--warn); }
+  .ok-t { color: var(--ok); } .dim { color: var(--dim); } .right { text-align: right; }
+  small { display: block; color: var(--dim); font-size: 14px; }
+
+  .cols { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; margin-top: 18px; }
+  .panel { background: var(--panel); border-radius: 8px; padding: 14px 16px; }
+  .panel h2 { font-size: 16px; font-weight: 500; color: var(--dim); margin-bottom: 8px; }
+  .panel table { background: none; } .panel td { padding: 8px 0; } .panel td.sev + td { padding-left: 12px; }
+  .graphs { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  .graphs svg { width: 100%; height: 110px; display: block; }
+  .graphs .val { float: right; font-weight: 600; font-size: 20px; }
+  .head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+  .crumb { background: none; border: 0; color: var(--sync); cursor: pointer; padding: 0; margin-bottom: 6px; }
+  .state-pill { font-weight: 600; border-radius: 6px; padding: 4px 12px; background: var(--crit); color: #2a0b07; }
+  .mini { display: inline-grid; grid-auto-flow: column; gap: 3px; vertical-align: middle; }
+  .mini i { width: 9px; height: 16px; border-radius: 2px; background: var(--okq); } .mini i.c { background: var(--crit); } .mini i.w { background: var(--warn); }
+  @media (max-width: 860px) { .app { grid-template-columns: 1fr; } nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); } nav .who, nav .brand { display: none; } .cols, .graphs { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="note">Clickable mockup of the desk views in direction A. Use the navigation on the left; in Hosts, click db-02 for the detail page. Data is invented.</div>
+<div class="app">
+  <nav aria-label="Main">
+    <div class="brand">Cerbrix</div>
+    <button data-v="dashboards">Dashboards</button>
+    <button data-v="hosts">Hosts</button>
+    <button data-v="problems">Problems <span class="badge num">5</span></button>
+    <button data-v="config">Configuration</button>
+    <button data-v="admin">Administration</button>
+    <div class="who">t.marzec, administrator</div>
+  </nav>
+  <main>
+    <div class="bar"><span><span class="sync">In sync</span>, commit 4f2a9c1, 2 min ago</span><span class="git">Hosts, templates and dashboards are managed by Git</span></div>
+
+    <section class="view" id="dashboards">
+      <h1>Dashboards</h1>
+      <p class="sub">Each dashboard is a file in the repository. A wall display jumps to the dashboard with the highest priority that has an unacknowledged alarm.</p>
+      <div class="tools"><input type="search" placeholder="Search dashboards" aria-label="Search dashboards"></div>
+      <table>
+        <tr><th></th><th>Dashboard</th><th>Hosts</th><th>Open problems</th><th class="right">Priority</th><th></th></tr>
+        <tr class="crit"><td class="sev"></td><td><span class="host">Kunde B – Region 1</span><small>dashboards/kunde-b-region-1.json</small></td><td><span class="mini"><i class="c"></i><i class="c"></i><i class="w"></i><i class="w"></i><i></i><i></i><i></i><i></i><i></i><i></i></span> <span class="num dim">44</span></td><td><span class="crit-t">2 critical</span>, <span class="warn-t">2 warnings</span></td><td class="right num">30</td><td class="right"><button class="btn">Open on this screen</button></td></tr>
+        <tr class="warn"><td class="sev"></td><td><span class="host">Kunde C – all regions</span><small>dashboards/kunde-c.json</small></td><td><span class="mini"><i class="w"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span> <span class="num dim">118</span></td><td><span class="warn-t">1 warning</span></td><td class="right num">20</td><td class="right"><button class="btn">Open on this screen</button></td></tr>
+        <tr><td class="sev"></td><td><span class="host">Kunde A – Region 2</span><small>dashboards/kunde-a-region-2.json</small></td><td><span class="mini"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span> <span class="num dim">27</span></td><td class="ok-t">No problems</td><td class="right num">20</td><td class="right"><button class="btn">Open on this screen</button></td></tr>
+        <tr><td class="sev"></td><td><span class="host">Kunde A – Region 1</span><small>dashboards/kunde-a-region-1.json</small></td><td><span class="mini"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span> <span class="num dim">35</span></td><td class="ok-t">No problems</td><td class="right num">10</td><td class="right"><button class="btn">Open on this screen</button></td></tr>
+      </table>
+      <div class="cols">
+        <div class="panel"><h2>Wall displays</h2>
+          <table>
+            <tr><td><b>NOC left</b><small>Rotates through 4 dashboards every 30 s, switches on critical alarms</small></td><td class="right crit-t">Showing Kunde B – Region 1</td></tr>
+            <tr><td><b>Office Kunde A</b><small>Fixed on Kunde A – Region 2, does not switch</small></td><td class="right dim">Showing Kunde A – Region 2</td></tr>
+          </table>
+        </div>
+        <div class="panel"><h2>Waiting alarms on NOC left</h2>
+          <table>
+            <tr class="crit"><td class="sev"></td><td>Kunde B – Region 1<small>Priority 30, shown now</small></td></tr>
+            <tr class="warn"><td class="sev"></td><td>Kunde C – all regions<small>Priority 20, below the display's threshold "critical"</small></td></tr>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="hosts">
+      <h1>Hosts</h1>
+      <p class="sub"><span class="num">224</span> hosts, <span class="num">4</span> with open problems</p>
+      <div class="tools"><input type="search" placeholder="Search by name or address" aria-label="Search hosts">
+        <select aria-label="Group"><option>All groups</option><option>kunde-a</option><option>kunde-b</option><option>region-1</option></select>
+        <select aria-label="State"><option>All states</option><option>With problems</option><option>No data</option><option>Without problems</option></select></div>
+      <table>
+        <tr><th></th><th>Host</th><th>Groups</th><th>State</th><th>CPU</th><th>Memory</th><th class="right">Last value</th></tr>
+        <tr class="crit link" data-go="detail"><td class="sev"></td><td><span class="host">db-02</span><small>10.20.1.12</small></td><td>kunde-b, region-1, db</td><td class="crit-t">Disk / is 96 % full</td><td class="num">34 %</td><td class="num">71 %</td><td class="right num dim">8 s ago</td></tr>
+        <tr class="crit link" data-go="detail"><td class="sev"></td><td><span class="host">web-07</span><small>10.20.1.47</small></td><td>kunde-b, region-1, web</td><td class="crit-t">No data received</td><td class="dim">no data</td><td class="dim">no data</td><td class="right num crit-t">4 min ago</td></tr>
+        <tr class="warn link" data-go="detail"><td class="sev"></td><td><span class="host">app-03</span><small>10.20.1.23</small></td><td>kunde-b, region-1, app</td><td class="warn-t">CPU usage above 90 %</td><td class="num warn-t">93 %</td><td class="num">64 %</td><td class="right num dim">3 s ago</td></tr>
+        <tr class="warn link" data-go="detail"><td class="sev"></td><td><span class="host">edge-01</span><small>10.20.1.2</small></td><td>kunde-b, region-1, edge</td><td class="dim">Swap above 50 %, acknowledged</td><td class="num">12 %</td><td class="num">88 %</td><td class="right num dim">11 s ago</td></tr>
+        <tr class="link" data-go="detail"><td class="sev"></td><td><span class="host">app-01</span><small>10.20.1.21</small></td><td>kunde-b, region-1, app</td><td class="ok-t">No problems</td><td class="num">41 %</td><td class="num">58 %</td><td class="right num dim">5 s ago</td></tr>
+        <tr class="link" data-go="detail"><td class="sev"></td><td><span class="host">app-02</span><small>10.20.1.22</small></td><td>kunde-b, region-1, app</td><td class="ok-t">No problems</td><td class="num">38 %</td><td class="num">61 %</td><td class="right num dim">2 s ago</td></tr>
+        <tr class="link" data-go="detail"><td class="sev"></td><td><span class="host">db-01</span><small>10.20.1.11</small></td><td>kunde-b, region-1, db</td><td class="ok-t">No problems</td><td class="num">22 %</td><td class="num">79 %</td><td class="right num dim">9 s ago</td></tr>
+      </table>
+    </section>
+
+    <section class="view" id="detail">
+      <button class="crumb" data-go="hosts">Back to hosts</button>
+      <div class="head">
+        <div><h1>db-02</h1><p class="sub">10.20.1.12, groups kunde-b, region-1, db, template linux-database</p><p class="sub">Defined in hosts/kunde-b/db-02.json, agent 0.1.0, enrolled 3 Nov 2026</p></div>
+        <span class="state-pill">1 critical problem</span>
+      </div>
+      <div class="cols">
+        <div class="panel"><h2>Open problems</h2>
+          <table><tr class="crit"><td class="sev"></td><td><b>Disk / is 96 % full</b><small>Critical, since 14:20 (12 min), trigger disk.used_percent{mount="/"} &gt; 95 for 5m</small></td><td class="right"><button class="btn">Acknowledge</button></td></tr></table>
+          <div class="graphs">
+            <div><h2>Disk / used <span class="val num crit-t">96 %</span></h2><svg viewBox="0 0 300 110" preserveAspectRatio="none" aria-label="Disk usage rising to 96 percent"><line x1="0" y1="14" x2="300" y2="14" stroke="#ff6352" stroke-dasharray="4 4"/><polyline fill="none" stroke="#8ed4ea" stroke-width="2.5" vector-effect="non-scaling-stroke" points="0,70 40,67 80,63 120,58 160,50 200,40 240,28 270,17 300,10"/></svg></div>
+            <div><h2>CPU usage <span class="val num">34 %</span></h2><svg viewBox="0 0 300 110" preserveAspectRatio="none" aria-label="CPU usage around 34 percent"><polyline fill="none" stroke="#8ed4ea" stroke-width="2.5" vector-effect="non-scaling-stroke" points="0,78 30,70 60,82 90,66 120,74 150,60 180,76 210,68 240,80 270,70 300,74"/></svg></div>
+            <div><h2>Memory used <span class="val num">71 %</span></h2><svg viewBox="0 0 300 110" preserveAspectRatio="none" aria-label="Memory usage around 71 percent"><polyline fill="none" stroke="#8ed4ea" stroke-width="2.5" vector-effect="non-scaling-stroke" points="0,40 50,38 100,36 150,37 200,34 250,33 300,32"/></svg></div>
+            <div><h2>Network eth0 in <span class="val num">4.2 MB/s</span></h2><svg viewBox="0 0 300 110" preserveAspectRatio="none" aria-label="Network traffic"><polyline fill="none" stroke="#8ed4ea" stroke-width="2.5" vector-effect="non-scaling-stroke" points="0,90 30,60 60,84 90,44 120,80 150,52 180,88 210,40 240,76 270,58 300,70"/></svg></div>
+          </div>
+          <div class="tools"><div class="tabs"><button>1 h</button><button class="on">6 h</button><button>24 h</button><button>7 d</button></div></div>
+        </div>
+        <div>
+          <div class="panel"><h2>Current values</h2>
+            <table>
+              <tr><td>cpu.usage_percent</td><td class="right num">34 %</td></tr>
+              <tr><td>memory.used_percent</td><td class="right num">71 %</td></tr>
+              <tr><td>swap.used_percent</td><td class="right num">3 %</td></tr>
+              <tr><td>load.1m</td><td class="right num">1.84</td></tr>
+              <tr><td>disk.used_percent, mount /</td><td class="right num crit-t">96 %</td></tr>
+              <tr><td>disk.used_percent, mount /var/lib/postgresql</td><td class="right num">62 %</td></tr>
+              <tr><td>uptime</td><td class="right num">41 d 6 h</td></tr>
+            </table>
+          </div>
+          <div class="panel" style="margin-top:16px"><h2>Triggers</h2>
+            <table>
+              <tr class="crit"><td class="sev"></td><td>Disk almost full<small>disk.used_percent &gt; 95 for 5m, critical</small></td><td class="right crit-t">Firing</td></tr>
+              <tr><td class="sev"></td><td>High CPU usage<small>cpu.usage_percent &gt; 90 for 10m, warning</small></td><td class="right dim">Quiet</td></tr>
+              <tr><td class="sev"></td><td>Agent silent<small>no data for 3m, critical</small></td><td class="right dim">Quiet</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="problems">
+      <h1>Problems</h1>
+      <p class="sub"><span class="num">5</span> open, <span class="num">4</span> not acknowledged</p>
+      <div class="tools"><div class="tabs"><button class="on">Open</button><button>Resolved</button></div>
+        <select aria-label="Severity"><option>All severities</option><option>Critical</option><option>Warning</option></select>
+        <select aria-label="Dashboard"><option>All dashboards</option><option>Kunde B – Region 1</option><option>Kunde C – all regions</option></select>
+        <input type="search" placeholder="Search host or problem" aria-label="Search problems"></div>
+      <table>
+        <tr><th></th><th>Host</th><th>Problem</th><th>Dashboards</th><th>Since</th><th></th></tr>
+        <tr class="crit"><td class="sev"></td><td><span class="host">db-02</span></td><td>Disk / is 96 % full<small>Critical</small></td><td>Kunde B – Region 1</td><td class="num">14:20<small>12 min</small></td><td class="right"><button class="btn">Acknowledge</button></td></tr>
+        <tr class="crit"><td class="sev"></td><td><span class="host">web-07</span></td><td>No data received<small>Critical</small></td><td>Kunde B – Region 1</td><td class="num">14:28<small>4 min</small></td><td class="right"><button class="btn">Acknowledge</button></td></tr>
+        <tr class="warn"><td class="sev"></td><td><span class="host">app-03</span></td><td>CPU usage above 90 %<small>Warning</small></td><td>Kunde B – Region 1</td><td class="num">14:01<small>31 min</small></td><td class="right"><button class="btn">Acknowledge</button></td></tr>
+        <tr class="warn"><td class="sev"></td><td><span class="host">files-04</span></td><td>Disk /srv is 87 % full<small>Warning</small></td><td>Kunde C – all regions</td><td class="num">11:47<small>2 h 45 min</small></td><td class="right"><button class="btn">Acknowledge</button></td></tr>
+        <tr class="warn"><td class="sev"></td><td><span class="host dim">edge-01</span></td><td class="dim">Swap usage above 50 %<small>Warning, acknowledged by m.keller at 12:30: "known, RAM upgrade on Thursday"</small></td><td class="dim">Kunde B – Region 1</td><td class="num dim">12:22<small>2 h 10 min</small></td><td class="right dim">Acknowledged</td></tr>
+      </table>
+    </section>
+
+    <section class="view" id="config"><h1>Configuration</h1><p class="sub">Not drawn yet: active commit, sync history and errors, unknown agents, enrolment keys. Same table style as the other views.</p></section>
+    <section class="view" id="admin"><h1>Administration</h1><p class="sub">Not drawn yet: users and roles. Same table style as the other views.</p></section>
+  </main>
+</div>
+<script>
+  const navFor = { detail: 'hosts' };
+  function show(v) {
+    document.querySelectorAll('.view').forEach(s => s.classList.toggle('on', s.id === v));
+    document.querySelectorAll('nav button').forEach(b => b.dataset.v === (navFor[v] || v) ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current'));
+    document.querySelector('main').scrollTop = 0;
+  }
+  document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => show(b.dataset.v)));
+  document.querySelectorAll('[data-go]').forEach(e => e.addEventListener('click', () => show(e.dataset.go)));
+  show('dashboards');
+</script>
+</body>
+</html>
