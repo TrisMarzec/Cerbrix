@@ -709,33 +709,57 @@ mod tests {
         assert_eq!(history_len(&store).await, 1);
     }
 
+    /// Number of sessions in this database holding the sync advisory lock (from `pg_locks`).
+    async fn lock_holders(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+             AND classid::bigint = ($1::bigint >> 32) \
+             AND objid::bigint = ($1::bigint & 4294967295)",
+        )
+        .bind(SYNC_LOCK_KEY)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn wait_until_unlocked(pool: &PgPool) {
+        for _ in 0..50 {
+            if lock_holders(pool).await == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("sync lock is still held");
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn sync_lock_is_exclusive(pool: PgPool) {
-        let store = StateStore::from_pool(pool);
+        let store = StateStore::from_pool(pool.clone());
         let first = store.try_sync_lock().await.unwrap().expect("first lock");
+        assert_eq!(lock_holders(&pool).await, 1);
         assert!(store.try_sync_lock().await.unwrap().is_none());
         first.release().await.unwrap();
+        // Checked from pg_locks: the unlock really happened, not just a pooled connection.
+        assert_eq!(lock_holders(&pool).await, 0);
         let second = store.try_sync_lock().await.unwrap().expect("after release");
         second.release().await.unwrap();
+        assert_eq!(lock_holders(&pool).await, 0);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn dropped_lock_does_not_stay_held(pool: PgPool) {
-        let store = StateStore::from_pool(pool);
+        let store = StateStore::from_pool(pool.clone());
         let lock = store.try_sync_lock().await.unwrap().expect("first lock");
+        assert_eq!(lock_holders(&pool).await, 1);
         drop(lock);
-        let mut got = None;
-        for _ in 0..50 {
-            if let Some(l) = store.try_sync_lock().await.unwrap() {
-                got = Some(l);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        got.expect("lock must be free after drop")
-            .release()
+        wait_until_unlocked(&pool).await;
+        let again = store
+            .try_sync_lock()
             .await
-            .unwrap();
+            .unwrap()
+            .expect("free after drop");
+        again.release().await.unwrap();
     }
 
     #[sqlx::test(migrations = "./migrations")]
