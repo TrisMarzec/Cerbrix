@@ -10,10 +10,12 @@ workspace = true
 [dependencies]
 anyhow = "1.0.104"
 async-trait = "0.1.92"
+axum = "0.8.9"
 base64 = "0.23.1"
 cerbrix-common = { version = "0.1.0", path = "../cerbrix-common" }
 clap.workspace = true
 figment.workspace = true
+http-body-util = "0.1.5"
 rand = "0.10.3"
 reqwest.workspace = true
 serde.workspace = true
@@ -23,11 +25,13 @@ sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
 tokio.workspace = true
+tracing = "0.1.44"
 url = "2.5.8"
 uuid.workspace = true
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+tower = { version = "0.5.3", features = ["util"] }
 wiremock = "0.6.5"
 
 [features]
