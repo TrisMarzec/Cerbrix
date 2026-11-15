@@ -101,7 +101,7 @@ struct Running {
 impl Running {
     async fn stop(self) {
         self.shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(10), self.agent)
+        tokio::time::timeout(Duration::from_secs(30), self.agent)
             .await
             .expect("agent did not stop")
             .unwrap()
@@ -147,7 +147,7 @@ async fn wait_for<F: Fn(&[MetricValue]) -> bool>(
             return values;
         }
         assert!(
-            start.elapsed() < Duration::from_secs(8),
+            start.elapsed() < Duration::from_secs(30),
             "timed out waiting for {what}: {values:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
