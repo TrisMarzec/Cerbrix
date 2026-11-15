@@ -447,14 +447,17 @@ impl StateStore {
     }
 
     /// Records that the no-data check is running and returns the baseline: the time since
-    /// which silence counts. If the previous heartbeat is missing or older than
-    /// 3 x `check_every` the server was not checking (a gap), and the baseline moves to
-    /// `now`; otherwise it stays. One statement, so instances that call it at the same
-    /// moment cannot both see a gap and set different baselines.
+    /// which silence counts, so that the server's own downtime never makes hosts look
+    /// silent. The baseline moves to `now` when `force_baseline` is set (the first cycle of
+    /// a server process: agents have not reconnected yet), or when the previous heartbeat
+    /// is missing or older than 3 x `check_every` (a gap); otherwise it stays. One
+    /// statement, so instances that call it at the same moment cannot both see a gap and
+    /// set different baselines.
     pub async fn alerting_heartbeat(
         &self,
         now: OffsetDateTime,
         check_every: std::time::Duration,
+        force_baseline: bool,
     ) -> Result<Option<OffsetDateTime>, StateError> {
         let tolerance = Duration::try_from(check_every)
             .unwrap_or(Duration::MAX)
@@ -464,16 +467,30 @@ impl StateStore {
             .unwrap_or(OffsetDateTime::UNIX_EPOCH);
         let baseline: Option<OffsetDateTime> = sqlx::query_scalar(
             "UPDATE alerting_state SET \
-                 baseline_at = CASE WHEN heartbeat_at IS NULL OR heartbeat_at < $2 \
+                 baseline_at = CASE WHEN $3 OR heartbeat_at IS NULL OR heartbeat_at < $2 \
                                     THEN $1 ELSE baseline_at END, \
                  heartbeat_at = GREATEST(heartbeat_at, $1) \
              WHERE singleton RETURNING baseline_at",
         )
         .bind(now)
         .bind(stale_before)
+        .bind(force_baseline)
         .fetch_one(&self.pool)
         .await?;
         Ok(baseline)
+    }
+
+    /// Refreshes the heartbeat without any baseline decision. A long check cycle calls it
+    /// while it runs, so that its length is not mistaken for a gap by the next cycle.
+    pub async fn touch_heartbeat(&self, now: OffsetDateTime) -> Result<(), StateError> {
+        sqlx::query(
+            "UPDATE alerting_state SET heartbeat_at = GREATEST(heartbeat_at, $1) \
+             WHERE singleton",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Active hosts whose effective triggers include a no-data trigger, ordered by name.
@@ -1410,11 +1427,14 @@ mod tests {
         let every = std::time::Duration::from_secs(15);
         let t = at(T0_MS);
         // The first call has no previous heartbeat: a gap.
-        assert_eq!(store.alerting_heartbeat(t, every).await.unwrap(), Some(t));
+        assert_eq!(
+            store.alerting_heartbeat(t, every, false).await.unwrap(),
+            Some(t)
+        );
         // 15 s later: no gap, the baseline stays.
         assert_eq!(
             store
-                .alerting_heartbeat(t + Duration::seconds(15), every)
+                .alerting_heartbeat(t + Duration::seconds(15), every, false)
                 .await
                 .unwrap(),
             Some(t)
@@ -1422,9 +1442,49 @@ mod tests {
         // 10 minutes after that: a gap, the baseline moves to now.
         let later = t + Duration::seconds(15) + Duration::minutes(10);
         assert_eq!(
-            store.alerting_heartbeat(later, every).await.unwrap(),
+            store.alerting_heartbeat(later, every, false).await.unwrap(),
             Some(later)
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn first_cycle_always_moves_the_baseline(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        let every = std::time::Duration::from_secs(15);
+        let t = at(T0_MS);
+        store.alerting_heartbeat(t, every, false).await.unwrap();
+        // The heartbeat is only 5 s old, but this is the first cycle of a server process.
+        let start = t + Duration::seconds(5);
+        assert_eq!(
+            store.alerting_heartbeat(start, every, true).await.unwrap(),
+            Some(start)
+        );
+        // The second cycle 15 s later keeps it.
+        assert_eq!(
+            store
+                .alerting_heartbeat(start + Duration::seconds(15), every, false)
+                .await
+                .unwrap(),
+            Some(start)
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn touch_heartbeat_never_moves_back_or_sets_a_baseline(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let t = at(T0_MS);
+        store.touch_heartbeat(t).await.unwrap();
+        store
+            .touch_heartbeat(t - Duration::minutes(5))
+            .await
+            .unwrap();
+        let (hb, base): (Option<OffsetDateTime>, Option<OffsetDateTime>) =
+            sqlx::query_as("SELECT heartbeat_at, baseline_at FROM alerting_state")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(hb, Some(t));
+        assert_eq!(base, None);
     }
 
     #[sqlx::test(migrations = "./migrations")]

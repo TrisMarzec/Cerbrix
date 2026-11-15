@@ -94,7 +94,8 @@ pub fn evaluate_nodata(
         let silent = |since: i64| now_ms.saturating_sub(since) >= window_ms;
         let host_silent = silent(host_since);
 
-        // Host level: one instance, "".
+        // Host level: one instance, "". The baseline only postpones opening; resolving
+        // looks at the real last arrival.
         let Some(selector) = selector else {
             let summary = format!("no data for {}", window_text(*window));
             apply(
@@ -102,7 +103,7 @@ pub fn evaluate_nodata(
                 t,
                 "",
                 host_silent,
-                true,
+                !silent(last_seen),
                 &summary,
                 now_ms,
                 &is_firing,
@@ -115,10 +116,10 @@ pub fn evaluate_nodata(
             .series
             .iter()
             .filter(|(key, params, _)| matches(selector, key, params))
-            .map(|(_, params, at)| (instance_key(params), (*at).max(baseline)))
+            .map(|(_, params, at)| (instance_key(params), *at))
             .collect();
         series.sort();
-        for (instance, since) in series {
+        for (instance, arrived) in series {
             let mut summary = format!("{}: no data for {}", selector.key, window_text(*window));
             if !instance.is_empty() {
                 summary.push_str(" on ");
@@ -126,9 +127,11 @@ pub fn evaluate_nodata(
             }
             // While the host as a whole is silent the host-level trigger speaks for it:
             // no item problem opens, and one that is open stays.
-            let item_silent = silent(since);
+            let item_silent = silent(arrived.max(baseline));
             let fires = item_silent && !host_silent;
-            let resolves = !item_silent && !host_silent;
+            // The baseline only postpones opening: an open problem resolves only when a
+            // value really arrived again.
+            let resolves = !silent(arrived) && !silent(last_seen);
             apply(
                 &mut out, t, &instance, fires, resolves, &summary, now_ms, &is_firing, &state,
             );
@@ -174,24 +177,36 @@ fn to_ms(t: OffsetDateTime) -> i64 {
     i64::try_from(t.unix_timestamp_nanos().div_euclid(1_000_000)).unwrap_or(i64::MAX)
 }
 
+/// How many hosts a check evaluates between two heartbeat refreshes.
+const HEARTBEAT_EVERY_HOSTS: usize = 100;
+
 /// One no-data check of every host that has a no-data trigger; returns how many hosts
 /// were checked.
 ///
-/// Records the heartbeat first (which moves the baseline after a gap in the server's own
-/// operation), then evaluates each host in its own transaction. A host that fails is logged
-/// and skipped; only a failing heartbeat or host listing is an error. Safe to run on
+/// Records the heartbeat first, which moves the baseline after a gap in the server's own
+/// operation and, with `first_cycle` (the first check of a server process), always.
+/// Then it evaluates each host in its own transaction, refreshing the heartbeat every 100
+/// hosts and at the end so that a long cycle is not mistaken for a gap. A host that fails is
+/// logged and skipped; only a failing heartbeat or host listing is an error. Safe to run on
 /// several instances at once: `evaluate_host` locks the host and an open problem is unique.
 pub async fn check_once(
     store: &StateStore,
     queue_mail: bool,
     check_every: Duration,
+    first_cycle: bool,
     now: OffsetDateTime,
 ) -> Result<usize, StateError> {
-    let baseline_ms = store.alerting_heartbeat(now, check_every).await?.map(to_ms);
+    let baseline_ms = store
+        .alerting_heartbeat(now, check_every, first_cycle)
+        .await?
+        .map(to_ms);
     let now_ms = to_ms(now);
     let hosts = store.hosts_with_nodata_triggers().await?;
     let mut checked = 0;
-    for host_id in hosts {
+    for (n, host_id) in hosts.into_iter().enumerate() {
+        if n > 0 && n % HEARTBEAT_EVERY_HOSTS == 0 {
+            refresh_heartbeat(store).await;
+        }
         // Read right before the evaluation; a value arriving in between is picked up by
         // the next check.
         let seen = match store.seen(host_id).await {
@@ -220,7 +235,15 @@ pub async fn check_once(
             Err(err) => tracing::error!(%host_id, %err, "no-data check failed for a host"),
         }
     }
+    refresh_heartbeat(store).await;
     Ok(checked)
+}
+
+/// Refreshes the heartbeat with the current time; a failure is logged, not fatal.
+async fn refresh_heartbeat(store: &StateStore) {
+    if let Err(err) = store.touch_heartbeat(OffsetDateTime::now_utc()).await {
+        tracing::error!(%err, "no-data check: cannot refresh the heartbeat");
+    }
 }
 
 /// Runs a check immediately and then once per `check_every` (measured from the start of the
@@ -235,6 +258,9 @@ pub async fn run_nodata_loop(
     // A check that overruns the interval delays the next one instead of causing a burst.
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let store = Arc::new(store);
+    // The first check of this process moves the baseline whatever the stored heartbeat
+    // says: agents have not reconnected yet, so silence counts from this start.
+    let mut first_cycle = true;
 
     loop {
         tokio::select! {
@@ -245,7 +271,17 @@ pub async fn run_nodata_loop(
         // A separate task, so that a panic in one check is caught and logged.
         let mut task = tokio::spawn({
             let store = Arc::clone(&store);
-            async move { check_once(&store, queue_mail, check_every, OffsetDateTime::now_utc()).await }
+            let first = first_cycle;
+            async move {
+                check_once(
+                    &store,
+                    queue_mail,
+                    check_every,
+                    first,
+                    OffsetDateTime::now_utc(),
+                )
+                .await
+            }
         });
         let joined = tokio::select! {
             () = shutdown.cancelled() => {
@@ -258,7 +294,7 @@ pub async fn run_nodata_loop(
             joined = &mut task => joined,
         };
         match joined {
-            Ok(Ok(_)) => {}
+            Ok(Ok(_)) => first_cycle = false,
             Ok(Err(err)) => tracing::error!(%err, "no-data check failed"),
             Err(err) => tracing::error!(%err, "no-data check panicked"),
         }
@@ -497,6 +533,25 @@ mod tests {
     }
 
     #[test]
+    fn server_gap_keeps_open_problems_host_level() {
+        let t = [host_trigger()];
+        let st = [firing("Host silent", "")];
+        // Silent for 20 minutes; the server only just came back (baseline = now).
+        let e = run(&t, &st, &seen(20 * MIN, vec![]), Some(NOW));
+        assert_eq!(e, Evaluation::default());
+    }
+
+    #[test]
+    fn server_gap_keeps_open_problems_item_level() {
+        let t = [host_trigger(), disk_trigger()];
+        let st = [firing("Disk silent", "mount=/")];
+        // The host reports, the disk has been silent for 20 minutes, baseline = now.
+        let s = seen(0, vec![disk("/", 20 * MIN)]);
+        let e = run(&t, &st, &s, Some(NOW));
+        assert_eq!(e, Evaluation::default());
+    }
+
+    #[test]
     fn compare_triggers_are_ignored_and_time_arithmetic_saturates() {
         let t = [
             trig("Cpu high", "cpu.usage > 90", Severity::High),
@@ -559,6 +614,60 @@ mod tests {
             .collect()
     }
 
+    async fn baseline_of(pool: &PgPool) -> Option<OffsetDateTime> {
+        sqlx::query_scalar("SELECT baseline_at FROM alerting_state")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn server_gap_keeps_open_problems(pool: PgPool) {
+        let (store, host) = setup(pool.clone()).await;
+        store.touch_seen(host, after(-1200), &[]).await.unwrap();
+        set_heartbeat(&pool, after(-60)).await;
+        check_once(&store, false, EVERY, false, t0()).await.unwrap();
+        assert_eq!(open_problems(&store).await.len(), 1);
+
+        // The server was away: the heartbeat is far in the past, the baseline moves.
+        set_heartbeat(&pool, after(-3600)).await;
+        check_once(&store, false, EVERY, false, after(30))
+            .await
+            .unwrap();
+        assert_eq!(baseline_of(&pool).await, Some(after(30)));
+        let all = store.problems(ProblemFilter::All, 10).await.unwrap();
+        assert_eq!(all.len(), 1, "no new problem");
+        assert_eq!(all[0].resolved_at, None, "still open");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn slow_cycle_is_not_a_gap(pool: PgPool) {
+        let (store, host) = setup(pool.clone()).await;
+        store.touch_seen(host, after(-600), &[]).await.unwrap();
+        // The previous cycle started long ago but refreshed the heartbeat a few seconds ago.
+        set_heartbeat(&pool, after(-300)).await;
+        store.touch_heartbeat(after(-5)).await.unwrap();
+        check_once(&store, false, EVERY, false, t0()).await.unwrap();
+        assert_eq!(baseline_of(&pool).await, None);
+        assert_eq!(open_problems(&store).await.len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn first_cycle_after_a_short_outage_does_not_alarm(pool: PgPool) {
+        let (store, host) = setup(pool.clone()).await;
+        store.touch_seen(host, after(-300), &[]).await.unwrap();
+        // A fresh heartbeat (no gap by the 3 x rule), but this is the first cycle.
+        set_heartbeat(&pool, after(-10)).await;
+        check_once(&store, false, EVERY, true, t0()).await.unwrap();
+        assert_eq!(baseline_of(&pool).await, Some(t0()));
+        assert!(open_problems(&store).await.is_empty());
+        // Three minutes after the start, still nothing arrived: now it alarms.
+        check_once(&store, false, EVERY, false, after(180))
+            .await
+            .unwrap();
+        assert_eq!(open_problems(&store).await.len(), 1);
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn check_once_opens_and_resolves_end_to_end(pool: PgPool) {
         let (store, host) = setup(pool.clone()).await;
@@ -566,7 +675,7 @@ mod tests {
         store.touch_seen(host, after(-300), &[]).await.unwrap();
         set_heartbeat(&pool, after(-60)).await;
 
-        let checked = check_once(&store, false, EVERY, t0()).await.unwrap();
+        let checked = check_once(&store, false, EVERY, false, t0()).await.unwrap();
         assert_eq!(checked, 2);
         assert_eq!(
             open_problems(&store).await,
@@ -577,11 +686,15 @@ mod tests {
         assert_eq!(p.started_at, t0());
 
         // The same silence again: still one problem.
-        check_once(&store, false, EVERY, after(30)).await.unwrap();
+        check_once(&store, false, EVERY, false, after(30))
+            .await
+            .unwrap();
         assert_eq!(open_problems(&store).await.len(), 1);
 
         store.touch_seen(host, after(40), &[]).await.unwrap();
-        check_once(&store, false, EVERY, after(60)).await.unwrap();
+        check_once(&store, false, EVERY, false, after(60))
+            .await
+            .unwrap();
         assert!(open_problems(&store).await.is_empty());
         let all = store.problems(ProblemFilter::All, 10).await.unwrap();
         assert_eq!(all.len(), 1);
@@ -595,11 +708,13 @@ mod tests {
         set_heartbeat(&pool, after(-600)).await;
 
         // The server was down for 10 minutes: the host is not silent yet.
-        check_once(&store, false, EVERY, t0()).await.unwrap();
+        check_once(&store, false, EVERY, false, t0()).await.unwrap();
         assert!(open_problems(&store).await.is_empty());
 
         // Four minutes later, still without a value: now it is.
-        check_once(&store, false, EVERY, after(240)).await.unwrap();
+        check_once(&store, false, EVERY, false, after(240))
+            .await
+            .unwrap();
         assert_eq!(
             open_problems(&store).await,
             [("web-01".to_owned(), "Agent silent".to_owned())]
@@ -618,7 +733,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let checked = check_once(&store, false, EVERY, t0()).await.unwrap();
+        let checked = check_once(&store, false, EVERY, false, t0()).await.unwrap();
         assert_eq!(checked, 1);
         assert_eq!(open_problems(&store).await.len(), 1);
     }
@@ -626,7 +741,8 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn loop_stops_on_shutdown(pool: PgPool) {
         let (store, host) = setup(pool.clone()).await;
-        // Silent for an hour, and a recent heartbeat: the first check opens a problem.
+        // Silent for an hour and a fresh heartbeat. The first cycle of a process still moves
+        // the baseline to now, so no problem opens: silence counts from the server start.
         let now = OffsetDateTime::now_utc();
         store
             .touch_seen(host, now - time::Duration::hours(1), &[])
@@ -642,10 +758,10 @@ mod tests {
             Duration::from_secs(3600),
             shutdown.clone(),
         ));
-        let mut opened = false;
+        let mut ran = false;
         for _ in 0..600 {
-            if !open_problems(&store).await.is_empty() {
-                opened = true;
+            if baseline_of(&pool).await.is_some() {
+                ran = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -655,6 +771,7 @@ mod tests {
             .await
             .expect("loop stops after shutdown")
             .expect("the loop itself did not panic");
-        assert!(opened, "the first check opened the problem");
+        assert!(ran, "the first check ran and set the baseline");
+        assert!(open_problems(&store).await.is_empty());
     }
 }
