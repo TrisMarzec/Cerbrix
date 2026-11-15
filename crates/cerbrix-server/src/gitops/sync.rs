@@ -115,7 +115,25 @@ pub async fn run_sync_loop(
     cfg: GitopsConfig,
     shutdown: CancellationToken,
 ) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(cfg.interval_secs.max(1)));
+    let period = Duration::from_secs(cfg.interval_secs.max(1));
+    run_loop_every(
+        store,
+        source,
+        cfg.max_host_removal_percent,
+        period,
+        shutdown,
+    )
+    .await;
+}
+
+async fn run_loop_every(
+    store: StateStore,
+    source: Arc<dyn ConfigSource>,
+    max_host_removal_percent: u8,
+    period: Duration,
+    shutdown: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(period);
     // A cycle that overruns the interval delays the next one instead of causing a burst.
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // Logging state only: the issues of the previous cycle when it ended Out Of Sync.
@@ -131,7 +149,7 @@ pub async fn run_sync_loop(
         let task = tokio::spawn({
             let store = store.clone();
             let source = Arc::clone(&source);
-            let max = cfg.max_host_removal_percent;
+            let max = max_host_removal_percent;
             async move { sync_once(&store, source.as_ref(), max, OffsetDateTime::now_utc()).await }
         });
         let abort = task.abort_handle();
@@ -266,6 +284,14 @@ mod tests {
         s
     }
 
+    fn at(secs: i64) -> OffsetDateTime {
+        t0() + time::Duration::seconds(secs)
+    }
+
+    async fn cycle_at(store: &StateStore, source: &FakeSource, secs: i64) -> SyncOutcome {
+        sync_once(store, source, 50, at(secs)).await.unwrap()
+    }
+
     async fn cycle(store: &StateStore, source: &FakeSource) -> SyncOutcome {
         sync_once(store, source, 50, t0()).await.unwrap()
     }
@@ -313,17 +339,18 @@ mod tests {
     async fn repeated_invalid_commit_adds_no_history(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         let source = FakeSource::new(vec![Ok(fixture("commit-a")), Ok(broken("commit-b"))]);
-        cycle(&store, &source).await;
-        let first = cycle(&store, &source).await;
+        cycle_at(&store, &source, 0).await;
+        let first = cycle_at(&store, &source, 10).await;
         let before = store.sync_state().await.unwrap();
-        let second = cycle(&store, &source).await;
-        let third = cycle(&store, &source).await;
+        let second = cycle_at(&store, &source, 20).await;
+        let third = cycle_at(&store, &source, 30).await;
         assert_eq!(first, second);
         assert_eq!(first, third);
         let after = store.sync_state().await.unwrap();
         assert_eq!(after.status, SyncStatus::OutOfSync);
         assert_eq!(after.issues, before.issues);
-        assert_eq!(after.last_success_at, before.last_success_at);
+        assert_eq!(after.last_success_at, Some(at(0)));
+        assert_eq!(after.last_attempt_at, Some(at(30)));
         assert_eq!(store.sync_history(100).await.unwrap().len(), 1);
     }
 
@@ -355,8 +382,8 @@ mod tests {
             Err(SourceError::Fetch("unreachable".into())),
             Ok(fixture("commit-a")),
         ]);
-        cycle(&store, &source).await;
-        let outcome = cycle(&store, &source).await;
+        cycle_at(&store, &source, 0).await;
+        let outcome = cycle_at(&store, &source, 10).await;
         let SyncOutcome::OutOfSync(issues) = outcome else {
             panic!("expected OutOfSync");
         };
@@ -368,9 +395,10 @@ mod tests {
         assert_eq!(state.active_commit.as_deref(), Some("commit-a"));
         assert_eq!(state.attempted_commit, None);
 
-        assert_eq!(cycle(&store, &source).await, SyncOutcome::Unchanged);
+        assert_eq!(cycle_at(&store, &source, 20).await, SyncOutcome::Unchanged);
         let state = store.sync_state().await.unwrap();
         assert_eq!(state.status, SyncStatus::InSync);
+        assert_eq!(state.last_success_at, Some(at(20)));
         assert!(state.issues.is_empty());
     }
 
@@ -475,5 +503,72 @@ mod tests {
             store.sync_state().await.unwrap().active_commit.as_deref(),
             Some("commit-a")
         );
+    }
+
+    /// Panics on its first call, then serves the example snapshot.
+    struct PanicOnce {
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl ConfigSource for PanicOnce {
+        async fn fetch(&self) -> Result<Snapshot, SourceError> {
+            let first = {
+                let mut calls = self.calls.lock().unwrap();
+                *calls += 1;
+                *calls == 1
+            };
+            assert!(!first, "simulated panic in a sync cycle");
+            Ok(fixture("commit-a"))
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn loop_survives_a_panicking_cycle(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        let source = Arc::new(PanicOnce {
+            calls: Mutex::new(0),
+        });
+        let shutdown = CancellationToken::new();
+        let handle = tokio::spawn(run_loop_every(
+            store.clone(),
+            source.clone(),
+            50,
+            Duration::from_millis(100),
+            shutdown.clone(),
+        ));
+        let mut synced = false;
+        for _ in 0..100 {
+            if store.sync_state().await.unwrap().status == SyncStatus::InSync {
+                synced = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("loop stops")
+            .expect("the loop itself did not panic");
+        assert!(synced, "the cycle after the panic applied the revision");
+        assert!(*source.calls.lock().unwrap() >= 2);
+        let lock = store.try_sync_lock().await.unwrap();
+        assert!(lock.is_some(), "the lock is free after the loop stopped");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn lock_is_released_after_store_error(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        // The apply writes the history, so the cycle fails after the lock is taken.
+        sqlx::query("ALTER TABLE sync_history RENAME TO sync_history_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let source = FakeSource::new(vec![Ok(fixture("commit-a"))]);
+        let result = sync_once(&store, &source, 50, t0()).await;
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(source.calls(), 1);
+        let lock = store.try_sync_lock().await.unwrap();
+        assert!(lock.is_some());
     }
 }

@@ -108,7 +108,8 @@ pub async fn serve(
     }
     .await;
 
-    // Stop the sync loop however serving ended, and wait for the cycle in progress.
+    // Stop the sync loop however serving ended. A running cycle is aborted: its apply
+    // transaction rolls back and the lock connection is closed, which releases the lock.
     shutdown_token.cancel();
     if let Some(task) = sync_task
         && let Err(err) = task.await
