@@ -96,8 +96,13 @@ only the newest commit of the branch. Only one server instance should run the sy
 
 ### With a token (HTTPS)
 
-Create an access token that can read the repository (a fine-grained token with read-only
-"Contents" access on GitHub, or a deploy token on GitLab), and set:
+The server sends the token with HTTP basic authentication, using the fixed user name
+`x-access-token` and the token as the password. Use a token type that accepts any user name:
+a GitHub fine-grained personal access token with read-only "Contents" access (or a classic one),
+or a GitLab personal or project access token with the `read_repository` scope. Tokens that
+require a specific user name, such as GitLab deploy tokens, do not work with this setting; use
+[SSH with a deploy key](#with-an-ssh-key) for those. Fetching over HTTPS with a token has not
+been tested end to end. Then set:
 
 ```
 CERBRIX_GITOPS__ENABLED=true
@@ -107,7 +112,7 @@ CERBRIX_GITOPS__TOKEN=the-token
 
 The URL must not contain a user name or password; the token has its own setting. The token is
 never written to the log or the database. `deploy/server.env` is not committed, keep it private.
-A public repository needs no token.
+For a public repository, leave `CERBRIX_GITOPS__TOKEN` out: an empty value is rejected and the server does not start.
 
 ### With an SSH key
 
