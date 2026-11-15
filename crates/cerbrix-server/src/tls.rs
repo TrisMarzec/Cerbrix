@@ -108,8 +108,10 @@ pub async fn serve(
     }
     .await;
 
-    // Stop the sync loop however serving ended. A running cycle is aborted: its apply
-    // transaction rolls back and the lock connection is closed, which releases the lock.
+    // Stop the sync loop however serving ended. A running cycle is aborted and the loop
+    // waits for it to be dropped before it returns: its apply transaction rolls back and
+    // the lock connection is closed, which releases the lock (PostgreSQL does that
+    // shortly after the connection closes).
     shutdown_token.cancel();
     if let Some(task) = sync_task
         && let Err(err) = task.await

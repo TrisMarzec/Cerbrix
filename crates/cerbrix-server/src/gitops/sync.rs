@@ -205,19 +205,22 @@ async fn run_loop_every(
         }
 
         // A separate task, so that a panic in one cycle is caught and logged.
-        let task = tokio::spawn({
+        let mut task = tokio::spawn({
             let store = store.clone();
             let source = Arc::clone(&source);
             let max = max_host_removal_percent;
             async move { sync_once(&store, source.as_ref(), max, OffsetDateTime::now_utc()).await }
         });
-        let abort = task.abort_handle();
         let joined = tokio::select! {
             () = shutdown.cancelled() => {
-                abort.abort();
+                task.abort();
+                // Wait until the aborted cycle is gone, so that its transaction and its
+                // lock connection are dropped before the loop returns. The result is the
+                // cancellation (or the cycle's own result if it had just finished).
+                let _ = task.await;
                 break;
             }
-            joined = task => joined,
+            joined = &mut task => joined,
         };
 
         match joined {
@@ -542,6 +545,20 @@ mod tests {
         false
     }
 
+    /// Polls until the sync lock can be taken, for at most 5 seconds. A lock whose
+    /// connection was closed is released by PostgreSQL shortly afterwards, not at once.
+    async fn wait_for_free_lock(store: &StateStore) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(lock) = store.try_sync_lock().await.unwrap() {
+                lock.release().await.unwrap();
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn loop_stops_on_shutdown(pool: PgPool) {
         let store = StateStore::from_pool(pool);
@@ -573,6 +590,10 @@ mod tests {
         assert_eq!(
             store.sync_state().await.unwrap().active_commit.as_deref(),
             Some("commit-a")
+        );
+        assert!(
+            wait_for_free_lock(&store).await,
+            "the lock is free after the loop stopped"
         );
     }
 
@@ -616,8 +637,10 @@ mod tests {
             .expect("the loop itself did not panic");
         assert!(synced, "the cycle after the panic applied the revision");
         assert!(*source.calls.lock().unwrap() >= 2);
-        let lock = store.try_sync_lock().await.unwrap();
-        assert!(lock.is_some(), "the lock is free after the loop stopped");
+        assert!(
+            wait_for_free_lock(&store).await,
+            "the lock is free after the loop stopped"
+        );
     }
 
     /// Makes every later apply fail inside its transaction: the apply writes the
