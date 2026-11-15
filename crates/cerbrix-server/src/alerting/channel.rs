@@ -165,7 +165,8 @@ impl Channel for SmtpChannel {
 
     async fn send(&self, to: &str, notification: &Notification) -> Result<(), ChannelError> {
         let message = self.build_message(to, notification)?;
-        // The transport's own timeout covers single steps; this bounds the whole send.
+        // lettre's own timeout (tokio) covers only the TCP connect, not TLS or the SMTP
+        // dialogue; this outer timeout is what bounds the whole send. Do not remove it.
         match tokio::time::timeout(self.timeout, self.transport.send(message)).await {
             Err(_) => Err(ChannelError::Retryable(format!(
                 "timed out after {} s",
@@ -174,7 +175,8 @@ impl Channel for SmtpChannel {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(e)) => {
                 let text = self.describe(&e.to_string());
-                if e.is_permanent() {
+                let status = e.status().and_then(|c| c.to_string().parse::<u16>().ok());
+                if is_permanent_failure(e.is_permanent(), status) {
                     Err(ChannelError::Permanent(text))
                 } else {
                     // Transient answers, timeouts, connection and TLS errors.
@@ -185,11 +187,22 @@ impl Channel for SmtpChannel {
     }
 }
 
-/// Error text safe to store and log: secrets removed, control characters replaced by
-/// spaces, at most 300 characters.
+/// Whether a failed send is permanent: a 5xx answer, except the authentication answers
+/// (530, 534, 535, 538). A wrong or expired SMTP password is a problem of the setup, not
+/// of one message, so it must not fail every notification for good.
+fn is_permanent_failure(permanent: bool, status: Option<u16>) -> bool {
+    permanent && !matches!(status, Some(530 | 534 | 535 | 538))
+}
+
+/// Error text safe to store and log: control characters replaced by spaces, at most 300
+/// characters. The text comes from lettre's `Display`, which never contains credentials;
+/// removing `secrets` (longest first, so a password containing the user name is removed
+/// whole) is a second line of defence against a server that echoes them.
 fn describe(text: &str, secrets: &[&str]) -> String {
+    let mut sorted: Vec<&str> = secrets.iter().copied().filter(|s| !s.is_empty()).collect();
+    sorted.sort_by_key(|s| std::cmp::Reverse(s.len()));
     let mut text = text.to_owned();
-    for secret in secrets.iter().filter(|s| !s.is_empty()) {
+    for secret in sorted {
         text = text.replace(secret, "<redacted>");
     }
     text.chars()
@@ -594,5 +607,41 @@ mod tests {
         assert_eq!(describe(&long, &[]).chars().count(), 300);
         let text = describe("auth failed for bob with hunter2", &["hunter2", "bob"]);
         assert!(!text.contains("hunter2") && !text.contains("bob"), "{text}");
+    }
+
+    #[test]
+    fn password_containing_the_username_is_removed_whole() {
+        let text = describe(
+            "535 bad login alerts alerts2026! end",
+            &["alerts", "alerts2026!"],
+        );
+        assert!(!text.contains("2026") && !text.contains("alerts"), "{text}");
+    }
+
+    #[test]
+    fn classification_of_failures() {
+        for code in [530, 534, 535, 538, 421, 450, 451] {
+            let permanent = code >= 500;
+            assert!(!is_permanent_failure(permanent, Some(code)), "{code}");
+        }
+        for code in [550, 552, 553, 554] {
+            assert!(is_permanent_failure(true, Some(code)), "{code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_failure_is_retryable() {
+        let script = Script {
+            mail: "535 5.7.8 authentication failed",
+            ..Script::default()
+        };
+        let (addr, server) = smtp_server(vec![script]).await;
+        let channel = SmtpChannel::new(&config(addr)).unwrap();
+        let result = channel.send(TO, &notification()).await;
+        assert!(
+            matches!(&result, Err(ChannelError::Retryable(t)) if t.contains("535")),
+            "{result:?}"
+        );
+        finished(server).await;
     }
 }
