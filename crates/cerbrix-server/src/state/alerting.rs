@@ -3,13 +3,13 @@
 use std::collections::BTreeMap;
 
 use cerbrix_common::config::Severity;
-use cerbrix_common::{NotificationFile, TriggerExpr, parse_trigger};
+use cerbrix_common::{NotificationFile, Selector, TriggerExpr, parse_trigger};
 use sqlx::types::Json;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{StateError, StateStore};
-use crate::alerting::nodata::Seen;
+use crate::alerting::nodata::{Seen, item_nodata_selectors, selector_matches};
 use crate::alerting::{
     Evaluation, EventKind, Notification, OpenProblem, Params, ResolveProblem, TriggerState,
     instance_key, recipients,
@@ -233,7 +233,6 @@ enum Action<'a> {
     Resolve(&'a ResolveProblem),
 }
 
-/// The notification rules in the database; a document that does not parse is skipped.
 /// Queues a `resolved` mail for each problem: to exactly those who were told about its
 /// start, created and due at `at`. Safe to repeat.
 pub(super) async fn queue_resolved_mail(
@@ -308,6 +307,39 @@ pub(super) async fn delete_trigger_states(
     Ok(())
 }
 
+/// The notification rules in the database; a document that does not parse is skipped.
+/// Deletes the `series_seen` rows of `host_ids` that no selector of `watched` (host and
+/// selector of an item-level no-data trigger) matches: equal key, and every parameter of the
+/// selector present in the row's parameters with the same value. A host without such a
+/// trigger keeps no rows.
+pub(super) async fn delete_unwatched_series(
+    tx: &mut sqlx::PgConnection,
+    host_ids: &[Uuid],
+    watched: &[(Uuid, Selector)],
+) -> Result<(), StateError> {
+    let mut hosts = Vec::with_capacity(watched.len());
+    let mut keys = Vec::with_capacity(watched.len());
+    let mut params = Vec::with_capacity(watched.len());
+    for (host, selector) in watched {
+        hosts.push(*host);
+        keys.push(selector.key.clone());
+        params.push(serde_json::to_value(&selector.params).map_err(encode_err)?);
+    }
+    sqlx::query(
+        "DELETE FROM series_seen s WHERE s.host_id = ANY($1) AND NOT EXISTS ( \
+             SELECT 1 FROM UNNEST($2::uuid[], $3::text[], $4::jsonb[]) AS w(h, k, p) \
+             WHERE w.h = s.host_id AND w.k = s.item_key AND s.params @> w.p)",
+    )
+    .bind(host_ids)
+    .bind(&hosts)
+    .bind(&keys)
+    .bind(&params)
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
+/// The notification rules in the database; a document that does not parse is skipped.
 async fn load_rules(tx: &mut sqlx::PgConnection) -> Result<Vec<NotificationFile>, StateError> {
     let docs: Vec<(String, serde_json::Value)> = sqlx::query_as(
         "SELECT id, body FROM config_documents WHERE kind = 'notification' ORDER BY id",
@@ -481,15 +513,45 @@ impl StateStore {
     /// Records that values arrived at `now`: sets `hosts.last_seen_at` and upserts
     /// `series_seen` for the given item keys and parameter maps. Neither value ever moves
     /// backwards, so concurrent calls from several instances cannot undo each other.
+    ///
+    /// An inactive or unknown host is not touched. Only series that an item-level no-data
+    /// trigger of the host's configuration watches at this moment are recorded (under the host
+    /// row lock): a request that was evaluated against a configuration that a sync has replaced
+    /// since cannot bring back a row that the sync deleted.
     pub async fn touch_seen(
         &self,
         host_id: Uuid,
         now: OffsetDateTime,
         series: &[(String, Params)],
     ) -> Result<(), StateError> {
+        let mut tx = self.pool.begin().await?;
+        let config: Option<Option<serde_json::Value>> = sqlx::query_scalar(
+            "UPDATE hosts SET last_seen_at = GREATEST(COALESCE(last_seen_at, $2), $2) \
+             WHERE id = $1 AND active RETURNING config",
+        )
+        .bind(host_id)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(config) = config else {
+            return Ok(());
+        };
+        let selectors = match (series.is_empty(), config) {
+            (true, _) | (false, None) => Vec::new(),
+            (false, Some(config)) => match serde_json::from_value::<EffectiveHost>(config) {
+                Ok(host) => item_nodata_selectors(&host),
+                Err(err) => {
+                    tracing::error!(%host_id, %err, "unreadable host configuration; series arrivals not recorded");
+                    Vec::new()
+                }
+            },
+        };
+
         let mut unique: BTreeMap<(&str, String), &Params> = BTreeMap::new();
         for (key, params) in series {
-            unique.insert((key.as_str(), instance_key(params)), params);
+            if selectors.iter().any(|s| selector_matches(s, key, params)) {
+                unique.insert((key.as_str(), instance_key(params)), params);
+            }
         }
         let mut keys = Vec::with_capacity(unique.len());
         let mut instances = Vec::with_capacity(unique.len());
@@ -500,15 +562,6 @@ impl StateStore {
             params.push(serde_json::to_value(p).map_err(encode_err)?);
         }
 
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "UPDATE hosts SET last_seen_at = GREATEST(COALESCE(last_seen_at, $2), $2) \
-             WHERE id = $1",
-        )
-        .bind(host_id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
         if !keys.is_empty() {
             sqlx::query(
                 "INSERT INTO series_seen (host_id, item_key, instance, params, last_arrival) \
@@ -1508,14 +1561,60 @@ mod tests {
         );
     }
 
+    /// The example configuration plus, on web-01, the item-level no-data triggers
+    /// "Disk silent" (every mount), "Cpu silent" and the comparison trigger "Cpu high".
+    async fn setup_watching(pool: PgPool) -> (StateStore, Uuid) {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/config-repo");
+        let mut compiled = compile(&read_tree(&dir, "c1").unwrap()).unwrap();
+        let web = compiled
+            .hosts
+            .iter_mut()
+            .find(|h| h.name == "web-01")
+            .unwrap();
+        for (name, expression) in [
+            ("Disk silent", "disk.used_percent no data for 5m"),
+            ("Cpu silent", "cpu.usage no data for 5m"),
+            ("Cpu high", "cpu.usage > 90"),
+        ] {
+            web.effective
+                .triggers
+                .push(crate::gitops::EffectiveTrigger {
+                    name: name.to_owned(),
+                    expression: expression.to_owned(),
+                    severity: Severity::High,
+                    origin: "host".to_owned(),
+                });
+        }
+        let store = StateStore::from_pool(pool);
+        store
+            .apply_config("c1", &compiled, at(T0_MS), 50, false)
+            .await
+            .unwrap();
+        let host = store.host_by_name("web-01").await.unwrap().unwrap();
+        (store, host.id)
+    }
+
+    fn mount(m: &str) -> Params {
+        Params::from([("mount".to_owned(), m.to_owned())])
+    }
+
+    async fn series_rows(pool: &PgPool) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT item_key, instance FROM series_seen ORDER BY item_key, instance")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn touch_seen_upserts_and_never_moves_back(pool: PgPool) {
-        let (store, host) = setup(pool.clone()).await;
-        let mount = |m: &str| Params::from([("mount".to_owned(), m.to_owned())]);
+        let (store, host) = setup_watching(pool.clone()).await;
         let series = vec![
             ("disk.used_percent".to_owned(), mount("/")),
             ("disk.used_percent".to_owned(), mount("/")),
             ("cpu.usage".to_owned(), Params::new()),
+            // No no-data trigger watches it: not recorded.
+            ("memory.used_percent".to_owned(), Params::new()),
         ];
         store.touch_seen(host, at(T0_MS), &series).await.unwrap();
         store
@@ -1553,6 +1652,43 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(seen, Some(at(T0_MS)));
+
+        // The configuration without the item-level no-data triggers: the sync deletes the
+        // rows, and nothing is recorded per series any more.
+        let (plain, plain_host) = setup(pool.clone()).await;
+        assert!(series_rows(&pool).await.is_empty());
+        plain
+            .touch_seen(plain_host, at(T0_MS + 1000), &series)
+            .await
+            .unwrap();
+        assert!(series_rows(&pool).await.is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn touch_seen_leaves_an_inactive_host_alone(pool: PgPool) {
+        let (store, host) = setup_watching(pool.clone()).await;
+        store.set_host_active(host, false).await.unwrap();
+        store
+            .touch_seen(
+                host,
+                at(T0_MS),
+                &[("disk.used_percent".to_owned(), mount("/"))],
+            )
+            .await
+            .unwrap();
+        let seen: Option<OffsetDateTime> =
+            sqlx::query_scalar("SELECT last_seen_at FROM hosts WHERE id = $1")
+                .bind(host)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(seen, None);
+        assert!(series_rows(&pool).await.is_empty());
+        // An unknown host is not an error either.
+        store
+            .touch_seen(Uuid::new_v4(), at(T0_MS), &[])
+            .await
+            .unwrap();
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1661,7 +1797,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn seen_returns_host_and_series_arrivals(pool: PgPool) {
-        let (store, host) = setup(pool).await;
+        let (store, host) = setup_watching(pool).await;
         assert_eq!(store.seen(host).await.unwrap(), Seen::default());
         let mount = Params::from([("mount".to_owned(), "/".to_owned())]);
         store

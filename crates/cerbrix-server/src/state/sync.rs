@@ -10,8 +10,9 @@ use sqlx::{Postgres, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::alerting::{close_open_problems, delete_trigger_states};
+use super::alerting::{close_open_problems, delete_trigger_states, delete_unwatched_series};
 use super::{StateError, StateStore};
+use crate::alerting::nodata::item_nodata_selectors;
 use crate::gitops::{Compiled, EffectiveHost, SyncIssue};
 
 /// Advisory lock key of the Git sync ("CBRX" "SYNC").
@@ -195,8 +196,12 @@ fn watches(expression: &str) -> Option<Watches> {
 /// stored states of triggers that are gone, and of triggers that now watch something else
 /// (another kind or selector), because no evaluation would visit their old instances again.
 /// A trigger that only changed its threshold, operator, hold time, window or severity keeps
-/// both. A stored expression that no longer parses counts as changed. Returns the number of
-/// problems closed.
+/// both. A stored expression that no longer parses counts as changed. A stored configuration
+/// that cannot be read at all is logged, and then only the triggers whose name is gone are
+/// closed. Also deletes the arrivals in `series_seen` that no item-level no-data trigger of the
+/// new revision watches, so that a trigger that is removed and later restored starts from the
+/// first value that arrives after the restore instead of from a stale arrival. Returns the
+/// number of problems closed.
 async fn close_unmonitored(
     tx: &mut sqlx::PgConnection,
     stored: &BTreeMap<&str, &HostSnapshot>,
@@ -206,28 +211,45 @@ async fn close_unmonitored(
 ) -> Result<usize, StateError> {
     let mut host_ids = Vec::new();
     let mut keep = Vec::new();
+    let mut watched = Vec::new();
     for host in &compiled.hosts {
         let Some(old) = stored.get(host.name.as_str()).filter(|h| h.2) else {
             continue;
         };
         host_ids.push(old.0);
-        // `None`: a host without configuration (it had no triggers) or one that cannot be read.
+        watched.extend(
+            item_nodata_selectors(&host.effective)
+                .into_iter()
+                .map(|s| (old.0, s)),
+        );
+        // `None`: a stored configuration that cannot be read. A host without configuration
+        // had no triggers.
         let old_triggers: Option<BTreeMap<String, String>> = match &old.6 {
             None => Some(BTreeMap::new()),
-            Some(value) => serde_json::from_value::<EffectiveHost>(value.clone())
-                .ok()
-                .map(|h| {
+            Some(value) => match serde_json::from_value::<EffectiveHost>(value.clone()) {
+                Ok(h) => Some(
                     h.triggers
                         .into_iter()
                         .map(|t| (t.name, t.expression))
-                        .collect()
-                }),
+                        .collect(),
+                ),
+                Err(err) => {
+                    tracing::warn!(
+                        host = %host.name,
+                        %err,
+                        "the stored configuration of the host cannot be read; problems of \
+                         triggers that still exist by name are kept"
+                    );
+                    None
+                }
+            },
         };
         for trigger in &host.effective.triggers {
-            let unchanged = match old_triggers.as_ref().map(|t| t.get(&trigger.name)) {
-                None => false,
-                Some(None) => true,
-                Some(Some(old_expr)) => {
+            // A trigger that is new by name has nothing to close; one whose old definition
+            // cannot be read is kept by its name.
+            let unchanged = match old_triggers.as_ref().and_then(|t| t.get(&trigger.name)) {
+                None => true,
+                Some(old_expr) => {
                     let new = watches(&trigger.expression);
                     new.is_some() && watches(old_expr) == new
                 }
@@ -243,6 +265,7 @@ async fn close_unmonitored(
     let closed =
         close_open_problems(tx, &host_ids, &keep, "trigger_removed", now, queue_mail).await?;
     delete_trigger_states(tx, &host_ids, &keep).await?;
+    delete_unwatched_series(tx, &host_ids, &watched).await?;
     Ok(closed)
 }
 
@@ -1081,7 +1104,10 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn removed_host_closes_its_problems(pool: PgPool) {
         let store = StateStore::from_pool(pool.clone());
-        let cpu = [("CPU", "cpu.usage > 90")];
+        let cpu = [
+            ("CPU", "cpu.usage > 90"),
+            ("CPU silent", "cpu.usage no data for 5m"),
+        ];
         let both = world(vec![host_with("db-01", &cpu), host_with("web-01", &cpu)]);
         store
             .apply_config("c1", &both, t0(), 100, true)
@@ -1392,7 +1418,10 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn readded_host_starts_clean(pool: PgPool) {
         let store = StateStore::from_pool(pool.clone());
-        let cpu = [("CPU", "cpu.usage > 90")];
+        let cpu = [
+            ("CPU", "cpu.usage > 90"),
+            ("CPU silent", "cpu.usage no data for 5m"),
+        ];
         let with = world(vec![host_with("web-01", &cpu)]);
         store
             .apply_config("c1", &with, t0(), 100, true)
@@ -1446,6 +1475,173 @@ mod tests {
         let rows = problems(&pool).await;
         assert_eq!((rows.len(), rows[0].2, rows[0].3.clone()), (1, None, None));
         assert_eq!(count(&pool, "trigger_states").await, 1);
+        assert!(resolved_mail(&pool).await.is_empty());
+    }
+
+    async fn series_of(pool: &PgPool) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "SELECT h.name, s.item_key, s.instance FROM series_seen s \
+             JOIN hosts h ON h.id = s.host_id ORDER BY 1, 2, 3",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn mount(m: &str) -> Params {
+        Params::from([("mount".to_owned(), m.to_owned())])
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_seen_rows_of_unwatched_series_are_deleted_on_apply(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let disks = ("Disks silent", "disk.used_percent no data for 15m");
+        let cpu = ("CPU silent", "cpu.usage no data for 5m");
+        let root = ("Root silent", "disk.used_percent{mount=/} no data for 15m");
+        let host_level = ("Agent silent", "no data for 3m");
+        let apply = |commit: &'static str, web: Vec<(&'static str, &'static str)>| {
+            let store = store.clone();
+            async move {
+                let compiled = world(vec![
+                    host_with("db-01", &[disks, cpu, host_level]),
+                    host_with("web-01", &web),
+                ]);
+                store
+                    .apply_config(commit, &compiled, later(), 100, false)
+                    .await
+                    .unwrap();
+            }
+        };
+        apply("c1", vec![disks, cpu, host_level]).await;
+        let all = [
+            ("disk.used_percent".to_owned(), mount("/")),
+            ("disk.used_percent".to_owned(), mount("/data")),
+            ("cpu.usage".to_owned(), Params::new()),
+        ];
+        for name in ["db-01", "web-01"] {
+            let id = id_of(&store, name).await;
+            store.touch_seen(id, t0(), &all).await.unwrap();
+        }
+        assert_eq!(series_of(&pool).await.len(), 6);
+
+        // web-01 narrows its disk trigger to `/` and drops the cpu one; db-01 is unchanged.
+        apply("c2", vec![root, host_level]).await;
+        let web =
+            |key: &str, instance: &str| ("web-01".to_owned(), key.to_owned(), instance.to_owned());
+        let db =
+            |key: &str, instance: &str| ("db-01".to_owned(), key.to_owned(), instance.to_owned());
+        assert_eq!(
+            series_of(&pool).await,
+            [
+                db("cpu.usage", ""),
+                db("disk.used_percent", "mount=/"),
+                db("disk.used_percent", "mount=/data"),
+                web("disk.used_percent", "mount=/"),
+            ]
+        );
+        // Only the host-level trigger left: the host keeps no rows.
+        apply("c3", vec![host_level]).await;
+        assert_eq!(series_of(&pool).await.len(), 3);
+        assert!(series_of(&pool).await.iter().all(|r| r.0 == "db-01"));
+        // The host's own arrival is not touched.
+        assert!(
+            last_seen(&pool, id_of(&store, "web-01").await)
+                .await
+                .is_some()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn unreadable_stored_configuration_keeps_triggers_by_name(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let both = [
+            ("CPU", "cpu.usage > 90"),
+            ("Memory", "memory.used_percent > 90"),
+        ];
+        store
+            .apply_config(
+                "c1",
+                &world(vec![host_with("web-01", &both)]),
+                t0(),
+                100,
+                true,
+            )
+            .await
+            .unwrap();
+        let id = id_of(&store, "web-01").await;
+        feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+        feed(&store, id, "memory.used_percent", &[], 95.0, T0_MS).await;
+        // A stored configuration this version cannot read (as after a format change).
+        sqlx::query("UPDATE hosts SET config = '{\"unexpected\": true}'::jsonb WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // The new revision keeps CPU (now with another threshold) and drops Memory.
+        let applied = store
+            .apply_config(
+                "c2",
+                &world(vec![host_with("web-01", &[("CPU", "cpu.usage > 95")])]),
+                later(),
+                100,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.problems_closed, 1);
+        let rows = problems(&pool).await;
+        let by_name: BTreeMap<&str, (Option<OffsetDateTime>, Option<&str>)> = rows
+            .iter()
+            .map(|r| (r.1.as_str(), (r.2, r.3.as_deref())))
+            .collect();
+        assert_eq!(by_name["CPU"], (None, None));
+        assert_eq!(by_name["Memory"], (Some(later()), Some("trigger_removed")));
+        let states: Vec<String> =
+            sqlx::query_scalar("SELECT trigger_name FROM trigger_states ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(states, ["CPU"]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn failing_apply_leaves_open_problems_open(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let cpu = [
+            ("CPU", "cpu.usage > 90"),
+            ("CPU silent", "cpu.usage no data for 5m"),
+        ];
+        store
+            .apply_config(
+                "c1",
+                &world(vec![host_with("web-01", &cpu)]),
+                t0(),
+                100,
+                true,
+            )
+            .await
+            .unwrap();
+        let id = id_of(&store, "web-01").await;
+        feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+        store
+            .touch_seen(id, t0(), &[("cpu.usage".to_owned(), Params::new())])
+            .await
+            .unwrap();
+        // A revision that drops both triggers, but fails later in the same apply (as in
+        // `apply_is_atomic`): nothing of it may stay.
+        let mut broken = world(vec![host_with("web-01", &[])]);
+        let dup = broken.documents[0].clone();
+        broken.documents.push(dup);
+        let err = store
+            .apply_config("c2", &broken, later(), 100, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApplyError::State(_)));
+        let rows = problems(&pool).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].2, rows[0].3.as_deref()), (None, None));
+        assert_eq!(count(&pool, "trigger_states").await, 1);
+        assert_eq!(count(&pool, "series_seen").await, 1);
         assert!(resolved_mail(&pool).await.is_empty());
     }
 }

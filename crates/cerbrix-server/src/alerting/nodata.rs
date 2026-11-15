@@ -7,8 +7,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cerbrix_common::{Interval, Selector, TriggerExpr};
+use cerbrix_common::{Interval, Selector, TriggerExpr, parse_trigger};
 use time::OffsetDateTime;
+use tokio::task::JoinError;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -16,6 +17,7 @@ use super::{
     ActiveTrigger, Evaluation, OpenProblem, Params, ResolveProblem, TriggerState, active_triggers,
     instance_key,
 };
+use crate::gitops::EffectiveHost;
 use crate::state::{StateError, StateStore};
 
 /// When values last arrived for one host, as stored by `touch_seen`.
@@ -39,7 +41,9 @@ fn window_text(window: Duration) -> String {
         .map_or_else(|_| format!("{secs}s"), |i| i.to_string())
 }
 
-fn matches(selector: &Selector, key: &str, params: &Params) -> bool {
+/// Whether the series `key` with `params` is one that `selector` watches: the key is equal
+/// and every parameter of the selector is present with the same value.
+pub(crate) fn selector_matches(selector: &Selector, key: &str, params: &Params) -> bool {
     selector.key == key
         && selector
             .params
@@ -47,15 +51,32 @@ fn matches(selector: &Selector, key: &str, params: &Params) -> bool {
             .all(|(k, want)| params.get(k) == Some(want))
 }
 
+/// The selectors of the host's item-level no-data triggers: the series whose arrival is
+/// tracked in `series_seen`. A trigger that does not parse watches nothing.
+pub(crate) fn item_nodata_selectors(host: &EffectiveHost) -> Vec<Selector> {
+    host.triggers
+        .iter()
+        .filter_map(|t| match parse_trigger(&t.expression) {
+            Ok(TriggerExpr::NoData {
+                selector: Some(selector),
+                ..
+            }) => Some(selector),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Decides which no-data problems open and which resolve.
 ///
 /// Only `TriggerExpr::NoData` triggers are evaluated. A host or series counts as silent
 /// since the later of its last arrival and `baseline_ms` (the end of the server's own last
-/// downtime). An item-level trigger fires only while the host as a whole still reports; when
-/// the host is silent only the host-level trigger fires, and an item problem that is already
-/// open stays as it is. A host that never sent a value produces nothing. The result is
-/// ordered by trigger name, then instance. The function never panics; all time arithmetic
-/// saturates.
+/// downtime); the baseline only postpones opening, resolving looks at the real arrival. An
+/// item-level trigger fires only for a series that was already silent for its window when the
+/// host last reported, and only while the host as a whole is not silent: an agent outage, in
+/// which everything stops at once, never yields item problems, whatever the windows. An item
+/// problem that is already open stays as it is while the host is silent. A host that never
+/// sent a value produces nothing. The result is ordered by trigger name, then instance. The
+/// function never panics; all time arithmetic saturates.
 pub fn evaluate_nodata(
     triggers: &[ActiveTrigger],
     states: &[TriggerState],
@@ -115,7 +136,7 @@ pub fn evaluate_nodata(
         let mut series: Vec<(String, i64)> = seen
             .series
             .iter()
-            .filter(|(key, params, _)| matches(selector, key, params))
+            .filter(|(key, params, _)| selector_matches(selector, key, params))
             .map(|(_, params, at)| (instance_key(params), *at))
             .collect();
         series.sort();
@@ -125,10 +146,16 @@ pub fn evaluate_nodata(
                 summary.push_str(" on ");
                 summary.push_str(&instance);
             }
-            // While the host as a whole is silent the host-level trigger speaks for it:
-            // no item problem opens, and one that is open stays.
-            let item_silent = silent(arrived.max(baseline));
-            let fires = item_silent && !host_silent;
+            // "The host reports, but not this item": the series was already silent for the
+            // window when the host last reported. During an agent outage `last_seen` stays
+            // where it was, so the outage alone can never make an item trigger fire, whatever
+            // its window compared with the host-level one. While the host as a whole is
+            // silent the host-level trigger speaks for it: no item problem opens, and one that
+            // is open stays.
+            let item_since = arrived.max(baseline);
+            let item_silent = silent(item_since);
+            let silent_while_host_reported = last_seen.saturating_sub(item_since) >= window_ms;
+            let fires = item_silent && silent_while_host_reported && !host_silent;
             // The baseline only postpones opening: an open problem resolves only when a
             // value really arrived again.
             let resolves = !silent(arrived) && !silent(last_seen);
@@ -181,14 +208,7 @@ fn to_ms(t: OffsetDateTime) -> i64 {
 const HEARTBEAT_EVERY_HOSTS: usize = 100;
 
 /// One no-data check of every host that has a no-data trigger; returns how many hosts
-/// were checked.
-///
-/// Records the heartbeat first, which moves the baseline after a gap in the server's own
-/// operation and, with `first_cycle` (the first check of a server process), always.
-/// Then it evaluates each host in its own transaction, refreshing the heartbeat every 100
-/// hosts and at the end so that a long cycle is not mistaken for a gap. A host that fails is
-/// logged and skipped; only a failing heartbeat or host listing is an error. Safe to run on
-/// several instances at once: `evaluate_host` locks the host and an open problem is unique.
+/// were checked. [`begin_check`] followed by [`check_hosts`].
 pub async fn check_once(
     store: &StateStore,
     queue_mail: bool,
@@ -196,10 +216,35 @@ pub async fn check_once(
     first_cycle: bool,
     now: OffsetDateTime,
 ) -> Result<usize, StateError> {
-    let baseline_ms = store
+    let baseline_ms = begin_check(store, check_every, first_cycle, now).await?;
+    check_hosts(store, queue_mail, baseline_ms, now).await
+}
+
+/// The first step of a check: records the heartbeat, which moves the baseline after a gap in
+/// the server's own operation and, with `first_cycle` (the first check of a server process),
+/// always. Returns the baseline in Unix milliseconds.
+pub async fn begin_check(
+    store: &StateStore,
+    check_every: Duration,
+    first_cycle: bool,
+    now: OffsetDateTime,
+) -> Result<Option<i64>, StateError> {
+    Ok(store
         .alerting_heartbeat(now, check_every, first_cycle)
         .await?
-        .map(to_ms);
+        .map(to_ms))
+}
+
+/// The second step of a check: evaluates each host in its own transaction, refreshing the
+/// heartbeat every 100 hosts and at the end so that a long cycle is not mistaken for a gap. A
+/// host that fails is logged and skipped; only a failing host listing is an error. Safe to run
+/// on several instances at once: `evaluate_host` locks the host and an open problem is unique.
+pub async fn check_hosts(
+    store: &StateStore,
+    queue_mail: bool,
+    baseline_ms: Option<i64>,
+    now: OffsetDateTime,
+) -> Result<usize, StateError> {
     let now_ms = to_ms(now);
     let hosts = store.hosts_with_nodata_triggers().await?;
     let mut checked = 0;
@@ -259,7 +304,9 @@ pub async fn run_nodata_loop(
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let store = Arc::new(store);
     // The first check of this process moves the baseline whatever the stored heartbeat
-    // says: agents have not reconnected yet, so silence counts from this start.
+    // says: agents have not reconnected yet, so silence counts from this start. Once that
+    // step succeeded it is done, even if the rest of the cycle fails or panics: forcing the
+    // baseline again on every cycle would keep any problem from ever opening.
     let mut first_cycle = true;
 
     loop {
@@ -267,37 +314,64 @@ pub async fn run_nodata_loop(
             () = shutdown.cancelled() => break,
             _ = ticker.tick() => {}
         }
+        let now = OffsetDateTime::now_utc();
 
-        // A separate task, so that a panic in one check is caught and logged.
-        let mut task = tokio::spawn({
+        let begun = {
             let store = Arc::clone(&store);
             let first = first_cycle;
-            async move {
-                check_once(
-                    &store,
-                    queue_mail,
-                    check_every,
-                    first,
-                    OffsetDateTime::now_utc(),
-                )
-                .await
-            }
-        });
-        let joined = tokio::select! {
-            () = shutdown.cancelled() => {
-                // Wait until the aborted check is gone, so that its transaction is
-                // dropped (rolled back) before the loop returns.
-                task.abort();
-                let _ = task.await;
-                break;
-            }
-            joined = &mut task => joined,
+            run_task(&shutdown, async move {
+                begin_check(&store, check_every, first, now).await
+            })
+            .await
         };
-        match joined {
-            Ok(Ok(_)) => first_cycle = false,
-            Ok(Err(err)) => tracing::error!(%err, "no-data check failed"),
-            Err(err) => tracing::error!(%err, "no-data check panicked"),
+        let baseline_ms = match begun {
+            None => break,
+            Some(Ok(Ok(baseline_ms))) => {
+                first_cycle = false;
+                baseline_ms
+            }
+            Some(Ok(Err(err))) => {
+                tracing::error!(%err, "no-data check failed: cannot record the heartbeat");
+                continue;
+            }
+            Some(Err(err)) => {
+                tracing::error!(%err, "no-data check panicked");
+                continue;
+            }
+        };
+
+        let checked = {
+            let store = Arc::clone(&store);
+            run_task(&shutdown, async move {
+                check_hosts(&store, queue_mail, baseline_ms, now).await
+            })
+            .await
+        };
+        match checked {
+            None => break,
+            Some(Ok(Ok(_))) => {}
+            Some(Ok(Err(err))) => tracing::error!(%err, "no-data check failed"),
+            Some(Err(err)) => tracing::error!(%err, "no-data check panicked"),
         }
+    }
+}
+
+/// Runs `step` in a separate task, so that a panic in it is caught and returned; `None` when
+/// `shutdown` was cancelled first. The aborted task is awaited, so that its transaction is
+/// dropped (rolled back) before this returns.
+async fn run_task<T, F>(shutdown: &CancellationToken, step: F) -> Option<Result<T, JoinError>>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    let mut task = tokio::spawn(step);
+    tokio::select! {
+        () = shutdown.cancelled() => {
+            task.abort();
+            let _ = task.await;
+            None
+        }
+        joined = &mut task => Some(joined),
     }
 }
 
@@ -491,6 +565,82 @@ mod tests {
         let e = run(&t, &[], &s, None);
         assert_eq!(e.open.len(), 1);
         assert_eq!(e.open[0].trigger, "Host silent");
+    }
+
+    #[test]
+    fn agent_outage_is_one_problem_whatever_the_windows() {
+        let host10 = trig("Host silent", "no data for 10m", Severity::Critical);
+        let disk2 = trig(
+            "Disk silent",
+            "disk.used_percent no data for 2m",
+            Severity::Warning,
+        );
+        let host3 = host_trigger();
+        let disk10 = trig(
+            "Disk silent",
+            "disk.used_percent no data for 10m",
+            Severity::Warning,
+        );
+        // Everything stops at T, the disk value having arrived a little before the host's last
+        // value or at the same moment. Checked every minute from T to T + 20 min, the item
+        // trigger never fires, whichever window is the larger.
+        for (triggers, host_window) in [([&host10, &disk2], 10), ([&host3, &disk10], 3)] {
+            let t: Vec<ActiveTrigger> = triggers.into_iter().cloned().collect();
+            for disk_before_host_ms in [0, 30_000, 90_000] {
+                let mut states: Vec<TriggerState> = Vec::new();
+                for minutes in 0..=20 {
+                    let since_stop = minutes * MIN;
+                    let s = seen(
+                        since_stop,
+                        vec![disk("/", since_stop + disk_before_host_ms)],
+                    );
+                    let e = run(&t, &states, &s, None);
+                    assert!(
+                        e.open.iter().all(|o| o.trigger == "Host silent"),
+                        "item problem at T+{minutes}m: {e:?}"
+                    );
+                    if minutes == host_window {
+                        assert_eq!(e.open.len(), 1, "host problem at T+{minutes}m");
+                    } else {
+                        assert!(e.open.is_empty(), "nothing new at T+{minutes}m: {e:?}");
+                    }
+                    states.extend(e.states);
+                }
+            }
+        }
+
+        // The case of the specification: item window 2 min, host window 10 min.
+        let t = [host10.clone(), disk2.clone()];
+        let e = run(&t, &[], &seen(3 * MIN, vec![disk("/", 3 * MIN)]), None);
+        assert_eq!(e, Evaluation::default());
+        let e = run(&t, &[], &seen(10 * MIN, vec![disk("/", 10 * MIN)]), None);
+        let opened: Vec<&str> = e.open.iter().map(|o| o.trigger.as_str()).collect();
+        assert_eq!(opened, ["Host silent"]);
+    }
+
+    #[test]
+    fn item_that_stopped_before_the_host_still_alarms() {
+        let t = [host_trigger(), disk_trigger()];
+        // The disk has been silent for 6 minutes (window 5), the host reported 30 s ago.
+        let s = seen(MIN / 2, vec![disk("/", 6 * MIN)]);
+        let e = run(&t, &[], &s, None);
+        assert_eq!(e.open.len(), 1);
+        assert_eq!(e.open[0].trigger, "Disk silent");
+        assert_eq!(e.open[0].instance, "mount=/");
+        // Silent for 6 minutes, but the host's last value is only 4 minutes after the disk's:
+        // when the host last reported the disk was not silent for its window yet.
+        let s = seen(2 * MIN, vec![disk("/", 6 * MIN)]);
+        assert!(run(&t, &[], &s, None).open.is_empty());
+    }
+
+    #[test]
+    fn item_silence_counts_from_the_baseline() {
+        let t = [host_trigger(), disk_trigger()];
+        // The disk has been silent for an hour, the host reports, but the server only started
+        // 4 minutes ago: not yet. Seven minutes after the start: now it alarms.
+        let s = seen(0, vec![disk("/", 60 * MIN)]);
+        assert!(run(&t, &[], &s, Some(NOW - 4 * MIN)).open.is_empty());
+        assert_eq!(run(&t, &[], &s, Some(NOW - 7 * MIN)).open.len(), 1);
     }
 
     #[test]
@@ -702,6 +852,134 @@ mod tests {
         let all = store.problems(ProblemFilter::All, 10).await.unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].resolved_at, Some(after(60)));
+    }
+
+    /// The example configuration, with or without "Root silent"
+    /// (`disk.used_percent{mount=/} no data for 5m`) on web-01.
+    fn example_with_root_trigger(on: bool) -> crate::gitops::Compiled {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/config-repo");
+        let mut compiled = compile(&read_tree(&dir, "c1").unwrap()).unwrap();
+        if on {
+            let web = compiled
+                .hosts
+                .iter_mut()
+                .find(|h| h.name == "web-01")
+                .unwrap();
+            web.effective
+                .triggers
+                .push(crate::gitops::EffectiveTrigger {
+                    name: "Root silent".into(),
+                    expression: "disk.used_percent{mount=/} no data for 5m".into(),
+                    severity: Severity::Warning,
+                    origin: "host".into(),
+                });
+        }
+        compiled
+    }
+
+    fn root_series() -> Vec<(String, Params)> {
+        vec![("disk.used_percent".into(), mount("/"))]
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn restored_item_nodata_trigger_does_not_alarm(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        store
+            .apply_config("c1", &example_with_root_trigger(true), t0(), 50, false)
+            .await
+            .unwrap();
+        let host = store.host_by_name("web-01").await.unwrap().unwrap().id;
+        store.touch_seen(host, t0(), &root_series()).await.unwrap();
+        // The trigger is removed, and restored an hour later (a revert of the commit).
+        store
+            .apply_config(
+                "c2",
+                &example_with_root_trigger(false),
+                after(60),
+                50,
+                false,
+            )
+            .await
+            .unwrap();
+        store
+            .apply_config(
+                "c3",
+                &example_with_root_trigger(true),
+                after(3600),
+                50,
+                false,
+            )
+            .await
+            .unwrap();
+        // The host keeps reporting; nothing is known about the disk since the restore.
+        store.touch_seen(host, after(3590), &[]).await.unwrap();
+        set_heartbeat(&pool, after(3540)).await;
+        check_once(&store, false, EVERY, false, after(3600))
+            .await
+            .unwrap();
+        assert!(open_problems(&store).await.is_empty());
+
+        // A disk value arrives, then the disk stops while the host keeps reporting.
+        store
+            .touch_seen(host, after(3610), &root_series())
+            .await
+            .unwrap();
+        store.touch_seen(host, after(4010), &[]).await.unwrap();
+        set_heartbeat(&pool, after(3950)).await;
+        check_once(&store, false, EVERY, false, after(4010))
+            .await
+            .unwrap();
+        assert_eq!(
+            open_problems(&store).await,
+            [("web-01".to_owned(), "Root silent".to_owned())]
+        );
+    }
+
+    async fn heartbeat_of(pool: &PgPool) -> Option<OffsetDateTime> {
+        sqlx::query_scalar("SELECT heartbeat_at FROM alerting_state")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn failure_after_the_heartbeat_does_not_force_the_baseline_again(pool: PgPool) {
+        let (store, _) = setup(pool.clone()).await;
+        set_heartbeat(&pool, OffsetDateTime::now_utc()).await;
+        // Every cycle records its heartbeat and then fails to list the hosts.
+        sqlx::query("ALTER TABLE hosts RENAME COLUMN config TO config_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let shutdown = CancellationToken::new();
+        // Two seconds between checks: a gap (three intervals) needs a stall of six seconds.
+        let handle = tokio::spawn(run_nodata_loop(
+            store.clone(),
+            false,
+            Duration::from_secs(2),
+            shutdown.clone(),
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        // The first cycle forces the baseline to its start ...
+        let first = loop {
+            if let Some(at) = baseline_of(&pool).await {
+                break at;
+            }
+            assert!(std::time::Instant::now() < deadline, "the first check ran");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        // ... and a later cycle, whose heartbeat is newer, keeps it.
+        while heartbeat_of(&pool).await <= Some(first) {
+            assert!(std::time::Instant::now() < deadline, "a second check ran");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(baseline_of(&pool).await, Some(first));
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(30), handle)
+            .await
+            .expect("loop stops after shutdown")
+            .expect("the loop itself did not panic");
     }
 
     #[sqlx::test(migrations = "./migrations")]
