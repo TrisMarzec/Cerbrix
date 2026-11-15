@@ -509,6 +509,159 @@ fn display_rotation_too_fast() {
     assert!(has_issue(&issues, "displays/x.json", "between 5s and 1h"));
 }
 
+// Bounded work on hostile input
+
+#[test]
+fn too_many_panels_is_one_issue() {
+    let panel = r#"{"type":"problems","x":0,"y":0,"w":1,"h":1}"#;
+    let panels = vec![panel; 10_000].join(",");
+    let d = format!(r#"{{"name":"d","panels":[{panels}]}}"#);
+    let started = std::time::Instant::now();
+    let issues = issues_of(&[("dashboards/d.json", &d)]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert!(
+        has_issue(&issues, "dashboards/d.json", "10000 panels")
+            && has_issue(&issues, "dashboards/d.json", "at most 72"),
+        "{issues:?}"
+    );
+}
+
+#[test]
+fn seventy_two_panels_fit() {
+    let mut panels = Vec::new();
+    for y in 0..6 {
+        for x in 0..12 {
+            panels.push(format!(
+                r#"{{"type":"problems","x":{x},"y":{y},"w":1,"h":1}}"#
+            ));
+        }
+    }
+    let d = format!(r#"{{"name":"d","panels":[{}]}}"#, panels.join(","));
+    assert!(compile(&snap(&[("dashboards/d.json", &d)])).is_ok());
+}
+
+#[test]
+fn many_duplicate_names_stay_bounded() {
+    let files: Vec<(String, String)> = (0..2_000)
+        .map(|i| (format!("hosts/h{i:04}.json"), host_json("")))
+        .collect();
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let issues = issues_of(&refs);
+    assert!(issues.len() <= MAX_ISSUES, "{}", issues.len());
+    for issue in &issues {
+        assert!(issue.reason.len() < 1_000, "{}", issue.reason);
+        assert!(issue.reason.contains("and 1995 more"), "{}", issue.reason);
+    }
+}
+
+#[test]
+fn too_many_templates_is_one_issue() {
+    let list = vec![r#""a""#; 100_000].join(",");
+    let h = host_json(&format!(r#","templates":[{list}]"#));
+    let started = std::time::Instant::now();
+    let issues = issues_of(&[("templates/a.json", TPL_A), ("hosts/a.json", &h)]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert!(
+        has_issue(&issues, "hosts/a.json", "at most 32 templates"),
+        "{issues:?}"
+    );
+}
+
+#[test]
+fn thirty_two_templates_are_allowed() {
+    let mut files = Vec::new();
+    for i in 0..32 {
+        files.push((
+            format!("templates/t{i}.json"),
+            format!(r#"{{"template":"t{i}"}}"#),
+        ));
+    }
+    let names: Vec<String> = (0..32).map(|i| format!(r#""t{i}""#)).collect();
+    files.push((
+        "hosts/a.json".to_owned(),
+        host_json(&format!(r#","templates":[{}]"#, names.join(","))),
+    ));
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    let c = compile(&snap(&refs)).unwrap_or_else(|i| panic!("{i:#?}"));
+    assert_eq!(c.hosts[0].effective.templates.len(), 32);
+}
+
+#[test]
+fn overlap_reports_first_pair_only() {
+    let d = dashboard(
+        r#"{"type":"problems","x":0,"y":0,"w":2,"h":2},
+        {"type":"host-states","x":0,"y":0,"w":2,"h":2},
+        {"type":"problems","x":1,"y":1,"w":2,"h":2}"#,
+    );
+    let issues = issues_of(&[("dashboards/d.json", &d)]);
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert_eq!(issues[0].reason, "panels 1 and 2 overlap");
+}
+
+// Control characters
+
+#[test]
+fn control_character_in_any_string_is_an_issue() {
+    let cases = [
+        (
+            "hosts/a.json",
+            r#"{"host":"a","address":"10.0.0.1\u0000"}"#.to_owned(),
+            "\"address\"",
+        ),
+        (
+            "hosts/b.json",
+            r#"{"host":"b","items":[{"key":"cpu.usage","interval":"1m"}],
+                "triggers":[{"name":"CPU\nhigh","expression":"cpu.usage > 90","severity":"high"}]}"#
+                .to_owned(),
+            "\"triggers[0].name\"",
+        ),
+        (
+            "hosts/c.json",
+            // A raw tab is already a JSON syntax error; the escaped one is valid JSON.
+            r#"{"host":"c","groups":["prod\tuction"]}"#.to_owned(),
+            "\"groups[0]\"",
+        ),
+        (
+            "templates/t.json",
+            r#"{"template":"t","items":[{"key":"disk.used_percent","params":{"mo\u001bunt":"/"},"interval":"1m"}]}"#
+                .to_owned(),
+            "the key at \"items[0].params.mo?unt\"",
+        ),
+    ];
+    for (file, content, needle) in &cases {
+        let issues = issues_of(&[(file, content)]);
+        assert_eq!(issues.len(), 1, "{file}: {issues:?}");
+        assert!(has_issue(&issues, file, "control character"), "{issues:?}");
+        assert!(has_issue(&issues, file, needle), "{issues:?}");
+        assert!(
+            !issues[0].reason.chars().any(char::is_control),
+            "{issues:?}"
+        );
+    }
+}
+
+#[test]
+fn printable_unicode_is_accepted() {
+    let h = r#"{"host":"a","address":"Bürogebäude 3 – Raum 7"}"#;
+    assert!(compile(&snap(&[("hosts/a.json", h)])).is_ok());
+}
+
 #[test]
 fn agent_config_version_changes_with_items() {
     let make = |interval: &str| {

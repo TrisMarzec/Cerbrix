@@ -51,3 +51,89 @@ impl SyncIssue {
 
 /// A snapshot reports at most this many issues.
 pub const MAX_ISSUES: usize = 50;
+
+/// Collects the issues of one compile, at most [`MAX_ISSUES`] of them. Once it is
+/// full, further issues are dropped without being built, so a hostile input
+/// cannot make the issue list (or its text) grow with the size of the input.
+#[derive(Debug, Default)]
+pub(crate) struct Issues {
+    list: Vec<SyncIssue>,
+}
+
+impl Issues {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.list.len() >= MAX_ISSUES
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// Adds an issue about `file`; `reason` is only called while there is room.
+    pub(crate) fn add(&mut self, file: Option<&str>, reason: impl FnOnce() -> String) {
+        if !self.is_full() {
+            self.list.push(SyncIssue::new(file, reason()));
+        }
+    }
+
+    /// Adds a prepared issue; `issue` is only called while there is room.
+    pub(crate) fn add_issue(&mut self, issue: impl FnOnce() -> SyncIssue) {
+        if !self.is_full() {
+            self.list.push(issue());
+        }
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<SyncIssue> {
+        self.list
+    }
+}
+
+/// Removes terminal escape sequences (ESC `[` ... final byte, ESC `]` ... BEL or
+/// ESC `\`, ESC and one more character) and then every other control character.
+pub(crate) fn strip_control(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.next() {
+                // CSI: parameter and intermediate bytes, then one final byte.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or the string terminator ESC `\`.
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{07}' {
+                            break;
+                        }
+                        if c == '\u{1b}' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Replaces every control character by `?`, keeping the length of the text visible.
+pub(crate) fn replace_control(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}

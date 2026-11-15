@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use super::{MAX_ISSUES, Snapshot, SyncIssue, compile};
+use super::{MAX_ISSUES, Snapshot, SyncIssue, compile, replace_control};
 
 /// A `.json` file larger than this is rejected.
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -30,6 +30,8 @@ pub(crate) const ROOTS: [&str; 5] = [
 
 pub(crate) const SYMLINK_REASON: &str =
     "symbolic links are not allowed in the configuration repository";
+
+const CONTROL_NAME_REASON: &str = "the name contains control characters (shown as '?'): rename it";
 
 /// Bounds on the size of a tree; injectable so tests do not need huge trees.
 struct Limits {
@@ -154,6 +156,12 @@ fn walk_dir(walk: &mut Walk, dir: &Path, rel: &str, depth: usize) {
             walk.issue(rel, "a file name is not valid UTF-8");
             continue;
         };
+        if name.chars().any(char::is_control) {
+            // Neither read nor descended into; reported with the characters replaced.
+            let shown = format!("{rel}/{}", replace_control(&name));
+            walk.issue(&shown, CONTROL_NAME_REASON);
+            continue;
+        }
         let key = format!("{rel}/{name}");
         let path = entry.path();
         // `symlink_metadata`, never `metadata`: a link must not be followed.
@@ -216,13 +224,17 @@ fn read_file(walk: &mut Walk, path: &Path, key: &str, len: u64) {
 }
 
 /// Formats an issue as `file:line:column: reason`, `file: reason` or `reason`.
+///
+/// File names and reasons can come from the repository, so control characters
+/// (terminal escape sequences among them) are shown as `?`.
 pub fn format_issue(issue: &SyncIssue) -> String {
+    let reason = replace_control(&issue.reason);
     match (&issue.file, issue.line, issue.column) {
         (Some(file), Some(line), Some(column)) => {
-            format!("{file}:{line}:{column}: {}", issue.reason)
+            format!("{}:{line}:{column}: {reason}", replace_control(file))
         }
-        (Some(file), _, _) => format!("{file}: {}", issue.reason),
-        (None, _, _) => issue.reason.clone(),
+        (Some(file), _, _) => format!("{}: {reason}", replace_control(file)),
+        (None, _, _) => reason,
     }
 }
 
@@ -462,6 +474,48 @@ mod tests {
         assert_eq!(format_issue(&issue), "hosts/a.json: unknown template \"x\"");
         let issue = SyncIssue::new(None, "repository unreachable");
         assert_eq!(format_issue(&issue), "repository unreachable");
+    }
+
+    #[test]
+    fn format_issue_replaces_control_characters() {
+        let mut issue = SyncIssue::new(Some("hosts/a\u{1b}[2J.json"), "bad\u{1b}[31m red\n");
+        assert_eq!(format_issue(&issue), "hosts/a?[2J.json: bad?[31m red?");
+        issue.line = Some(1);
+        issue.column = Some(2);
+        assert_eq!(format_issue(&issue), "hosts/a?[2J.json:1:2: bad?[31m red?");
+        let issue = SyncIssue::new(None, "\u{9b}x\u{7}");
+        assert_eq!(format_issue(&issue), "?x?");
+    }
+
+    #[test]
+    fn name_with_control_character_is_not_read() {
+        // U+009B (CSI) and DEL are control characters that every file system accepts.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "hosts/a\u{9b}b.json", b"{}");
+        write(dir.path(), "hosts/d\u{7f}ir/c.json", b"{}");
+        write(dir.path(), "hosts/ok.json", b"{}");
+        let issues = read_tree(dir.path(), "").unwrap_err();
+        let files: Vec<_> = issues.iter().map(|i| i.file.as_deref()).collect();
+        assert_eq!(
+            files,
+            [Some("hosts/a?b.json"), Some("hosts/d?ir")],
+            "{issues:?}"
+        );
+        assert!(
+            issues
+                .iter()
+                .all(|i| i.reason.contains("control characters"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn name_with_escape_sequence_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "hosts/x\u{1b}[2J\n.json", b"{}");
+        let issues = read_tree(dir.path(), "").unwrap_err();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].file.as_deref(), Some("hosts/x?[2J?.json"));
     }
 
     #[test]

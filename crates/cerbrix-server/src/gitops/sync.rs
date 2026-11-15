@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use super::{ConfigSource, SourceError, SyncIssue, compile, format_issue};
+use super::{ConfigSource, SourceError, SyncIssue, compile, format_issue, strip_control};
 use crate::config::GitopsConfig;
 use crate::state::{ApplyError, StateError, StateStore, SyncChanges};
 
@@ -80,13 +80,28 @@ async fn run_cycle(
         return Ok(SyncOutcome::Unchanged);
     }
 
-    let compiled = match compile(&snapshot) {
-        Ok(compiled) => compiled,
-        Err(issues) => return fail(store, Some(&snapshot.commit), issues, now).await,
+    // Compiling is CPU work that grows with the repository, so it runs on a blocking
+    // thread instead of a runtime worker. A panic there ends this cycle, not the process.
+    let commit = snapshot.commit.clone();
+    let compiled = match tokio::task::spawn_blocking(move || compile(&snapshot)).await {
+        Ok(Ok(compiled)) => compiled,
+        Ok(Err(issues)) => return fail(store, Some(&commit), issues, now).await,
+        Err(err) => {
+            tracing::error!(%commit, %err, "compiling the configuration from Git failed");
+            let reason = "the revision could not be compiled because of an internal error; \
+                          the server log has the details";
+            return fail(
+                store,
+                Some(&commit),
+                vec![SyncIssue::new(None, reason)],
+                now,
+            )
+            .await;
+        }
     };
 
     match store
-        .apply_config(&snapshot.commit, &compiled, now, max_host_removal_percent)
+        .apply_config(&commit, &compiled, now, max_host_removal_percent)
         .await
     {
         Ok(changes) => Ok(SyncOutcome::Applied(changes)),
@@ -97,13 +112,57 @@ async fn run_cycle(
             );
             fail(
                 store,
-                Some(&snapshot.commit),
+                Some(&commit),
                 vec![SyncIssue::new(None, reason)],
                 now,
             )
             .await
         }
-        Err(ApplyError::State(e)) => Err(e),
+        // Recorded, so that a revision the store rejects every time shows as Out Of Sync.
+        // The database's text may contain values, so only its kind is recorded.
+        Err(ApplyError::State(err)) => {
+            tracing::error!(%commit, %err, "the configuration from Git could not be stored");
+            let reason = format!(
+                "the configuration could not be stored: {}",
+                store_error_kind(&err)
+            );
+            fail(
+                store,
+                Some(&commit),
+                vec![SyncIssue::new(None, reason)],
+                now,
+            )
+            .await
+        }
+    }
+}
+
+/// A short description of a store error that is safe to record: the SQLSTATE code and
+/// PostgreSQL's primary message (control characters removed, at most 200 characters),
+/// or a fixed text for other kinds of error.
+fn store_error_kind(err: &StateError) -> String {
+    const MAX_MESSAGE_CHARS: usize = 200;
+    match err {
+        StateError::Db(sqlx::Error::Database(db)) => {
+            let message: String = strip_control(db.message())
+                .chars()
+                .take(MAX_MESSAGE_CHARS)
+                .collect();
+            match db.code() {
+                Some(code) => format!("SQLSTATE {code}, {message}"),
+                None => message,
+            }
+        }
+        StateError::Db(sqlx::Error::PoolTimedOut) => {
+            "timed out waiting for a database connection".to_owned()
+        }
+        StateError::Db(sqlx::Error::Io(_)) => "the database connection failed".to_owned(),
+        StateError::Db(sqlx::Error::Encode(_)) => {
+            "a value could not be encoded for the database".to_owned()
+        }
+        StateError::Db(_) => "database error".to_owned(),
+        StateError::Conflict(_) => "conflict".to_owned(),
+        StateError::NotFound => "a record was not found".to_owned(),
     }
 }
 
@@ -471,13 +530,27 @@ mod tests {
         assert!(lock.is_some());
     }
 
+    /// Polls until the installation is in sync, for at most 30 seconds.
+    async fn wait_for_in_sync(store: &StateStore) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            if store.sync_state().await.unwrap().status == SyncStatus::InSync {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn loop_stops_on_shutdown(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         let source = Arc::new(FakeSource::new(vec![Ok(fixture("commit-a"))]));
+        // An hour between cycles: only the immediate first cycle can run in this test,
+        // however slowly the machine runs.
         let cfg = GitopsConfig {
             enabled: true,
-            interval_secs: 5,
+            interval_secs: 3600,
             ..GitopsConfig::default()
         };
         let shutdown = CancellationToken::new();
@@ -487,16 +560,14 @@ mod tests {
             cfg,
             shutdown.clone(),
         ));
-        for _ in 0..50 {
-            if store.sync_state().await.unwrap().status == SyncStatus::InSync {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        assert!(
+            wait_for_in_sync(&store).await,
+            "the first cycle applied the revision"
+        );
         shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        tokio::time::timeout(Duration::from_secs(10), handle)
             .await
-            .expect("loop stops within a second")
+            .expect("loop stops after shutdown")
             .unwrap();
         assert_eq!(source.calls(), 1);
         assert_eq!(
@@ -537,16 +608,9 @@ mod tests {
             Duration::from_millis(100),
             shutdown.clone(),
         ));
-        let mut synced = false;
-        for _ in 0..100 {
-            if store.sync_state().await.unwrap().status == SyncStatus::InSync {
-                synced = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        let synced = wait_for_in_sync(&store).await;
         shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(2), handle)
+        tokio::time::timeout(Duration::from_secs(10), handle)
             .await
             .expect("loop stops")
             .expect("the loop itself did not panic");
@@ -556,19 +620,72 @@ mod tests {
         assert!(lock.is_some(), "the lock is free after the loop stopped");
     }
 
+    /// Makes every later apply fail inside its transaction: the apply writes the
+    /// history, recording a failure does not.
+    async fn break_history(pool: &PgPool) {
+        sqlx::query("ALTER TABLE sync_history RENAME TO sync_history_gone")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn lock_is_released_after_store_error(pool: PgPool) {
         let store = StateStore::from_pool(pool.clone());
-        // The apply writes the history, so the cycle fails after the lock is taken.
-        sqlx::query("ALTER TABLE sync_history RENAME TO sync_history_gone")
-            .execute(&pool)
-            .await
-            .unwrap();
+        break_history(&pool).await;
         let source = FakeSource::new(vec![Ok(fixture("commit-a"))]);
         let result = sync_once(&store, &source, 50, t0()).await;
-        assert!(result.is_err(), "{result:?}");
+        assert!(
+            matches!(result, Ok(SyncOutcome::OutOfSync(_))),
+            "{result:?}"
+        );
         assert_eq!(source.calls(), 1);
         let lock = store.try_sync_lock().await.unwrap();
         assert!(lock.is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn store_failure_is_recorded_as_out_of_sync(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let source = FakeSource::new(vec![Ok(fixture("commit-a")), Ok(fixture("commit-b"))]);
+        assert!(matches!(
+            cycle(&store, &source).await,
+            SyncOutcome::Applied(_)
+        ));
+        break_history(&pool).await;
+
+        let SyncOutcome::OutOfSync(issues) = cycle_at(&store, &source, 10).await else {
+            panic!("expected OutOfSync");
+        };
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].file, None);
+        assert!(
+            issues[0]
+                .reason
+                .starts_with("the configuration could not be stored: SQLSTATE 42P01"),
+            "{issues:?}"
+        );
+        assert!(issues[0].reason.len() < 300, "{issues:?}");
+
+        let state = store.sync_state().await.unwrap();
+        assert_eq!(state.status, SyncStatus::OutOfSync);
+        assert_eq!(state.active_commit.as_deref(), Some("commit-a"));
+        assert_eq!(state.attempted_commit.as_deref(), Some("commit-b"));
+        assert_eq!(state.last_attempt_at, Some(at(10)));
+        assert_eq!(state.issues, issues);
+        let lock = store.try_sync_lock().await.unwrap();
+        assert!(lock.is_some(), "the lock is free after the failed cycle");
+    }
+
+    #[test]
+    fn store_error_kind_records_no_detail() {
+        assert_eq!(
+            store_error_kind(&StateError::Conflict("secret value".into())),
+            "conflict"
+        );
+        assert_eq!(
+            store_error_kind(&StateError::Db(sqlx::Error::PoolTimedOut)),
+            "timed out waiting for a database connection"
+        );
     }
 }
