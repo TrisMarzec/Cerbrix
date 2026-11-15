@@ -134,8 +134,9 @@ The script installs `/usr/local/bin/cerbrix-agent`, the unit
 `/etc/cerbrix/agent.toml` (mode 0640, owner `root:cerbrix`). After the first successful
 enrolment the agent keeps its own credential in `/var/lib/cerbrix-agent`, and the
 enrolment key stays in the configuration for the case that the server rejects the stored
-credential. Further settings (collection intervals, excluded mounts and interfaces) are
-keys of `agent.toml`; edit the file and run `sudo systemctl restart cerbrix-agent`. To
+credential. Which items the agent collects, and how often, comes from the server (Git
+configuration); the local settings (excluded file systems, mounts and interfaces) are keys
+of `agent.toml`; edit the file and run `sudo systemctl restart cerbrix-agent`. To
 change the unit, use `sudo systemctl edit cerbrix-agent` instead of editing the unit file.
 
 **Check it and read the log:**

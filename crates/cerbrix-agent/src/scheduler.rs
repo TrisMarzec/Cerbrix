@@ -34,6 +34,15 @@ impl Scheduler {
             .push((Arc::new(Mutex::new(collector)), interval));
     }
 
+    /// The number of registered collectors.
+    pub fn len(&self) -> usize {
+        self.collectors.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.collectors.is_empty()
+    }
+
     /// Runs until `shutdown` is cancelled or the output channel is closed.
     ///
     /// On shutdown a collector still inside `collect` is abandoned: its

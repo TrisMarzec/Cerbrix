@@ -31,6 +31,7 @@ pub enum ClientError {
     Refused { code: String, message: String },
 }
 
+#[derive(Clone)]
 pub struct ServerClient {
     http: reqwest::Client,
     enroll_url: Url,

@@ -5,15 +5,19 @@ use std::time::Duration;
 
 use anyhow::Context;
 use cerbrix_common::MetricValue;
-use tokio::sync::mpsc;
+use cerbrix_common::agent_config::ItemConfig;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::ServerClient;
+use crate::collector::Collector;
 use crate::collectors::{
-    CpuCollector, DiskCollector, LoadCollector, MemoryCollector, NetCollector, Patterns,
-    UptimeCollector,
+    CpuCollector, DiskCollector, FilteredCollector, LoadCollector, MemoryCollector, NetCollector,
+    Patterns, UptimeCollector,
 };
 use crate::config::AgentConfig;
+use crate::remote_config::{CollectorKind, ConfigCache, Group, plan};
 use crate::scheduler::Scheduler;
 use crate::sender::{CredentialStore, Enrollment, run_sender};
 use crate::spool::Spool;
@@ -33,10 +37,25 @@ const WRITE_GROUP_WAIT: Duration = Duration::from_secs(1);
 )]
 pub struct NotEnrolled;
 
-/// Runs the agent until `shutdown` is cancelled: collects values, spools them
-/// and delivers them to the server. On shutdown the values still queued are
-/// written to the spool before this returns.
+/// How often the agent asks the server for its configuration.
+pub const CONFIG_POLL: Duration = Duration::from_secs(60);
+/// How long the poller waits before looking for a credential again while the
+/// agent has none (the sender is still enrolling).
+const NO_CREDENTIAL_RETRY: Duration = Duration::from_secs(1);
+
+/// Runs the agent until `shutdown` is cancelled: collects what the server
+/// configures, spools the values and delivers them to the server. On shutdown
+/// the values still queued are written to the spool before this returns.
 pub async fn run(config: AgentConfig, shutdown: CancellationToken) -> anyhow::Result<()> {
+    run_with(config, CONFIG_POLL, shutdown).await
+}
+
+/// [`run`] with the configuration poll interval given.
+pub async fn run_with(
+    config: AgentConfig,
+    poll: Duration,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
     let credential = CredentialStore::new(&config.state_dir);
     let stored = credential.load().with_context(|| {
         format!(
@@ -49,31 +68,41 @@ pub async fn run(config: AgentConfig, shutdown: CancellationToken) -> anyhow::Re
     }
 
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
-    let scheduler = build_scheduler(&config, tx)?;
     let spool_dir = config.state_dir.join("spool");
     let spool = Spool::open(&spool_dir, config.spool_max_bytes)
         .with_context(|| format!("cannot open the spool in {}", spool_dir.display()))?;
     let spool = Arc::new(Mutex::new(spool));
     let client = ServerClient::new(&config)?;
+    let cache = ConfigCache::new(&config.state_dir);
+    let (current_tx, current_rx) = watch::channel(cache.load());
 
     tracing::info!(host = %config.host, server = %config.server_url, "agent started");
 
     let writer = tokio::spawn(run_spool_writer(rx, Arc::clone(&spool)));
     let sender = tokio::spawn(run_sender(
-        client,
+        client.clone(),
         spool,
-        credential,
+        credential.clone(),
         Enrollment {
             host: config.host.clone(),
             key: config.enrollment_key.clone(),
         },
         shutdown.clone(),
     ));
+    let poller = tokio::spawn(run_config_poller(
+        client,
+        credential,
+        cache,
+        current_tx,
+        poll,
+        shutdown.clone(),
+    ));
 
-    scheduler.run(shutdown.clone()).await;
-    // The scheduler is done and dropped its senders, so the writer drains what
-    // is left in the channel and ends. Stop the sender too if the scheduler
-    // ended on its own.
+    // The writer and the channel to it outlive every scheduler; the channel
+    // closes only when the supervisor returns and drops `tx`.
+    supervise(&config, tx, current_rx, &shutdown).await;
+    // Stop the sender and the poller too if the supervisor ended on its own.
+    // The writer drains what is left in the channel and ends.
     shutdown.cancel();
     if let Err(e) = writer.await {
         tracing::error!(error = %e, "spool writer failed");
@@ -81,33 +110,193 @@ pub async fn run(config: AgentConfig, shutdown: CancellationToken) -> anyhow::Re
     if let Err(e) = sender.await {
         tracing::error!(error = %e, "sender failed");
     }
+    if let Err(e) = poller.await {
+        tracing::error!(error = %e, "configuration poller failed");
+    }
     tracing::info!("agent stopped");
     Ok(())
 }
 
-fn build_scheduler(
+/// A scheduler running as a task, with the token that stops it.
+struct RunningScheduler {
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl RunningScheduler {
+    async fn stop(self) {
+        self.stop.cancel();
+        if let Err(e) = self.task.await {
+            tracing::error!(error = %e, "scheduler failed");
+        }
+    }
+}
+
+/// Runs a scheduler for the current configuration and replaces it whenever the
+/// configuration changes to another version. Returns after `shutdown`, once the
+/// scheduler has stopped.
+async fn supervise(
     config: &AgentConfig,
     tx: mpsc::Sender<MetricValue>,
+    mut current: watch::Receiver<Option<ItemConfig>>,
+    shutdown: &CancellationToken,
+) {
+    let mut running: Option<RunningScheduler> = None;
+    let mut version: Option<String> = None;
+    if current.borrow().is_none() {
+        tracing::info!("waiting for the configuration from the server");
+    }
+    loop {
+        let latest = current.borrow_and_update().clone();
+        if let Some(item_config) = latest
+            && version.as_deref() != Some(item_config.version.as_str())
+        {
+            let groups = plan(&item_config.items);
+            if groups.is_empty() {
+                tracing::warn!(
+                    version = %item_config.version,
+                    "the configuration has nothing the agent can collect, collection stopped"
+                );
+                if let Some(old) = running.take() {
+                    old.stop().await;
+                }
+                version = Some(item_config.version);
+            } else {
+                match build_scheduler(config, &groups, tx.clone()) {
+                    Ok(scheduler) => {
+                        if let Some(old) = running.take() {
+                            old.stop().await;
+                        }
+                        let stop = shutdown.child_token();
+                        let task = tokio::spawn(scheduler.run(stop.clone()));
+                        tracing::info!(
+                            version = %item_config.version,
+                            collectors = groups.len(),
+                            "collecting according to the configuration"
+                        );
+                        running = Some(RunningScheduler { stop, task });
+                        version = Some(item_config.version);
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "cannot apply the new configuration, keeping the running one");
+                    }
+                }
+            }
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            changed = current.changed() => {
+                if changed.is_err() {
+                    // The poller is gone; keep collecting until shutdown.
+                    shutdown.cancelled().await;
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(old) = running.take() {
+        old.stop().await;
+    }
+}
+
+/// Builds a scheduler with one filtered collector per group. Every group gets
+/// its own collector instance, so rate-based collectors keep separate state per
+/// interval. `config` is the local file: it supplies the exclusion patterns.
+pub fn build_scheduler(
+    config: &AgentConfig,
+    groups: &[Group],
+    tx: mpsc::Sender<MetricValue>,
 ) -> anyhow::Result<Scheduler> {
-    let i = &config.intervals;
-    let exclude_mounts =
-        Patterns::new(&config.disk.exclude_mounts).context("disk.exclude_mounts is not valid")?;
-    let exclude_interfaces = Patterns::new(&config.net.exclude_interfaces)
-        .context("net.exclude_interfaces is not valid")?;
     let mut scheduler = Scheduler::new(tx);
-    scheduler.add(Box::new(CpuCollector::new()), i.cpu);
-    scheduler.add(Box::new(LoadCollector::new()), i.load);
-    scheduler.add(Box::new(MemoryCollector::new()), i.memory);
-    scheduler.add(Box::new(UptimeCollector::new()), i.uptime);
-    scheduler.add(
-        Box::new(DiskCollector::new(
-            config.disk.exclude_fs.clone(),
-            exclude_mounts,
-        )),
-        i.disk,
-    );
-    scheduler.add(Box::new(NetCollector::new(exclude_interfaces)), i.net);
+    for group in groups {
+        let collector: Box<dyn Collector> = match group.collector {
+            CollectorKind::Cpu => Box::new(CpuCollector::new()),
+            CollectorKind::Load => Box::new(LoadCollector::new()),
+            CollectorKind::Memory => Box::new(MemoryCollector::new()),
+            CollectorKind::Uptime => Box::new(UptimeCollector::new()),
+            CollectorKind::Disk => Box::new(DiskCollector::new(
+                config.disk.exclude_fs.clone(),
+                Patterns::new(&config.disk.exclude_mounts)
+                    .context("disk.exclude_mounts is not valid")?,
+            )),
+            CollectorKind::Net => Box::new(NetCollector::new(
+                Patterns::new(&config.net.exclude_interfaces)
+                    .context("net.exclude_interfaces is not valid")?,
+            )),
+        };
+        scheduler.add(
+            Box::new(FilteredCollector::new(collector, group.wanted.clone())),
+            group.interval,
+        );
+    }
     Ok(scheduler)
+}
+
+/// Fetches the configuration at start and then every `poll`, and publishes a
+/// new one on `current` after saving it to `cache`.
+///
+/// The round is skipped while the agent has no credential (the sender enrols);
+/// the poller then looks again after a second. Errors leave the current
+/// configuration in place; a streak of failures is logged once.
+pub async fn run_config_poller(
+    client: ServerClient,
+    credential: CredentialStore,
+    cache: ConfigCache,
+    current: watch::Sender<Option<ItemConfig>>,
+    poll: Duration,
+    shutdown: CancellationToken,
+) {
+    let mut failing = false;
+    loop {
+        let wait = match credential.load() {
+            Ok(Some(credential)) => {
+                let known = current.borrow().as_ref().map(|c| c.version.clone());
+                let fetched = tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    fetched = client.fetch_config(&credential, known.as_deref()) => fetched,
+                };
+                match fetched {
+                    Ok(Some(received)) => {
+                        failing = false;
+                        let unchanged = current
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|c| c.version == received.version);
+                        if !unchanged {
+                            if let Err(e) = cache.save(&received) {
+                                tracing::warn!(error = %e, "cannot cache the configuration");
+                            }
+                            current.send_replace(Some(received));
+                        }
+                    }
+                    Ok(None) => {
+                        failing = false;
+                        if known.is_none() {
+                            tracing::warn!(
+                                "the server reports no change but the agent has no configuration, fetching again"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if !failing {
+                            tracing::warn!(error = %e, "cannot fetch the configuration, keeping the current one");
+                        }
+                        failing = true;
+                    }
+                }
+                poll
+            }
+            Ok(None) => NO_CREDENTIAL_RETRY.min(poll),
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot read the credential");
+                poll
+            }
+        };
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep(wait) => {}
+        }
+    }
 }
 
 /// Moves values from the channel into the spool, in groups, until the channel
@@ -192,6 +381,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_scheduler_one_entry_per_group() {
+        use crate::remote_config::{CollectorKind, Group, Wanted};
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig::for_tests("http://127.0.0.1:1", dir.path());
+        let wanted = |key: &str| Wanted {
+            key: key.to_owned(),
+            params: None,
+            except: Vec::new(),
+        };
+        let groups = [
+            Group {
+                collector: CollectorKind::Cpu,
+                interval: Duration::from_secs(30),
+                wanted: vec![wanted("cpu.usage")],
+            },
+            Group {
+                collector: CollectorKind::Cpu,
+                interval: Duration::from_secs(60),
+                wanted: vec![wanted("cpu.usage")],
+            },
+        ];
+        let (tx, _rx) = mpsc::channel(4);
+        let scheduler = build_scheduler(&config, &groups, tx).unwrap();
+        assert_eq!(scheduler.len(), 2);
+    }
+    #[tokio::test]
     async fn run_refuses_to_start_without_credential_and_key() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = AgentConfig::for_tests("http://127.0.0.1:1", dir.path());
@@ -220,14 +436,16 @@ mod tests {
             )
             .mount(&server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/api/agent/v1/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "v1",
+                "items": [{ "key": "memory.used_percent", "params": null, "interval_secs": 1 }]
+            })))
+            .mount(&server)
+            .await;
         let dir = tempfile::tempdir().unwrap();
-        let mut config = AgentConfig::for_tests(&server.uri(), dir.path());
-        config.intervals.cpu = Duration::from_millis(200);
-        config.intervals.load = Duration::from_millis(200);
-        config.intervals.memory = Duration::from_millis(200);
-        config.intervals.uptime = Duration::from_millis(200);
-        config.intervals.disk = Duration::from_millis(200);
-        config.intervals.net = Duration::from_millis(200);
+        let config = AgentConfig::for_tests(&server.uri(), dir.path());
         let shutdown = CancellationToken::new();
         let agent = tokio::spawn(run(config, shutdown.clone()));
 
