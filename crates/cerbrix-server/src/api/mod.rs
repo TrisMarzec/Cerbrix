@@ -26,6 +26,8 @@ pub struct AppState {
     pub metrics: Arc<dyn MetricsStore>,
     pub config: Arc<Config>,
     pub warnings: Arc<WarnLimiter>,
+    /// Whether problems queue e-mail: true when an SMTP server is configured.
+    pub queue_mail: bool,
 }
 
 /// Lets a warning through at most once per hour per host. Process-local and bounded: it

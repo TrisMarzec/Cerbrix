@@ -177,7 +177,7 @@ async fn evaluate_arrival(
     let mut too_old = 0;
     let evaluated = app
         .store
-        .evaluate_host(host.id, false, |ctx| {
+        .evaluate_host(host.id, app.queue_mail, |ctx| {
             let triggers = ctx.config.as_ref().map(active_triggers).unwrap_or_default();
             series = nodata_series(&triggers, accepted);
             let evaluation = evaluate(&triggers, &ctx.states, accepted, now_ms, max_age_ms);
@@ -384,6 +384,7 @@ mod tests {
             metrics: metrics.clone(),
             config: config(max_body_bytes),
             warnings: Arc::default(),
+            queue_mail: false,
         });
         (router, metrics, store)
     }

@@ -13,6 +13,8 @@ use axum_server::tls_rustls::RustlsConfig;
 use tokio_util::sync::CancellationToken;
 use tower_http::timeout::TimeoutLayer;
 
+use crate::alerting::channel::{Channel, SmtpChannel};
+use crate::alerting::dispatch::run_dispatch_loop;
 use crate::alerting::nodata::run_nodata_loop;
 use crate::api::{AppState, router};
 use crate::config::Config;
@@ -23,6 +25,9 @@ use crate::state::StateStore;
 /// Upper bound for one request, body included, so that a client trickling a body
 /// cannot hold a connection forever.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the outbox is checked for notifications to send.
+const DISPATCH_EVERY: Duration = Duration::from_secs(5);
 
 /// How long in-flight requests get to finish after a shutdown signal.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
@@ -53,6 +58,16 @@ pub async fn serve(
         .await
         .context("cannot connect to the state database")?;
     let metrics = VictoriaMetrics::new(&config.metrics.url).context("invalid metrics.url")?;
+    // Mail is switched on with the sender: without an SMTP server problems are recorded only.
+    let channel: Option<Arc<dyn Channel>> = if config.smtp.enabled() {
+        let channel = SmtpChannel::new(&config.smtp).context("invalid smtp settings")?;
+        tracing::info!("SMTP configured; problems are sent by e-mail");
+        Some(Arc::new(channel))
+    } else {
+        tracing::info!("no SMTP server configured; problems are recorded but no e-mail is sent");
+        None
+    };
+    let queue_mail = channel.is_some();
     let shutdown_token = CancellationToken::new();
     let sync_task = config.gitops.enabled.then(|| {
         tracing::info!(
@@ -63,23 +78,31 @@ pub async fn serve(
             store.clone(),
             Arc::new(GitSource::new(&config.gitops)),
             config.gitops.clone(),
-            // Mail for closed problems is switched on with the sender in a later task.
-            false,
+            queue_mail,
             shutdown_token.clone(),
         ))
     });
     // Always on, with or without GitOps: hosts that stop reporting open problems.
     let nodata_task = tokio::spawn(run_nodata_loop(
         store.clone(),
-        false,
+        queue_mail,
         Duration::from_secs(config.alerting.nodata_check_secs),
         shutdown_token.clone(),
     ));
+    let dispatch_task = channel.map(|channel| {
+        tokio::spawn(run_dispatch_loop(
+            store.clone(),
+            channel,
+            DISPATCH_EVERY,
+            shutdown_token.clone(),
+        ))
+    });
     let state = AppState {
         store,
         metrics: Arc::new(metrics),
         config: Arc::new(config),
         warnings: Arc::default(),
+        queue_mail,
     };
     let app = router(state).layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
@@ -131,6 +154,11 @@ pub async fn serve(
     }
     if let Err(err) = nodata_task.await {
         tracing::error!(%err, "no-data loop ended abnormally");
+    }
+    if let Some(task) = dispatch_task
+        && let Err(err) = task.await
+    {
+        tracing::error!(%err, "notification dispatch loop ended abnormally");
     }
     tracing::info!("server stopped");
     served
