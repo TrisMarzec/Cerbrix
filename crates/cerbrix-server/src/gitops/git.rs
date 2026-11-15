@@ -74,6 +74,7 @@ impl GitSource {
 }
 
 /// How a git call failed. `Failed` carries the scrubbed reason.
+#[derive(Debug)]
 enum RunError {
     NotFound,
     Timeout,
@@ -183,6 +184,8 @@ impl ConfigSource for GitSource {
             secrets,
             timeout: self.timeout,
         };
+
+        write_safe_config(&runner, &cfg.cache_dir, &safe_directories(cfg)).await?;
 
         // The cache is disposable: if git fails or hangs (a killed git leaves lock
         // files behind), it is rebuilt and the whole sequence runs once more.
@@ -442,13 +445,8 @@ pub(crate) fn git_config(cfg: &GitopsConfig) -> Vec<(String, String)> {
         if local { "always" } else { "never" }.into(),
     );
 
-    // The checkout is owned by this process, but git also checks the owner of
-    // a local origin.
-    set("safe.directory", git_path(&cfg.cache_dir.join("repo")));
-    if local {
-        set("safe.directory", git_path(&local_path(url)));
-    }
-
+    // `safe.directory` is not honoured here: git reads it only from files, see
+    // `safe_directories`.
     if let Some(token) = &cfg.token {
         set(
             "http.extraHeader",
@@ -475,6 +473,75 @@ pub(crate) fn git_config(cfg: &GitopsConfig) -> Vec<(String, String)> {
     config
 }
 
+/// The global configuration file git is pointed at. It holds only `safe.directory`
+/// entries and lives outside `cache_dir/repo`, which is deleted on a rebuild.
+pub(crate) fn safe_config_path(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("gitconfig")
+}
+
+/// The directories git must trust although another user may own them: the cache
+/// repository and, for a local origin, the origin (as a path, never a `file://` URL).
+pub(crate) fn safe_directories(cfg: &GitopsConfig) -> Vec<String> {
+    let mut dirs = vec![format!(
+        "{}/repo",
+        git_path(&cfg.cache_dir).trim_end_matches('/')
+    )];
+    let url = cfg.url.as_deref().unwrap_or_default();
+    if classify_git_url(url) == Ok(GitUrlKind::Local) {
+        dirs.push(git_path(&local_path(url)));
+    }
+    dirs
+}
+
+/// Writes `cache_dir/gitconfig` with one `[safe] directory` entry per directory.
+/// Git itself writes the file (`git config --file`), so quoting is git's; it is
+/// built next to the target and renamed into place.
+async fn write_safe_config(
+    runner: &Runner,
+    cache_dir: &Path,
+    dirs: &[String],
+) -> Result<(), RunError> {
+    let target = safe_config_path(cache_dir);
+    let temp = cache_dir.join("gitconfig.tmp");
+    let io = |e: std::io::Error| runner.io_error("cannot write the git configuration", &e);
+    match tokio::fs::remove_file(&temp).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io(e)),
+    }
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let temp = temp.clone();
+        tokio::task::spawn_blocking(move || options.open(temp).map(drop))
+            .await
+            .map_err(|_| RunError::Failed("cannot write the git configuration".into()))?
+            .map_err(io)?;
+    }
+    let temp_arg = temp.to_string_lossy().into_owned();
+    for dir in dirs {
+        runner
+            .run(
+                cache_dir,
+                &[
+                    "config",
+                    "--file",
+                    &temp_arg,
+                    "--add",
+                    "safe.directory",
+                    dir,
+                ],
+            )
+            .await?;
+    }
+    tokio::fs::rename(&temp, &target).await.map_err(io)
+}
+
 /// The complete environment git is started with.
 pub(crate) fn git_env(cache_dir: &Path, config: &[(String, String)]) -> Vec<(String, String)> {
     let mut env = Vec::new();
@@ -487,7 +554,10 @@ pub(crate) fn git_env(cache_dir: &Path, config: &[(String, String)]) -> Vec<(Str
     set("HOME", cache_dir.to_string_lossy().into_owned());
     set("GIT_TERMINAL_PROMPT", "0".into());
     set("GIT_CONFIG_NOSYSTEM", "1".into());
-    set("GIT_CONFIG_GLOBAL", NULL_DEVICE.into());
+    set(
+        "GIT_CONFIG_GLOBAL",
+        safe_config_path(cache_dir).to_string_lossy().into_owned(),
+    );
     set("GIT_CONFIG_COUNT", config.len().to_string());
     for (i, (key, value)) in config.iter().enumerate() {
         set(&format!("GIT_CONFIG_KEY_{i}"), key.clone());
@@ -935,27 +1005,120 @@ mod tests {
     }
 
     #[test]
-    fn local_protocol_and_safe_directory_only_for_local_urls() {
+    fn local_protocol_only_for_local_urls() {
         let remote = git_config(&remote_cfg());
         assert_eq!(value(&remote, "protocol.file.allow"), Some("never"));
-        let safe: Vec<_> = remote
-            .iter()
-            .filter(|(k, _)| k == "safe.directory")
-            .collect();
-        assert_eq!(safe.len(), 1, "only the cache repository: {safe:?}");
-
         let local = GitopsConfig {
             url: Some("file:///srv/origin".into()),
             ..remote_cfg()
         };
-        let config = git_config(&local);
-        assert_eq!(value(&config, "protocol.file.allow"), Some("always"));
-        assert!(
-            config
-                .iter()
-                .any(|(k, v)| k == "safe.directory" && v.ends_with("srv/origin")),
-            "{config:?}"
+        assert_eq!(
+            value(&git_config(&local), "protocol.file.allow"),
+            Some("always")
         );
+        // `safe.directory` is ignored in the environment, so it must not be there.
+        assert!(
+            git_config(&local)
+                .iter()
+                .all(|(k, _)| k != "safe.directory")
+        );
+    }
+
+    #[test]
+    fn safe_directories_cover_cache_repo_and_local_origin_only() {
+        let remote = safe_directories(&remote_cfg());
+        assert_eq!(remote.len(), 1, "{remote:?}");
+        assert!(remote[0].ends_with("cerbrix/git/repo"), "{remote:?}");
+        let local = GitopsConfig {
+            url: Some("file:///srv/origin".into()),
+            ..remote_cfg()
+        };
+        let dirs = safe_directories(&local);
+        assert_eq!(dirs.len(), 2, "{dirs:?}");
+        assert!(
+            dirs[1].ends_with("srv/origin") && !dirs[1].contains("file:"),
+            "{dirs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn safe_config_file_reads_back_through_git() {
+        let cache = tempfile::tempdir().unwrap();
+        let origin = tempfile::tempdir().unwrap();
+        let spaced = origin.path().join("with space").join(if cfg!(unix) {
+            r#"quote"d\x"#
+        } else {
+            "plain"
+        });
+        std::fs::create_dir_all(&spaced).unwrap();
+        let cfg = GitopsConfig {
+            url: Some(spaced.to_str().unwrap().to_owned()),
+            cache_dir: cache.path().to_path_buf(),
+            ..remote_cfg()
+        };
+        let dirs = safe_directories(&cfg);
+        let runner = Runner {
+            env: git_env(cache.path(), &git_config(&cfg)),
+            secrets: Vec::new(),
+            timeout: Duration::from_secs(60),
+        };
+        write_safe_config(&runner, cache.path(), &dirs)
+            .await
+            .unwrap();
+        // Rewriting is fine.
+        write_safe_config(&runner, cache.path(), &dirs)
+            .await
+            .unwrap();
+
+        let file = safe_config_path(cache.path());
+        let out = git(
+            cache.path(),
+            &[
+                "config",
+                "--file",
+                file.to_str().unwrap(),
+                "--get-all",
+                "safe.directory",
+            ],
+        );
+        let read: Vec<&str> = out.lines().collect();
+        assert_eq!(read, dirs.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(read[1].contains("with space"), "{read:?}");
+        assert!(!cache.path().join("gitconfig.tmp").exists());
+        assert!(std::fs::read_to_string(&file).unwrap().contains("[safe]"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn origin_owned_by_another_user_is_fetched() {
+        use std::os::unix::fs::chown;
+        // Needs root to hand the origin to another user; skipped otherwise.
+        let uid = StdCommand::new("id").arg("-u").output().unwrap().stdout;
+        if uid.trim_ascii() != b"0" {
+            eprintln!("skipped: not running as root");
+            return;
+        }
+        let origin = origin();
+        for entry in walkdir_all(origin.path()) {
+            chown(&entry, Some(12345), Some(12345)).unwrap();
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let snapshot = source(origin.path(), cache.path()).fetch().await.unwrap();
+        assert!(snapshot.files.contains_key("hosts/web-01.json"));
+    }
+
+    #[cfg(unix)]
+    fn walkdir_all(root: &Path) -> Vec<PathBuf> {
+        let mut all = vec![root.to_path_buf()];
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                all.extend(walkdir_all(&path));
+            } else {
+                all.push(path);
+            }
+        }
+        all
     }
 
     #[test]
@@ -974,7 +1137,13 @@ mod tests {
         }
         assert!(names.contains(&"GIT_TERMINAL_PROMPT"));
         assert!(names.contains(&"GIT_CONFIG_NOSYSTEM"));
-        assert!(names.contains(&"GIT_CONFIG_GLOBAL"));
+        let global = env.iter().find(|(k, _)| k == "GIT_CONFIG_GLOBAL").unwrap();
+        assert!(
+            global.1.ends_with("gitconfig") && global.1.contains("cerbrix"),
+            "{global:?}"
+        );
+        assert!(!global.1.contains("/repo/"));
+
         assert!(names.contains(&"GIT_CONFIG_COUNT"));
         assert!(names.contains(&"HOME"));
         assert!(
