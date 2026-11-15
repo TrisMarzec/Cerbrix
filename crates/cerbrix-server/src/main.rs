@@ -78,7 +78,13 @@ async fn main() -> ExitCode {
         Command::Admin(command) => {
             let result = async {
                 let store = StateStore::connect(&config.database.url).await?;
-                admin::run(&store, command, OffsetDateTime::now_utc()).await
+                admin::run(
+                    &store,
+                    command,
+                    OffsetDateTime::now_utc(),
+                    config.gitops.enabled,
+                )
+                .await
             }
             .await;
             match result {

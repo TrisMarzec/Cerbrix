@@ -8,7 +8,8 @@ mod sync;
 
 pub use enrollment::UnknownAgent;
 pub use sync::{
-    ApplyError, ChangeSet, SyncChanges, SyncHistoryEntry, SyncLock, SyncState, SyncStatus,
+    ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock, SyncState,
+    SyncStatus,
 };
 
 use sqlx::PgPool;

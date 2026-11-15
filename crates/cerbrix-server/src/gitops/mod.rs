@@ -4,6 +4,7 @@
 mod boards;
 pub mod compile;
 pub mod git;
+pub mod sync;
 #[cfg(test)]
 mod tests;
 pub mod tree;
@@ -17,6 +18,7 @@ pub use compile::{
     compile,
 };
 pub use git::{ConfigSource, GitSource, SourceError};
+pub use sync::{SyncOutcome, run_sync_loop, sync_once};
 pub use tree::{MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES, check_config, format_issue, read_tree};
 
 /// The files of one revision of the configuration repository.

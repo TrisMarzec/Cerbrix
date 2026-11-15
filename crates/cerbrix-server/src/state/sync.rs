@@ -73,6 +73,17 @@ pub struct SyncHistoryEntry {
     pub changes: SyncChanges,
 }
 
+/// A host as stored, with what Git configured for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostDetails {
+    pub name: String,
+    pub active: bool,
+    pub address: Option<String>,
+    pub groups: Vec<String>,
+    pub source_file: Option<String>,
+    pub config: Option<EffectiveHost>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
     #[error("refusing to deactivate {removed} of {active} active hosts")]
@@ -398,6 +409,35 @@ impl StateStore {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(row.flatten().map(|j| j.0))
+    }
+
+    /// A host by name with its Git-derived settings, active or not.
+    pub async fn host_details(&self, name: &str) -> Result<Option<HostDetails>, StateError> {
+        type Row = (
+            String,
+            bool,
+            Option<String>,
+            Vec<String>,
+            Option<String>,
+            Option<Json<EffectiveHost>>,
+        );
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT name, active, address, groups, source_file, config \
+             FROM hosts WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(name, active, address, groups, source_file, config)| HostDetails {
+                name,
+                active,
+                address,
+                groups,
+                source_file,
+                config: config.map(|j| j.0),
+            },
+        ))
     }
 
     /// Takes the sync lock if no other instance holds it.
