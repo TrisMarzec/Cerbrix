@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use super::{StateError, StateStore};
 use crate::alerting::{
-    Evaluation, EventKind, Notification, OpenProblem, ResolveProblem, TriggerState, recipients,
+    Evaluation, EventKind, Notification, OpenProblem, Params, ResolveProblem, TriggerState,
+    instance_key, recipients,
 };
 use crate::gitops::EffectiveHost;
 
@@ -391,6 +392,57 @@ impl StateStore {
         }
         tx.commit().await?;
         Ok(events)
+    }
+
+    /// Records that values arrived at `now`: sets `hosts.last_seen_at` and upserts
+    /// `series_seen` for the given item keys and parameter maps. Neither value ever moves
+    /// backwards, so concurrent calls from several instances cannot undo each other.
+    pub async fn touch_seen(
+        &self,
+        host_id: Uuid,
+        now: OffsetDateTime,
+        series: &[(String, Params)],
+    ) -> Result<(), StateError> {
+        let mut unique: BTreeMap<(&str, String), &Params> = BTreeMap::new();
+        for (key, params) in series {
+            unique.insert((key.as_str(), instance_key(params)), params);
+        }
+        let mut keys = Vec::with_capacity(unique.len());
+        let mut instances = Vec::with_capacity(unique.len());
+        let mut params = Vec::with_capacity(unique.len());
+        for ((key, instance), p) in unique {
+            keys.push(key.to_owned());
+            instances.push(instance);
+            params.push(serde_json::to_value(p).map_err(encode_err)?);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE hosts SET last_seen_at = GREATEST(COALESCE(last_seen_at, $2), $2) \
+             WHERE id = $1",
+        )
+        .bind(host_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        if !keys.is_empty() {
+            sqlx::query(
+                "INSERT INTO series_seen (host_id, item_key, instance, params, last_arrival) \
+                 SELECT $1, t.k, t.i, t.p, $5 \
+                 FROM UNNEST($2::text[], $3::text[], $4::jsonb[]) AS t(k, i, p) \
+                 ON CONFLICT (host_id, item_key, instance) DO UPDATE SET \
+                     last_arrival = GREATEST(series_seen.last_arrival, EXCLUDED.last_arrival)",
+            )
+            .bind(host_id)
+            .bind(&keys)
+            .bind(&instances)
+            .bind(&params)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Problems, at most `limit`: see [`ProblemFilter`] for the order.
@@ -1222,6 +1274,53 @@ mod tests {
             store.problems(ProblemFilter::All, 2).await.unwrap().len(),
             2
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn touch_seen_upserts_and_never_moves_back(pool: PgPool) {
+        let (store, host) = setup(pool.clone()).await;
+        let mount = |m: &str| Params::from([("mount".to_owned(), m.to_owned())]);
+        let series = vec![
+            ("disk.used_percent".to_owned(), mount("/")),
+            ("disk.used_percent".to_owned(), mount("/")),
+            ("cpu.usage".to_owned(), Params::new()),
+        ];
+        store.touch_seen(host, at(T0_MS), &series).await.unwrap();
+        store
+            .touch_seen(host, at(T0_MS - 5000), &series[..1])
+            .await
+            .unwrap();
+        let rows: Vec<(String, String, serde_json::Value, OffsetDateTime)> = sqlx::query_as(
+            "SELECT item_key, instance, params, last_arrival FROM series_seen \
+             ORDER BY item_key",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "cpu.usage".to_owned(),
+                    String::new(),
+                    serde_json::json!({}),
+                    at(T0_MS)
+                ),
+                (
+                    "disk.used_percent".to_owned(),
+                    "mount=/".to_owned(),
+                    serde_json::json!({"mount": "/"}),
+                    at(T0_MS)
+                ),
+            ]
+        );
+        let seen: Option<OffsetDateTime> =
+            sqlx::query_scalar("SELECT last_seen_at FROM hosts WHERE id = $1")
+                .bind(host)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(seen, Some(at(T0_MS)));
     }
 
     #[sqlx::test(migrations = "./migrations")]

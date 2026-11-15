@@ -69,6 +69,7 @@ pub async fn serve(
         store,
         metrics: Arc::new(metrics),
         config: Arc::new(config),
+        warnings: Arc::default(),
     };
     let app = router(state).layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,

@@ -25,6 +25,7 @@ fn config(listen: SocketAddr, cert: Option<&Path>, key: Option<&Path>, insecure:
         },
         ingest: IngestConfig::default(),
         gitops: Default::default(),
+        alerting: Default::default(),
     }
 }
 

@@ -26,6 +26,8 @@ pub struct Config {
     pub ingest: IngestConfig,
     #[serde(default)]
     pub gitops: GitopsConfig,
+    #[serde(default)]
+    pub alerting: AlertingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,6 +65,38 @@ impl Default for IngestConfig {
             max_future_skew_secs: default_max_future_skew_secs(),
             max_body_bytes: default_max_body_bytes(),
         }
+    }
+}
+
+/// Settings for trigger evaluation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AlertingConfig {
+    /// Values older than this are stored but never open or close a problem.
+    pub max_value_age_secs: u64,
+    /// How often the no-data check runs.
+    pub nodata_check_secs: u64,
+}
+
+impl Default for AlertingConfig {
+    fn default() -> Self {
+        Self {
+            max_value_age_secs: 300,
+            nodata_check_secs: 15,
+        }
+    }
+}
+
+impl AlertingConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let bad = |msg: &str| Err(ConfigError::Invalid(msg.to_owned()));
+        if !(10..=86_400).contains(&self.max_value_age_secs) {
+            return bad("alerting.max_value_age_secs must be between 10 and 86400");
+        }
+        if !(5..=300).contains(&self.nodata_check_secs) {
+            return bad("alerting.nodata_check_secs must be between 5 and 300");
+        }
+        Ok(())
     }
 }
 
@@ -364,6 +398,7 @@ impl Config {
         check_url("database.url", &self.database.url)?;
         check_url("metrics.url", &self.metrics.url)?;
         self.gitops.validate()?;
+        self.alerting.validate()?;
         Ok(())
     }
 }
@@ -753,6 +788,32 @@ mod tests {
             assert!(load_gitops(&gitops_toml_with_url("/srv/repo", "")).is_ok());
             #[cfg(windows)]
             assert!(load_gitops(&gitops_toml_with_url("C:/repo", "")).is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn alerting_config_defaults_and_bounds() {
+        Jail::expect_with(|_| {
+            let cfg = load_gitops(&base_toml(DB, VM)).unwrap();
+            assert_eq!(cfg.alerting.max_value_age_secs, 300);
+            assert_eq!(cfg.alerting.nodata_check_secs, 15);
+            let with =
+                |extra: &str| load_gitops(&format!("{}[alerting]\n{extra}", base_toml(DB, VM)));
+            for (value, ok) in [(9, false), (10, true), (86_400, true), (86_401, false)] {
+                let result = with(&format!("max_value_age_secs = {value}\n"));
+                assert_eq!(result.is_ok(), ok, "max_value_age_secs {value}");
+                if !ok {
+                    assert!(invalid(result).contains("alerting.max_value_age_secs"));
+                }
+            }
+            for (value, ok) in [(4, false), (5, true), (300, true), (301, false)] {
+                let result = with(&format!("nodata_check_secs = {value}\n"));
+                assert_eq!(result.is_ok(), ok, "nodata_check_secs {value}");
+                if !ok {
+                    assert!(invalid(result).contains("alerting.nodata_check_secs"));
+                }
+            }
             Ok(())
         });
     }

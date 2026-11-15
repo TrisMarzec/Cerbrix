@@ -1,5 +1,8 @@
 //! Agent-facing routes: health, enrolment, configuration and value ingest.
 
+use std::collections::BTreeMap;
+use std::time::Instant;
+
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{FromRequestParts, State};
@@ -14,7 +17,11 @@ use http_body_util::{BodyExt, LengthLimitError, Limited};
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 
+use cerbrix_common::{Selector, TriggerExpr};
+
 use super::{ApiError, AppState};
+use crate::alerting::eval::evaluate;
+use crate::alerting::{ActiveTrigger, Params, active_triggers, instance_key};
 use crate::enroll::{self, EnrollError};
 use crate::gitops::item_config;
 use crate::metrics::MetricsError;
@@ -149,8 +156,90 @@ pub(super) async fn values(
                 return Err(ApiError::internal());
             }
         }
+        evaluate_arrival(&app, &host, &accepted, now_ms).await?;
     }
     Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// Evaluates the triggers of `host` against the stored values and records the arrival.
+/// The values are already in the metrics store; an error here makes the agent resend them,
+/// which is harmless: evaluation ignores values it has already seen.
+async fn evaluate_arrival(
+    app: &AppState,
+    host: &Host,
+    accepted: &[MetricValue],
+    now_ms: i64,
+) -> Result<(), ApiError> {
+    let max_age_ms = i64::try_from(app.config.alerting.max_value_age_secs.saturating_mul(1000))
+        .unwrap_or(i64::MAX);
+    // Filled by `decide`, which is the only place the host's triggers are at hand.
+    let mut series = Vec::new();
+    let mut too_old = 0;
+    let evaluated = app
+        .store
+        .evaluate_host(host.id, false, |ctx| {
+            let triggers = ctx.config.as_ref().map(active_triggers).unwrap_or_default();
+            series = nodata_series(&triggers, accepted);
+            let evaluation = evaluate(&triggers, &ctx.states, accepted, now_ms, max_age_ms);
+            too_old = evaluation.too_old;
+            evaluation
+        })
+        .await;
+    let arrived = OffsetDateTime::now_utc();
+    let recorded = match evaluated {
+        Ok(_) => app.store.touch_seen(host.id, arrived, &series).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = recorded {
+        tracing::error!(host = %host.name, error = %e, "recording alerting state failed");
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alerting_unavailable",
+            "alerting state unavailable, retry later",
+        ));
+    }
+    if too_old > 0 && too_old == accepted.len() && app.warnings.should_warn(host.id, Instant::now())
+    {
+        tracing::warn!(
+            host = %host.name,
+            values = too_old,
+            tolerance_secs = app.config.alerting.max_value_age_secs,
+            "stored values older than the tolerance without evaluating them"
+        );
+    }
+    Ok(())
+}
+
+/// The series (item key and parameters, once each) among `values` that a no-data trigger
+/// with a selector watches.
+fn nodata_series(triggers: &[ActiveTrigger], values: &[MetricValue]) -> Vec<(String, Params)> {
+    let selectors: Vec<&Selector> = triggers
+        .iter()
+        .filter_map(|t| match &t.expr {
+            TriggerExpr::NoData {
+                selector: Some(s), ..
+            } => Some(s),
+            _ => None,
+        })
+        .collect();
+    let mut found: BTreeMap<(&str, String), &MetricValue> = BTreeMap::new();
+    for v in values {
+        let watched = selectors.iter().any(|s| {
+            s.key == v.key
+                && s.params
+                    .iter()
+                    .all(|(k, want)| v.params.get(k) == Some(want))
+        });
+        if watched {
+            found
+                .entry((v.key.as_str(), instance_key(&v.params)))
+                .or_insert(v);
+        }
+    }
+    found
+        .into_values()
+        .map(|v| (v.key.clone(), v.params.clone()))
+        .collect()
 }
 
 /// The item configuration of the authenticated host. The version is the ETag; a matching
@@ -282,6 +371,7 @@ mod tests {
                 ..IngestConfig::default()
             },
             gitops: Default::default(),
+            alerting: Default::default(),
         })
     }
 
@@ -292,6 +382,7 @@ mod tests {
             store: store.clone(),
             metrics: metrics.clone(),
             config: config(max_body_bytes),
+            warnings: Arc::default(),
         });
         (router, metrics, store)
     }
@@ -787,5 +878,239 @@ mod tests {
         let (status, _) = post_values(&second, Some(&cred), &b).await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(metrics.written().len(), 1);
+    }
+
+    // ---- alerting on ingest ----
+
+    /// Applies the example repository with `web-01` carrying `triggers` (the example
+    /// notification rule mails ops@example.com for `high` and above in `production`)
+    /// and binds its credential.
+    async fn enrol_with_triggers(store: &StateStore, triggers: serde_json::Value) -> String {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/config-repo");
+        let mut snapshot = crate::gitops::read_tree(&dir, "commit-t").unwrap();
+        let host_file = serde_json::json!({
+            "host": "web-01",
+            "groups": ["production", "web"],
+            "items": [
+                { "key": "cpu.usage", "interval": "10s" },
+                { "key": "disk.used_percent", "interval": "1m" },
+            ],
+            "triggers": triggers,
+        });
+        snapshot.files.insert(
+            "hosts/web-01.json".to_owned(),
+            serde_json::to_vec(&host_file).unwrap(),
+        );
+        let compiled = crate::gitops::compile(&snapshot).unwrap();
+        store
+            .apply_config("commit-t", &compiled, apply_time(), 50)
+            .await
+            .unwrap();
+        let host = store.host_by_name("web-01").await.unwrap().unwrap();
+        store.bind_credential(host.id).await.unwrap()
+    }
+
+    fn cpu_trigger() -> serde_json::Value {
+        serde_json::json!([
+            { "name": "CPU high", "expression": "cpu.usage > 90", "severity": "critical" }
+        ])
+    }
+
+    fn cpu(value: f64, ts_ms: i64) -> MetricValue {
+        MetricValue {
+            value,
+            ..self::value("cpu.usage", ts_ms)
+        }
+    }
+
+    async fn open_problems(store: &StateStore) -> Vec<crate::state::Problem> {
+        store
+            .problems(crate::state::ProblemFilter::Open, 100)
+            .await
+            .unwrap()
+    }
+
+    async fn last_seen(pool: &PgPool, host: &str) -> Option<OffsetDateTime> {
+        sqlx::query_scalar("SELECT last_seen_at FROM hosts WHERE name = $1")
+            .bind(host)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn value_above_threshold_opens_a_problem(pool: PgPool) {
+        let (router, _, store) = app(pool);
+        let cred = enrol_with_triggers(&store, cpu_trigger()).await;
+        let b = batch(vec![cpu(95.0, now_ms())]);
+        let (status, _) = post_values(&router, Some(&cred), &b).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let open = open_problems(&store).await;
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].host, "web-01");
+        assert_eq!(open[0].trigger, "CPU high");
+        assert_eq!(open[0].severity, cerbrix_common::config::Severity::Critical);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn value_below_threshold_resolves_it(pool: PgPool) {
+        let (router, _, store) = app(pool);
+        let cred = enrol_with_triggers(&store, cpu_trigger()).await;
+        let now = now_ms();
+        post_values(&router, Some(&cred), &batch(vec![cpu(95.0, now - 2000)])).await;
+        assert_eq!(open_problems(&store).await.len(), 1);
+        let b = batch(vec![cpu(40.0, now - 1000)]);
+        let (status, _) = post_values(&router, Some(&cred), &b).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(open_problems(&store).await.is_empty());
+        let all = store
+            .problems(crate::state::ProblemFilter::All, 10)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].resolved_at.is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn resending_the_batch_opens_nothing_new(pool: PgPool) {
+        let (router, _, store) = app(pool);
+        let cred = enrol_with_triggers(&store, cpu_trigger()).await;
+        let b = batch(vec![cpu(95.0, now_ms())]);
+        for _ in 0..2 {
+            let (status, _) = post_values(&router, Some(&cred), &b).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+        }
+        let all = store
+            .problems(crate::state::ProblemFilter::All, 10)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn old_values_are_stored_but_not_evaluated(pool: PgPool) {
+        let (router, metrics, store) = app(pool.clone());
+        let cred = enrol_with_triggers(&store, cpu_trigger()).await;
+        let old = now_ms() - 10 * 60 * 1000;
+        let (status, _) = post_values(&router, Some(&cred), &batch(vec![cpu(95.0, old)])).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(metrics.written().len(), 1);
+        assert!(open_problems(&store).await.is_empty());
+        // The value did arrive.
+        assert!(last_seen(&pool, "web-01").await.is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn store_failure_answers_503_and_keeps_semantics(pool: PgPool) {
+        let (router, metrics, store) = app(pool.clone());
+        let cred = enrol_with_triggers(&store, cpu_trigger()).await;
+        sqlx::query("ALTER TABLE trigger_states RENAME TO trigger_states_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let b = batch(vec![cpu(95.0, now_ms())]);
+        let (status, body) = post_values(&router, Some(&cred), &b).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_code(&body), "alerting_unavailable");
+        let text = String::from_utf8(body).unwrap();
+        assert!(text.contains("alerting state unavailable, retry later"));
+        assert!(!text.contains("trigger_states"));
+        // The values were written first, so a resend writes the same samples again.
+        assert_eq!(metrics.written().len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn host_without_configuration_is_fine(pool: PgPool) {
+        let (router, metrics, store) = app(pool.clone());
+        let cred = enrolled(&router, &store, "manual-01").await;
+        let b = batch(vec![cpu(95.0, now_ms())]);
+        let (status, _) = post_values(&router, Some(&cred), &b).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(metrics.written().len(), 1);
+        assert!(open_problems(&store).await.is_empty());
+        assert!(last_seen(&pool, "manual-01").await.is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn last_seen_is_updated(pool: PgPool) {
+        let (router, _, store) = app(pool.clone());
+        let cred = enrol_with_triggers(&store, serde_json::json!([])).await;
+        assert_eq!(last_seen(&pool, "web-01").await, None);
+
+        // A batch without any accepted value does not count as arrival.
+        post_values(&router, Some(&cred), &batch(vec![value("BAD", now_ms())])).await;
+        assert_eq!(last_seen(&pool, "web-01").await, None);
+
+        let before = OffsetDateTime::now_utc();
+        let b = batch(vec![cpu(1.0, now_ms())]);
+        let (status, _) = post_values(&router, Some(&cred), &b).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let seen = last_seen(&pool, "web-01").await.unwrap();
+        assert!(seen >= before - Duration::seconds(1));
+        assert!(seen <= OffsetDateTime::now_utc() + Duration::seconds(1));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_seen_only_for_nodata_selectors(pool: PgPool) {
+        let (router, _, store) = app(pool.clone());
+        let triggers = serde_json::json!([
+            { "name": "Root silent", "expression": "disk.used_percent{mount=/} no data for 5m",
+              "severity": "warning" },
+            { "name": "Host silent", "expression": "no data for 3m", "severity": "critical" },
+            { "name": "CPU high", "expression": "cpu.usage > 90", "severity": "critical" },
+        ]);
+        let cred = enrol_with_triggers(&store, triggers).await;
+        let disk = |mount: &str| MetricValue {
+            params: BTreeMap::from([("mount".to_owned(), mount.to_owned())]),
+            ..value("disk.used_percent", now_ms())
+        };
+        let b = batch(vec![
+            disk("/"),
+            disk("/"),
+            disk("/data"),
+            cpu(1.0, now_ms()),
+            value("mem.used", now_ms()),
+        ]);
+        let (status, _) = post_values(&router, Some(&cred), &b).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT item_key, instance, params FROM series_seen ORDER BY item_key, instance",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [(
+                "disk.used_percent".to_owned(),
+                "mount=/".to_owned(),
+                serde_json::json!({"mount": "/"})
+            )]
+        );
+    }
+
+    #[test]
+    fn warns_once_per_hour_per_host() {
+        let limiter = crate::api::WarnLimiter::default();
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let t0 = std::time::Instant::now();
+        let after = |secs| t0 + std::time::Duration::from_secs(secs);
+        assert!(limiter.should_warn(a, t0));
+        assert!(!limiter.should_warn(a, after(10)));
+        assert!(limiter.should_warn(b, after(10)));
+        assert!(!limiter.should_warn(a, after(3599)));
+        assert!(limiter.should_warn(a, after(3600)));
+        assert!(!limiter.should_warn(a, after(3601)));
+    }
+
+    #[test]
+    fn warn_limiter_stays_bounded() {
+        let limiter = crate::api::WarnLimiter::default();
+        let t0 = std::time::Instant::now();
+        for _ in 0..25_000 {
+            assert!(limiter.should_warn(uuid::Uuid::new_v4(), t0));
+        }
+        assert!(limiter.len() <= 10_000);
     }
 }
