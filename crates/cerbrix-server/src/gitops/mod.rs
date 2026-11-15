@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub use compile::{
     Compiled, CompiledHost, Document, DocumentKind, EffectiveHost, EffectiveItem, EffectiveTrigger,
-    compile,
+    compile, item_config,
 };
 pub use git::{ConfigSource, GitSource, SourceError};
 pub use sync::{SyncOutcome, run_sync_loop, sync_once};

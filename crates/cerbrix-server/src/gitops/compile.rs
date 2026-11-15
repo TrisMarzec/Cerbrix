@@ -55,13 +55,19 @@ impl EffectiveHost {
                 interval_secs: i.interval_secs,
             })
             .collect();
-        let json = serde_json::to_vec(&items).unwrap_or_default();
-        let version = Sha256::digest(&json)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        ItemConfig { version, items }
+        item_config(items)
     }
+}
+
+/// Wraps items into what an agent fetches, versioned by the lower-case hex SHA-256 of their
+/// JSON. Stored and default configurations share this, so equal items have equal versions.
+pub fn item_config(items: Vec<ConfiguredItem>) -> ItemConfig {
+    let json = serde_json::to_vec(&items).unwrap_or_default();
+    let version = Sha256::digest(&json)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    ItemConfig { version, items }
 }
 
 #[derive(Debug, Clone, PartialEq)]

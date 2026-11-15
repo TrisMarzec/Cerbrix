@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(agent::healthz))
         .route("/api/agent/v1/enroll", post(agent::enroll))
         .route("/api/agent/v1/values", post(agent::values))
+        .route("/api/agent/v1/config", get(agent::config))
         .with_state(state)
 }
 
