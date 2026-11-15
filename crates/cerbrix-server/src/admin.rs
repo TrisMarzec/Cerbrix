@@ -1,4 +1,4 @@
-//! Admin commands: host, enrolment key and unknown-agent management.
+//! Admin commands: hosts, enrolment keys, unknown agents, problems and notifications.
 
 use std::fmt::Write as _;
 
@@ -9,8 +9,12 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::gitops::format_issue;
-use crate::state::{StateStore, SyncChanges, SyncStatus};
+use crate::alerting::channel::{Channel, SmtpChannel};
+use crate::alerting::message::{reason_text, rfc3339, severity_word};
+use crate::alerting::{EventKind, Notification};
+use crate::config::{Config, SmtpConfig};
+use crate::gitops::{format_issue, replace_control};
+use crate::state::{Problem, ProblemFilter, StateError, StateStore, SyncChanges, SyncStatus};
 
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
@@ -23,6 +27,12 @@ pub enum AdminCommand {
     /// Show the Git sync state.
     #[command(subcommand)]
     Sync(SyncCommand),
+    /// List, inspect and acknowledge problems.
+    #[command(subcommand)]
+    Problem(ProblemCommand),
+    /// Check the e-mail setup and the notification queue.
+    #[command(subcommand)]
+    Notify(NotifyCommand),
     /// List agents that tried to enrol under an unknown name.
     UnknownAgents,
 }
@@ -47,6 +57,43 @@ pub enum SyncCommand {
         #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(i64).range(1..=1000))]
         limit: i64,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProblemCommand {
+    /// List open problems, most severe first.
+    List {
+        /// Include resolved problems, newest first.
+        #[arg(long)]
+        all: bool,
+        /// Number of problems to show (1 to 1000).
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(i64).range(1..=1000))]
+        limit: i64,
+    },
+    /// Show every field of one problem.
+    Show {
+        /// The id or at least its first 4 hexadecimal characters.
+        id: String,
+    },
+    /// Acknowledge a problem.
+    Ack {
+        /// The id or at least its first 4 hexadecimal characters.
+        id: String,
+        /// Why or how the problem is being handled.
+        #[arg(long)]
+        comment: String,
+        /// Who acknowledges the problem.
+        #[arg(long, default_value = "admin")]
+        by: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NotifyCommand {
+    /// Send one test message through the configured SMTP server.
+    Test { address: String },
+    /// Show the state of the notification queue.
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -93,17 +140,17 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         .ok_or_else(|| format!("invalid duration {s:?}: too large"))
 }
 
-/// Runs an admin command and returns the text to print. With `gitops_enabled`, hosts are
+/// Runs an admin command and returns the text to print. With `gitops.enabled`, hosts are
 /// managed by Git and cannot be added here.
 pub async fn run(
     store: &StateStore,
     command: AdminCommand,
     now: OffsetDateTime,
-    gitops_enabled: bool,
+    config: &Config,
 ) -> anyhow::Result<String> {
     match command {
         AdminCommand::Host(HostCommand::Add { name }) => {
-            if gitops_enabled {
+            if config.gitops.enabled {
                 bail!("hosts are managed by Git; add a file under hosts/ in the repository");
             }
             validate_host_name(&name).map_err(|e| anyhow!("{e}"))?;
@@ -210,6 +257,70 @@ pub async fn run(
                 .with_context(|| format!("cannot revoke key {id}"))?;
             Ok(format!("key {id} revoked"))
         }
+        AdminCommand::Problem(ProblemCommand::List { all, limit }) => {
+            let filter = if all {
+                ProblemFilter::All
+            } else {
+                ProblemFilter::Open
+            };
+            let problems = store.problems(filter, limit).await?;
+            if problems.is_empty() {
+                return Ok(if all {
+                    "no problems"
+                } else {
+                    "no open problems"
+                }
+                .to_owned());
+            }
+            Ok(problems
+                .iter()
+                .map(problem_line)
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        AdminCommand::Problem(ProblemCommand::Show { id }) => {
+            let p = find_problem(store, &id).await?;
+            Ok(problem_details(&p))
+        }
+        AdminCommand::Problem(ProblemCommand::Ack { id, comment, by }) => {
+            let comment = replace_control_by_space(&comment).trim().to_owned();
+            if comment.is_empty() {
+                bail!("--comment must not be empty");
+            }
+            let by = replace_control_by_space(&by).trim().to_owned();
+            if by.is_empty() {
+                bail!("--by must not be empty");
+            }
+            let p = find_problem(store, &id).await?;
+            match store.acknowledge_problem(p.id, &by, &comment, now).await {
+                Ok(p) => Ok(format!("problem {} acknowledged", p.id)),
+                Err(StateError::NotFound) => bail!("no problem with id {}", p.id),
+                Err(e) => Err(e.into()),
+            }
+        }
+        AdminCommand::Notify(NotifyCommand::Test { address }) => {
+            notify_test(&config.smtp, &address).await
+        }
+        AdminCommand::Notify(NotifyCommand::Status) => {
+            let s = store.outbox_summary(now).await?;
+            let oldest = match s.oldest_pending {
+                Some(o) => format!(
+                    "{} to {}, {} attempts, last error: {}",
+                    rfc3339(o.created_at),
+                    replace_control(&o.recipient),
+                    o.attempts,
+                    o.last_error
+                        .as_deref()
+                        .map_or_else(|| "none".to_owned(), replace_control)
+                ),
+                None => "none".to_owned(),
+            };
+            Ok(format!(
+                "pending: {}\nsent in the last 24 hours: {}\nfailed in the last 24 hours: {}\n\
+                 oldest pending: {oldest}",
+                s.pending, s.sent_24h, s.failed_24h
+            ))
+        }
         AdminCommand::UnknownAgents => {
             let agents = store.unknown_agents().await?;
             if agents.is_empty() {
@@ -229,6 +340,128 @@ pub async fn run(
             Ok(out)
         }
     }
+}
+
+/// Control characters become spaces (for text that is stored).
+fn replace_control_by_space(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Resolves an id or id prefix (at least 4 hexadecimal characters, dashes optional) to
+/// exactly one problem.
+async fn find_problem(store: &StateStore, input: &str) -> anyhow::Result<Problem> {
+    let prefix: String = input
+        .chars()
+        .filter(|c| *c != '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if prefix.chars().count() < 4 {
+        bail!("give at least 4 characters of the id");
+    }
+    if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("{} is not a problem id", replace_control(input));
+    }
+    let mut found = store.problem_by_prefix(&prefix).await?;
+    match found.len() {
+        0 => bail!("no problem with id {}", replace_control(input)),
+        1 => Ok(found.remove(0)),
+        n => bail!("the id prefix matches {n} problems"),
+    }
+}
+
+/// `<started>  <SEVERITY>  <host>  <trigger>[ (<instance>)]  <state>  <id prefix>`
+fn problem_line(p: &Problem) -> String {
+    let mut what = replace_control(&p.trigger);
+    if !p.instance.is_empty() {
+        what.push_str(&format!(" ({})", replace_control(&p.instance)));
+    }
+    let state = if let Some(end) = p.resolved_at {
+        match &p.resolve_reason {
+            Some(reason) => format!(
+                "resolved {} ({})",
+                rfc3339(end),
+                replace_control(&reason_text(reason))
+            ),
+            None => format!("resolved {}", rfc3339(end)),
+        }
+    } else if let Some(who) = &p.acknowledged_by {
+        format!("acknowledged by {}", replace_control(who))
+    } else {
+        "open".to_owned()
+    };
+    format!(
+        "{}  {}  {}  {what}  {state}  {}",
+        rfc3339(p.started_at),
+        severity_word(p.severity),
+        replace_control(&p.host),
+        &p.id.to_string()[..8]
+    )
+}
+
+/// One `Label: value` line per field.
+fn problem_details(p: &Problem) -> String {
+    let mut lines = vec![
+        format!("Id: {}", p.id),
+        format!("Host: {}", replace_control(&p.host)),
+        format!("Trigger: {}", replace_control(&p.trigger)),
+    ];
+    if !p.instance.is_empty() {
+        lines.push(format!("Instance: {}", replace_control(&p.instance)));
+    }
+    lines.push(format!("Severity: {}", severity_word(p.severity)));
+    lines.push(format!("Detail: {}", replace_control(&p.summary)));
+    lines.push(format!("Started: {}", rfc3339(p.started_at)));
+    if let Some(end) = p.resolved_at {
+        lines.push(format!("Ended: {}", rfc3339(end)));
+        if let Some(reason) = &p.resolve_reason {
+            lines.push(format!("Reason: {}", replace_control(&reason_text(reason))));
+        }
+    }
+    if let Some(at) = p.acknowledged_at {
+        lines.push(format!(
+            "Acknowledged: {} by {}",
+            rfc3339(at),
+            replace_control(p.acknowledged_by.as_deref().unwrap_or("-"))
+        ));
+        if let Some(comment) = &p.ack_comment {
+            lines.push(format!("Comment: {}", replace_control(comment)));
+        }
+    }
+    lines.join("\n")
+}
+
+/// The message of `admin notify test`, clearly marked as a test.
+fn test_notification() -> Notification {
+    Notification {
+        kind: EventKind::Started,
+        host: "cerbrix-test".to_owned(),
+        // The subject shows host and summary, the body shows the trigger: the summary stays
+        // short and the explanation goes into the trigger line of the body.
+        trigger: "This is a test message sent with \"cerbrix-server admin notify test\"."
+            .to_owned(),
+        instance: String::new(),
+        severity: cerbrix_common::config::Severity::Info,
+        summary: "Test message".to_owned(),
+        started_at: OffsetDateTime::now_utc(),
+        resolved_at: None,
+        resolve_reason: None,
+    }
+}
+
+/// Sends the test message. Needs no database.
+pub async fn notify_test(smtp: &SmtpConfig, address: &str) -> anyhow::Result<String> {
+    let Some(host) = smtp.host.as_deref() else {
+        bail!("no SMTP server configured (smtp.host)");
+    };
+    let channel = SmtpChannel::new(smtp)?;
+    channel.send(address, &test_notification()).await?;
+    Ok(format!(
+        "test message accepted by {}:{}",
+        replace_control(host),
+        smtp.port
+    ))
 }
 
 /// Counts of one apply, e.g. `hosts +2 ~1 -0, dashboards +1`. Hosts always show all three
@@ -267,11 +500,39 @@ fn describe_changes(changes: &SyncChanges) -> String {
 
 #[cfg(test)]
 mod tests {
+    use cerbrix_common::config::Severity;
+
     use super::*;
+    use crate::alerting::{Evaluation, EventKind, OpenProblem, ResolveProblem};
     use sqlx::PgPool;
 
     fn now() -> OffsetDateTime {
         OffsetDateTime::now_utc()
+    }
+
+    fn cfg(gitops_enabled: bool) -> Config {
+        use crate::config::{DatabaseConfig, MetricsConfig, ServerConfig};
+        Config {
+            server: ServerConfig {
+                listen: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                tls_cert: None,
+                tls_key: None,
+                insecure_http: true,
+            },
+            database: DatabaseConfig {
+                url: "postgres://localhost/unused".into(),
+            },
+            metrics: MetricsConfig {
+                url: "http://localhost:8428".into(),
+            },
+            ingest: Default::default(),
+            gitops: crate::config::GitopsConfig {
+                enabled: gitops_enabled,
+                ..Default::default()
+            },
+            alerting: Default::default(),
+            smtp: Default::default(),
+        }
     }
 
     #[test]
@@ -302,8 +563,8 @@ mod tests {
                 name: "web-01".to_owned(),
             })
         };
-        run(&store, add(), now(), false).await.unwrap();
-        let err = run(&store, add(), now(), false).await.unwrap_err();
+        run(&store, add(), now(), &cfg(false)).await.unwrap();
+        let err = run(&store, add(), now(), &cfg(false)).await.unwrap_err();
         assert!(format!("{err:#}").contains("web-01"), "{err:#}");
     }
 
@@ -317,9 +578,11 @@ mod tests {
                 name: name.to_owned(),
             })
         };
-        run(&store, release("web-01"), now(), false).await.unwrap();
+        run(&store, release("web-01"), now(), &cfg(false))
+            .await
+            .unwrap();
         assert!(store.host_for_credential(&cred).await.unwrap().is_none());
-        let err = run(&store, release("nope"), now(), false)
+        let err = run(&store, release("nope"), now(), &cfg(false))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("nope"));
@@ -336,7 +599,7 @@ mod tests {
                 expires_in: parse_duration("30d").unwrap(),
             }),
             t0,
-            false,
+            &cfg(false),
         )
         .await
         .unwrap();
@@ -367,7 +630,7 @@ mod tests {
             &store,
             AdminCommand::Key(KeyCommand::Revoke { id }),
             t0,
-            false,
+            &cfg(false),
         )
         .await
         .unwrap();
@@ -378,14 +641,14 @@ mod tests {
     async fn unknown_agents_lists_recorded_names(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         assert_eq!(
-            run(&store, AdminCommand::UnknownAgents, now(), false)
+            run(&store, AdminCommand::UnknownAgents, now(), &cfg(false))
                 .await
                 .unwrap(),
             "no unknown agents"
         );
         store.record_unknown_agent("ghost-a", now()).await.unwrap();
         store.record_unknown_agent("ghost-b", now()).await.unwrap();
-        let out = run(&store, AdminCommand::UnknownAgents, now(), false)
+        let out = run(&store, AdminCommand::UnknownAgents, now(), &cfg(false))
             .await
             .unwrap();
         assert!(out.contains("ghost-a") && out.contains("ghost-b"), "{out}");
@@ -406,7 +669,7 @@ mod tests {
                 name: "web-01".to_owned(),
             }),
             now(),
-            true,
+            &cfg(true),
         )
         .await
         .unwrap_err();
@@ -429,7 +692,9 @@ mod tests {
                 name: name.to_owned(),
             })
         };
-        let out = run(&store, show("web-01"), now(), true).await.unwrap();
+        let out = run(&store, show("web-01"), now(), &cfg(true))
+            .await
+            .unwrap();
         assert!(out.contains("name: web-01"), "{out}");
         assert!(out.contains("active: yes"), "{out}");
         assert!(out.contains("address: 10.0.4.12"), "{out}");
@@ -437,11 +702,15 @@ mod tests {
         assert!(out.contains("source file: hosts/web-01.json"), "{out}");
         assert!(out.contains("\"origin\": \"template:linux-base\""), "{out}");
 
-        let err = run(&store, show("nope"), now(), true).await.unwrap_err();
+        let err = run(&store, show("nope"), now(), &cfg(true))
+            .await
+            .unwrap_err();
         assert_eq!(err.to_string(), "unknown host nope");
 
         store.create_host("manual-01").await.unwrap();
-        let out = run(&store, show("manual-01"), now(), false).await.unwrap();
+        let out = run(&store, show("manual-01"), now(), &cfg(false))
+            .await
+            .unwrap();
         assert!(
             out.contains("no configuration from Git; the agent uses the built-in defaults"),
             "{out}"
@@ -452,7 +721,7 @@ mod tests {
     async fn sync_status_out_of_sync_lists_issue(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         let status = || AdminCommand::Sync(SyncCommand::Status);
-        let out = run(&store, status(), now(), true).await.unwrap();
+        let out = run(&store, status(), now(), &cfg(true)).await.unwrap();
         assert!(out.starts_with("never synced"), "{out}");
 
         let t = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
@@ -473,7 +742,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let out = run(&store, status(), now(), true).await.unwrap();
+        let out = run(&store, status(), now(), &cfg(true)).await.unwrap();
         assert!(out.starts_with("out of sync"), "{out}");
         assert!(out.contains("active commit: abc123"), "{out}");
         assert!(
@@ -491,17 +760,380 @@ mod tests {
     async fn sync_history_formats_counts(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         let history = |limit| AdminCommand::Sync(SyncCommand::History { limit });
-        let out = run(&store, history(20), now(), true).await.unwrap();
+        let out = run(&store, history(20), now(), &cfg(true)).await.unwrap();
         assert_eq!(out, "no sync history");
         let t = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
         store
             .apply_config("0123456789abcdef0123", &example_compiled(), t, 50, false)
             .await
             .unwrap();
-        let out = run(&store, history(20), now(), true).await.unwrap();
+        let out = run(&store, history(20), now(), &cfg(true)).await.unwrap();
         assert_eq!(
             out,
             "2027-01-15T08:00:00Z 0123456789ab hosts +2 ~0 -0, templates +1, notifications +1, dashboards +1, displays +1"
+        );
+    }
+
+    const T0_MS: i64 = 1_800_000_000_000;
+
+    fn at(ms: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).unwrap()
+    }
+
+    fn open(trigger: &str, instance: &str, severity: Severity, at_ms: i64) -> OpenProblem {
+        OpenProblem {
+            trigger: trigger.to_owned(),
+            instance: instance.to_owned(),
+            severity,
+            at_ms,
+            summary: format!("{trigger} is bad"),
+        }
+    }
+
+    /// A store with the example configuration; returns the id of `web-01`.
+    async fn alerting_store(pool: PgPool) -> (StateStore, Uuid) {
+        let store = StateStore::from_pool(pool);
+        store
+            .apply_config("c1", &example_compiled(), at(T0_MS), 50, false)
+            .await
+            .unwrap();
+        let host = store.host_by_name("web-01").await.unwrap().unwrap().id;
+        (store, host)
+    }
+
+    async fn open_problems(
+        store: &StateStore,
+        host: Uuid,
+        mail: bool,
+        open: Vec<OpenProblem>,
+    ) -> Vec<Uuid> {
+        store
+            .evaluate_host(host, mail, |_| Evaluation {
+                open,
+                ..Evaluation::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.problem_id)
+            .collect()
+    }
+
+    fn list(all: bool) -> AdminCommand {
+        AdminCommand::Problem(ProblemCommand::List { all, limit: 50 })
+    }
+
+    fn show(id: &str) -> AdminCommand {
+        AdminCommand::Problem(ProblemCommand::Show { id: id.to_owned() })
+    }
+
+    fn ack(id: &str, comment: &str, by: Option<&str>) -> AdminCommand {
+        AdminCommand::Problem(ProblemCommand::Ack {
+            id: id.to_owned(),
+            comment: comment.to_owned(),
+            by: by.unwrap_or("admin").to_owned(),
+        })
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problem_list_formats_lines(pool: PgPool) {
+        let (store, host) = alerting_store(pool).await;
+        let c = cfg(false);
+        assert_eq!(
+            run(&store, list(false), now(), &c).await.unwrap(),
+            "no open problems"
+        );
+        let ids = open_problems(
+            &store,
+            host,
+            false,
+            vec![open("Disk", "mount=/", Severity::Critical, T0_MS)],
+        )
+        .await;
+        let out = run(&store, list(false), now(), &c).await.unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "2027-01-15T08:00:00Z  CRITICAL  web-01  Disk (mount=/)  open  {}",
+                &ids[0].to_string()[..8]
+            )
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problem_list_all_includes_resolved_with_reason(pool: PgPool) {
+        let (store, host) = alerting_store(pool.clone()).await;
+        let c = cfg(false);
+        let ids = open_problems(
+            &store,
+            host,
+            false,
+            vec![
+                open("Gone", "", Severity::Warning, T0_MS),
+                open("Cpu", "", Severity::High, T0_MS + 1000),
+                open("Acked", "", Severity::Info, T0_MS + 2000),
+            ],
+        )
+        .await;
+        sqlx::query(
+            "UPDATE problems SET resolved_at = $2, resolve_reason = 'trigger_removed' \
+             WHERE id = $1",
+        )
+        .bind(ids[0])
+        .bind(at(T0_MS + 60_000))
+        .execute(&pool)
+        .await
+        .unwrap();
+        store
+            .acknowledge_problem(ids[1], "anna", "on it", at(T0_MS + 5000))
+            .await
+            .unwrap();
+        let open_only = run(&store, list(false), now(), &c).await.unwrap();
+        assert!(!open_only.contains("Gone"), "{open_only}");
+        let out = run(&store, list(true), now(), &c).await.unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        // Newest first.
+        assert_eq!(
+            lines[0],
+            format!(
+                "2027-01-15T08:00:02Z  INFO  web-01  Acked  open  {}",
+                &ids[2].to_string()[..8]
+            )
+        );
+        assert_eq!(
+            lines[1],
+            format!(
+                "2027-01-15T08:00:01Z  HIGH  web-01  Cpu  acknowledged by anna  {}",
+                &ids[1].to_string()[..8]
+            )
+        );
+        assert_eq!(
+            lines[2],
+            format!(
+                "2027-01-15T08:00:00Z  WARNING  web-01  Gone  resolved 2027-01-15T08:01:00Z \
+                 (the trigger was removed from the configuration)  {}",
+                &ids[0].to_string()[..8]
+            )
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problem_ack_by_prefix_and_default_name(pool: PgPool) {
+        let (store, host) = alerting_store(pool).await;
+        let c = cfg(false);
+        let ids = open_problems(
+            &store,
+            host,
+            false,
+            vec![open("Disk", "", Severity::High, T0_MS)],
+        )
+        .await;
+        let id = ids[0];
+        let prefix = id.to_string()[..8].to_uppercase();
+        let out = run(&store, ack(&prefix, "  looking\ninto it ", None), now(), &c)
+            .await
+            .unwrap();
+        assert_eq!(out, format!("problem {id} acknowledged"));
+        let p = &store.problems(ProblemFilter::All, 10).await.unwrap()[0];
+        assert_eq!(p.acknowledged_by.as_deref(), Some("admin"));
+        assert_eq!(p.ack_comment.as_deref(), Some("looking into it"));
+        // Dashes are accepted, and a new acknowledgement replaces the earlier one.
+        let dashed = id.to_string()[..13].to_owned();
+        run(&store, ack(&dashed, "again", Some("a\x07b")), now(), &c)
+            .await
+            .unwrap();
+        let p = &store.problems(ProblemFilter::All, 10).await.unwrap()[0];
+        assert_eq!(p.acknowledged_by.as_deref(), Some("a b"));
+        // The full id works too.
+        run(&store, ack(&id.to_string(), "x", None), now(), &c)
+            .await
+            .unwrap();
+        // An empty comment is refused.
+        let err = run(&store, ack(&prefix, "  ", None), now(), &c)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "--comment must not be empty");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn ambiguous_prefix_is_an_error(pool: PgPool) {
+        let (store, host) = alerting_store(pool.clone()).await;
+        let ids = open_problems(
+            &store,
+            host,
+            false,
+            vec![
+                open("A", "", Severity::High, T0_MS),
+                open("B", "", Severity::High, T0_MS),
+            ],
+        )
+        .await;
+        // Give both problems ids that share a prefix.
+        for (n, id) in ids.iter().enumerate() {
+            sqlx::query("UPDATE problems SET id = $2::uuid WHERE id = $1")
+                .bind(id)
+                .bind(format!("abcd0000-0000-0000-0000-00000000000{}", n + 1))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let c = cfg(false);
+        let err = run(&store, show("abcd"), now(), &c).await.unwrap_err();
+        assert_eq!(err.to_string(), "the id prefix matches 2 problems");
+        let err = run(&store, ack("ABCD0000", "x", None), now(), &c)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "the id prefix matches 2 problems");
+        let full = "abcd0000-0000-0000-0000-000000000002";
+        assert!(run(&store, show(full), now(), &c).await.is_ok());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn unknown_id_is_an_error(pool: PgPool) {
+        let (store, _) = alerting_store(pool).await;
+        let c = cfg(false);
+        let err = run(&store, show("ffff"), now(), &c).await.unwrap_err();
+        assert_eq!(err.to_string(), "no problem with id ffff");
+        let err = run(&store, ack("ffffffff", "x", None), now(), &c)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "no problem with id ffffffff");
+        let err = run(&store, show("abc"), now(), &c).await.unwrap_err();
+        assert_eq!(err.to_string(), "give at least 4 characters of the id");
+        let err = run(&store, show("a-b-c"), now(), &c).await.unwrap_err();
+        assert_eq!(err.to_string(), "give at least 4 characters of the id");
+        assert!(run(&store, show("zzzz"), now(), &c).await.is_err());
+        assert!(run(&store, show("%%%%"), now(), &c).await.is_err());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problem_show_prints_every_field(pool: PgPool) {
+        let (store, host) = alerting_store(pool).await;
+        let c = cfg(false);
+        let mut o = open("Disk", "mount=/", Severity::High, T0_MS);
+        o.summary = "Disk\x1b[31m full".to_owned();
+        let id = open_problems(&store, host, false, vec![o]).await[0];
+        let out = run(&store, show(&id.to_string()[..6]), now(), &c)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "Id: {id}\nHost: web-01\nTrigger: Disk\nInstance: mount=/\nSeverity: HIGH\n\
+                 Detail: Disk?[31m full\nStarted: 2027-01-15T08:00:00Z"
+            )
+        );
+        store
+            .evaluate_host(host, false, |_| Evaluation {
+                resolve: vec![ResolveProblem {
+                    trigger: "Disk".into(),
+                    instance: "mount=/".into(),
+                    at_ms: T0_MS + 90_000,
+                }],
+                ..Evaluation::default()
+            })
+            .await
+            .unwrap();
+        store
+            .acknowledge_problem(id, "anna", "swapped\tdisk", at(T0_MS + 5000))
+            .await
+            .unwrap();
+        let out = run(&store, show(&id.to_string()), now(), &c).await.unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "Id: {id}\nHost: web-01\nTrigger: Disk\nInstance: mount=/\nSeverity: HIGH\n\
+                 Detail: Disk?[31m full\nStarted: 2027-01-15T08:00:00Z\n\
+                 Ended: 2027-01-15T08:01:30Z\n\
+                 Reason: the condition no longer holds\n\
+                 Acknowledged: 2027-01-15T08:00:05Z by anna\nComment: swapped?disk"
+            )
+        );
+    }
+
+    #[test]
+    fn data_with_control_characters_is_neutralised_in_the_list() {
+        let p = Problem {
+            id: Uuid::nil(),
+            host_id: Uuid::nil(),
+            host: "h\x1b]0;x".into(),
+            trigger: "t\n".into(),
+            instance: String::new(),
+            severity: Severity::Info,
+            summary: String::new(),
+            started_at: at(T0_MS),
+            resolved_at: None,
+            resolve_reason: None,
+            acknowledged_at: Some(at(T0_MS)),
+            acknowledged_by: Some("w\rho".into()),
+            ack_comment: None,
+        };
+        let line = problem_line(&p);
+        assert!(!line.contains(char::is_control), "{line:?}");
+        assert!(line.contains("acknowledged by w?ho"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn notify_test_without_smtp_fails_with_hint() {
+        let err = notify_test(&cfg(false).smtp, "ops@example.com")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "no SMTP server configured (smtp.host)");
+    }
+
+    #[test]
+    fn test_notification_is_clearly_marked() {
+        let n = test_notification();
+        assert_eq!(n.kind, EventKind::Started);
+        assert_eq!(n.subject(), "[Cerbrix] INFO cerbrix-test: Test message");
+        assert!(n.body().contains("cerbrix-server admin notify test"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn notify_status_counts(pool: PgPool) {
+        let (store, host) = alerting_store(pool).await;
+        let c = cfg(false);
+        let status = || AdminCommand::Notify(NotifyCommand::Status);
+        let now = at(T0_MS + 2 * 3_600_000);
+        assert_eq!(
+            run(&store, status(), now, &c).await.unwrap(),
+            "pending: 0\nsent in the last 24 hours: 0\nfailed in the last 24 hours: 0\n\
+             oldest pending: none"
+        );
+        open_problems(
+            &store,
+            host,
+            true,
+            (0..4)
+                .map(|i| open(&format!("T{i}"), "", Severity::High, T0_MS + i * 1000))
+                .collect(),
+        )
+        .await;
+        let items = store.claim_notifications(now, 10).await.unwrap();
+        assert_eq!(items.len(), 4);
+        let hour = Duration::hours(1);
+        store
+            .mark_notification_sent(items[0].id, now - hour)
+            .await
+            .unwrap();
+        store
+            .mark_notification_failed(items[1].id, "boom", now - hour)
+            .await
+            .unwrap();
+        store
+            .mark_notification_retry(items[2].id, "connection refused", now)
+            .await
+            .unwrap();
+        store
+            .mark_notification_sent(items[3].id, now - Duration::hours(48))
+            .await
+            .unwrap();
+        assert_eq!(
+            run(&store, status(), now, &c).await.unwrap(),
+            "pending: 1\nsent in the last 24 hours: 1\nfailed in the last 24 hours: 1\n\
+             oldest pending: 2027-01-15T08:00:02Z to ops@example.com, 1 attempts, \
+             last error: connection refused"
         );
     }
 }

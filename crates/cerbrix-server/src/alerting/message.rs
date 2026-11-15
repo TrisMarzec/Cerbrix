@@ -92,7 +92,7 @@ impl Notification {
     }
 }
 
-fn severity_word(severity: Severity) -> &'static str {
+pub(crate) fn severity_word(severity: Severity) -> &'static str {
     match severity {
         Severity::Info => "INFO",
         Severity::Warning => "WARNING",
@@ -108,7 +108,7 @@ fn clean(text: &str) -> String {
         .collect()
 }
 
-fn reason_text(reason: &str) -> String {
+pub(crate) fn reason_text(reason: &str) -> String {
     match reason {
         "condition_ended" => "the condition no longer holds".to_string(),
         "host_removed" => "the host was removed from the configuration".to_string(),
@@ -118,7 +118,7 @@ fn reason_text(reason: &str) -> String {
 }
 
 /// RFC 3339 in UTC with seconds precision, e.g. `2026-11-15T14:20:00Z`.
-fn rfc3339(at: OffsetDateTime) -> String {
+pub(crate) fn rfc3339(at: OffsetDateTime) -> String {
     let at = at.to_offset(time::UtcOffset::UTC);
     let at = at.replace_nanosecond(0).unwrap_or(at);
     at.format(&Rfc3339).unwrap_or_else(|_| at.to_string())

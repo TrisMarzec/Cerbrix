@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use cerbrix_server::admin::{self, AdminCommand};
+use cerbrix_server::admin::{self, AdminCommand, NotifyCommand};
 use cerbrix_server::config::Config;
 use cerbrix_server::gitops;
 use cerbrix_server::state::StateStore;
@@ -76,17 +76,19 @@ async fn main() -> ExitCode {
             }
         },
         Command::Admin(command) => {
-            let result = async {
-                let store = StateStore::connect(&config.database.url).await?;
-                admin::run(
-                    &store,
-                    command,
-                    OffsetDateTime::now_utc(),
-                    config.gitops.enabled,
-                )
-                .await
-            }
-            .await;
+            let result = match command {
+                // Needs only the SMTP settings, so it works while the database is down.
+                AdminCommand::Notify(NotifyCommand::Test { address }) => {
+                    admin::notify_test(&config.smtp, &address).await
+                }
+                command => {
+                    async {
+                        let store = StateStore::connect(&config.database.url).await?;
+                        admin::run(&store, command, OffsetDateTime::now_utc(), &config).await
+                    }
+                    .await
+                }
+            };
             match result {
                 Ok(text) => {
                     println!("{text}");

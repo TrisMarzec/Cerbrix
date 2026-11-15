@@ -41,6 +41,25 @@ pub struct Problem {
     pub ack_comment: Option<String>,
 }
 
+/// Counts of the notification outbox.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutboxSummary {
+    /// Neither sent nor given up on.
+    pub pending: i64,
+    pub sent_24h: i64,
+    pub failed_24h: i64,
+    pub oldest_pending: Option<OldestPending>,
+}
+
+/// The pending outbox row that was created first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OldestPending {
+    pub created_at: OffsetDateTime,
+    pub recipient: String,
+    pub attempts: i32,
+    pub last_error: Option<String>,
+}
+
 /// What `decide` of [`StateStore::evaluate_host`] sees.
 #[derive(Debug, Clone)]
 pub struct AlertContext {
@@ -628,6 +647,57 @@ impl StateStore {
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter().map(problem_from).collect()
+    }
+
+    /// Problems whose id starts with `prefix`: lower-case hexadecimal characters without
+    /// dashes. At most 1000 are returned. Matching is done on the text form of the id.
+    pub async fn problem_by_prefix(&self, prefix: &str) -> Result<Vec<Problem>, StateError> {
+        if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<ProblemRow> = sqlx::query_as(problem_query!(
+            "WHERE starts_with(replace(p.id::text, '-', ''), $1) ORDER BY p.started_at, p.id \
+             LIMIT 1000"
+        ))
+        .bind(prefix.to_ascii_lowercase())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(problem_from).collect()
+    }
+
+    /// Counts of the notification outbox at `now`.
+    pub async fn outbox_summary(&self, now: OffsetDateTime) -> Result<OutboxSummary, StateError> {
+        let since = now - Duration::hours(24);
+        let (pending, sent_24h, failed_24h): (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                 count(*) FILTER (WHERE sent_at IS NULL AND failed_at IS NULL), \
+                 count(*) FILTER (WHERE sent_at > $1 AND sent_at <= $2), \
+                 count(*) FILTER (WHERE failed_at > $1 AND failed_at <= $2) \
+             FROM notification_outbox",
+        )
+        .bind(since)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        let oldest: Option<(OffsetDateTime, String, i32, Option<String>)> = sqlx::query_as(
+            "SELECT created_at, recipient, attempts, last_error FROM notification_outbox \
+             WHERE sent_at IS NULL AND failed_at IS NULL ORDER BY created_at, id LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(OutboxSummary {
+            pending,
+            sent_24h,
+            failed_24h,
+            oldest_pending: oldest.map(|(created_at, recipient, attempts, last_error)| {
+                OldestPending {
+                    created_at,
+                    recipient,
+                    attempts,
+                    last_error,
+                }
+            }),
+        })
     }
 
     /// Records who acknowledged a problem; acknowledging again overwrites. `NotFound` for an
