@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cerbrix_common::{Selector, TriggerExpr, parse_trigger};
 use serde::{Deserialize, Serialize};
 use sqlx::pool::PoolConnection;
 use sqlx::types::Json;
@@ -9,6 +10,7 @@ use sqlx::{Postgres, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::alerting::{close_open_problems, delete_trigger_states};
 use super::{StateError, StateStore};
 use crate::gitops::{Compiled, EffectiveHost, SyncIssue};
 
@@ -64,6 +66,14 @@ pub struct SyncChanges {
     pub notifications: ChangeSet,
     pub dashboards: ChangeSet,
     pub displays: ChangeSet,
+}
+
+/// The result of applying a revision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Applied {
+    pub changes: SyncChanges,
+    /// Open problems closed because their host or trigger is no longer monitored.
+    pub problems_closed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,15 +175,91 @@ fn kind_set<'a>(changes: &'a mut SyncChanges, kind: &str) -> &'a mut ChangeSet {
     }
 }
 
+/// What a trigger watches. Two triggers with the same name and the same `Watches` are the
+/// same trigger as far as its stored state goes; threshold, operator, hold time, window and
+/// severity are not part of it.
+#[derive(PartialEq)]
+enum Watches {
+    Comparison(Selector),
+    NoData(Option<Selector>),
+}
+
+fn watches(expression: &str) -> Option<Watches> {
+    match parse_trigger(expression).ok()? {
+        TriggerExpr::Compare { selector, .. } => Some(Watches::Comparison(selector)),
+        TriggerExpr::NoData { selector, .. } => Some(Watches::NoData(selector)),
+    }
+}
+
+/// Closes what the new revision no longer monitors on hosts that stay: open problems and
+/// stored states of triggers that are gone, and of triggers that now watch something else
+/// (another kind or selector), because no evaluation would visit their old instances again.
+/// A trigger that only changed its threshold, operator, hold time, window or severity keeps
+/// both. A stored expression that no longer parses counts as changed. Returns the number of
+/// problems closed.
+async fn close_unmonitored(
+    tx: &mut sqlx::PgConnection,
+    stored: &BTreeMap<&str, &HostSnapshot>,
+    compiled: &Compiled,
+    now: OffsetDateTime,
+    queue_mail: bool,
+) -> Result<usize, StateError> {
+    let mut host_ids = Vec::new();
+    let mut keep = Vec::new();
+    for host in &compiled.hosts {
+        let Some(old) = stored.get(host.name.as_str()).filter(|h| h.2) else {
+            continue;
+        };
+        host_ids.push(old.0);
+        // `None`: a host without configuration (it had no triggers) or one that cannot be read.
+        let old_triggers: Option<BTreeMap<String, String>> = match &old.6 {
+            None => Some(BTreeMap::new()),
+            Some(value) => serde_json::from_value::<EffectiveHost>(value.clone())
+                .ok()
+                .map(|h| {
+                    h.triggers
+                        .into_iter()
+                        .map(|t| (t.name, t.expression))
+                        .collect()
+                }),
+        };
+        for trigger in &host.effective.triggers {
+            let unchanged = match old_triggers.as_ref().map(|t| t.get(&trigger.name)) {
+                None => false,
+                Some(None) => true,
+                Some(Some(old_expr)) => {
+                    let new = watches(&trigger.expression);
+                    new.is_some() && watches(old_expr) == new
+                }
+            };
+            if unchanged {
+                keep.push((old.0, trigger.name.clone()));
+            }
+        }
+    }
+    if host_ids.is_empty() {
+        return Ok(0);
+    }
+    let closed =
+        close_open_problems(tx, &host_ids, &keep, "trigger_removed", now, queue_mail).await?;
+    delete_trigger_states(tx, &host_ids, &keep).await?;
+    Ok(closed)
+}
+
 impl StateStore {
     /// Applies a compiled configuration in one transaction and records it in the history.
+    ///
+    /// Problems of removed hosts and of removed or re-targeted triggers are closed in the
+    /// same transaction; with `queue_mail` the people mailed about
+    /// their start are told they ended.
     pub async fn apply_config(
         &self,
         commit: &str,
         compiled: &Compiled,
         now: OffsetDateTime,
         max_host_removal_percent: u8,
-    ) -> Result<SyncChanges, ApplyError> {
+        queue_mail: bool,
+    ) -> Result<Applied, ApplyError> {
         let mut tx = self.pool.begin().await?;
         let mut changes = SyncChanges::default();
 
@@ -244,12 +330,24 @@ impl StateStore {
             }
         }
 
+        let mut problems_closed = 0;
         if !removed.is_empty() {
             let ids: Vec<Uuid> = removed.iter().map(|h| h.0).collect();
-            sqlx::query("UPDATE hosts SET active = false, config = NULL WHERE id = ANY($1)")
+            problems_closed +=
+                close_open_problems(&mut tx, &ids, &[], "host_removed", now, queue_mail).await?;
+            delete_trigger_states(&mut tx, &ids, &[]).await?;
+            sqlx::query("DELETE FROM series_seen WHERE host_id = ANY($1)")
                 .bind(&ids)
                 .execute(&mut *tx)
                 .await?;
+            // A host that returns later starts clean: A6 (no data) applies to it again.
+            sqlx::query(
+                "UPDATE hosts SET active = false, config = NULL, last_seen_at = NULL \
+                 WHERE id = ANY($1)",
+            )
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
             sqlx::query("DELETE FROM agent_credentials WHERE host_id = ANY($1)")
                 .bind(&ids)
                 .execute(&mut *tx)
@@ -259,6 +357,7 @@ impl StateStore {
                 .removed
                 .extend(removed.iter().map(|h| h.1.clone()));
         }
+        problems_closed += close_unmonitored(&mut tx, &by_name, compiled, now, queue_mail).await?;
 
         // Documents: compare with what is stored, then replace everything.
         let old_docs: Vec<(String, String, String, serde_json::Value)> =
@@ -329,7 +428,10 @@ impl StateStore {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        Ok(changes)
+        Ok(Applied {
+            changes,
+            problems_closed,
+        })
     }
 
     /// Marks the installation Out Of Sync; the active configuration stays untouched.
@@ -502,7 +604,11 @@ mod tests {
         let store = StateStore::from_pool(pool);
         assert_eq!(store.sync_state().await.unwrap().status, SyncStatus::Never);
         let compiled = example();
-        let changes = store.apply_config("c1", &compiled, t0(), 50).await.unwrap();
+        let changes = store
+            .apply_config("c1", &compiled, t0(), 50, false)
+            .await
+            .unwrap()
+            .changes;
         assert_eq!(changes.hosts.added, ["db-01", "web-01"]);
         assert!(changes.hosts.changed.is_empty() && changes.hosts.removed.is_empty());
         assert_eq!(changes.templates.added, ["linux-base"]);
@@ -532,7 +638,7 @@ mod tests {
         let store = StateStore::from_pool(pool);
         let mut compiled = example();
         store
-            .apply_config("c1", &compiled, t0(), 100)
+            .apply_config("c1", &compiled, t0(), 100, false)
             .await
             .unwrap();
         let web = compiled
@@ -545,9 +651,10 @@ mod tests {
             .documents
             .retain(|d| d.kind != DocumentKind::Dashboard);
         let changes = store
-            .apply_config("c2", &compiled, t0() + Duration::minutes(1), 100)
+            .apply_config("c2", &compiled, t0() + Duration::minutes(1), 100, false)
             .await
-            .unwrap();
+            .unwrap()
+            .changes;
         assert_eq!(changes.hosts.changed, ["web-01"]);
         assert!(changes.hosts.added.is_empty() && changes.hosts.removed.is_empty());
         assert_eq!(changes.dashboards.removed, ["production"]);
@@ -556,9 +663,10 @@ mod tests {
         assert_eq!(history_len(&store).await, 2);
         // Same content, new commit: a history row with empty changes.
         let again = store
-            .apply_config("c3", &compiled, t0(), 100)
+            .apply_config("c3", &compiled, t0(), 100, false)
             .await
-            .unwrap();
+            .unwrap()
+            .changes;
         assert_eq!(again, SyncChanges::default());
         let history = store.sync_history(10).await.unwrap();
         assert_eq!(history.len(), 3);
@@ -570,16 +678,17 @@ mod tests {
         let store = StateStore::from_pool(pool);
         let mut compiled = example();
         store
-            .apply_config("c1", &compiled, t0(), 100)
+            .apply_config("c1", &compiled, t0(), 100, false)
             .await
             .unwrap();
         let db = store.host_by_name("db-01").await.unwrap().unwrap();
         let cred = store.bind_credential(db.id).await.unwrap();
         compiled.hosts.retain(|h| h.name != "db-01");
         let changes = store
-            .apply_config("c2", &compiled, t0(), 100)
+            .apply_config("c2", &compiled, t0(), 100, false)
             .await
-            .unwrap();
+            .unwrap()
+            .changes;
         assert_eq!(changes.hosts.removed, ["db-01"]);
         assert!(!store.host_by_name("db-01").await.unwrap().unwrap().active);
         assert!(store.host_for_credential(&cred).await.unwrap().is_none());
@@ -591,12 +700,22 @@ mod tests {
         let store = StateStore::from_pool(pool);
         let full = example();
         let mut partial = full.clone();
-        store.apply_config("c1", &full, t0(), 100).await.unwrap();
+        store
+            .apply_config("c1", &full, t0(), 100, false)
+            .await
+            .unwrap();
         let db = store.host_by_name("db-01").await.unwrap().unwrap();
         let cred = store.bind_credential(db.id).await.unwrap();
         partial.hosts.retain(|h| h.name != "db-01");
-        store.apply_config("c2", &partial, t0(), 100).await.unwrap();
-        let changes = store.apply_config("c3", &full, t0(), 100).await.unwrap();
+        store
+            .apply_config("c2", &partial, t0(), 100, false)
+            .await
+            .unwrap();
+        let changes = store
+            .apply_config("c3", &full, t0(), 100, false)
+            .await
+            .unwrap()
+            .changes;
         assert_eq!(changes.hosts.changed, ["db-01"]);
         assert!(changes.hosts.added.is_empty());
         let db_again = store.host_by_name("db-01").await.unwrap().unwrap();
@@ -611,7 +730,7 @@ mod tests {
     async fn failure_keeps_active_configuration(pool: PgPool) {
         let store = StateStore::from_pool(pool.clone());
         store
-            .apply_config("c1", &example(), t0(), 100)
+            .apply_config("c1", &example(), t0(), 100, false)
             .await
             .unwrap();
         let t1 = t0() + Duration::minutes(5);
@@ -645,7 +764,7 @@ mod tests {
     async fn unchanged_clears_out_of_sync(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         store
-            .apply_config("c1", &example(), t0(), 100)
+            .apply_config("c1", &example(), t0(), 100, false)
             .await
             .unwrap();
         store
@@ -668,7 +787,7 @@ mod tests {
             documents: vec![],
         };
         store
-            .apply_config("c1", &compiled, t0(), 100)
+            .apply_config("c1", &compiled, t0(), 100, false)
             .await
             .unwrap();
         compiled
@@ -684,7 +803,7 @@ mod tests {
         }
         compiled.hosts.truncate(4);
         let err = store
-            .apply_config("c2", &compiled, t0(), 50)
+            .apply_config("c2", &compiled, t0(), 50, false)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -702,7 +821,7 @@ mod tests {
         assert_eq!(creds, 10);
         assert_eq!(history_len(&store).await, 1);
         store
-            .apply_config("c2", &compiled, t0(), 100)
+            .apply_config("c2", &compiled, t0(), 100, false)
             .await
             .unwrap();
         assert_eq!(active_count(&pool).await, 4);
@@ -716,14 +835,17 @@ mod tests {
             documents: vec![],
         };
         store
-            .apply_config("c1", &compiled, t0(), 100)
+            .apply_config("c1", &compiled, t0(), 100, false)
             .await
             .unwrap();
         let few = Compiled {
             hosts: compiled.hosts[..2].to_vec(),
             documents: vec![],
         };
-        store.apply_config("c2", &few, t0(), 10).await.unwrap();
+        store
+            .apply_config("c2", &few, t0(), 10, false)
+            .await
+            .unwrap();
         assert_eq!(active_count(&pool).await, 2);
     }
 
@@ -731,7 +853,7 @@ mod tests {
     async fn apply_is_atomic(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         store
-            .apply_config("c1", &example(), t0(), 100)
+            .apply_config("c1", &example(), t0(), 100, false)
             .await
             .unwrap();
         let mut broken = example();
@@ -739,7 +861,7 @@ mod tests {
         let dup = broken.documents[0].clone();
         broken.documents.push(dup);
         let err = store
-            .apply_config("c2", &broken, t0(), 100)
+            .apply_config("c2", &broken, t0(), 100, false)
             .await
             .unwrap_err();
         assert!(matches!(err, ApplyError::State(_)));
@@ -808,7 +930,7 @@ mod tests {
         let compiled = example();
         for i in 1..=3 {
             store
-                .apply_config(&format!("c{i}"), &compiled, t0(), 100)
+                .apply_config(&format!("c{i}"), &compiled, t0(), 100, false)
                 .await
                 .unwrap();
         }
@@ -823,9 +945,10 @@ mod tests {
         let manual = store.create_host("manual").await.unwrap();
         let cred = store.bind_credential(manual.id).await.unwrap();
         let changes = store
-            .apply_config("c1", &example(), t0(), 100)
+            .apply_config("c1", &example(), t0(), 100, false)
             .await
-            .unwrap();
+            .unwrap()
+            .changes;
         assert_eq!(changes.hosts.removed, ["manual"]);
         assert!(!store.host_by_name("manual").await.unwrap().unwrap().active);
         assert!(store.host_for_credential(&cred).await.unwrap().is_none());
@@ -835,13 +958,494 @@ mod tests {
     async fn unchanged_active_host_is_not_reported(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         store
-            .apply_config("c1", &example(), t0(), 100)
+            .apply_config("c1", &example(), t0(), 100, false)
             .await
             .unwrap();
         let changes = store
-            .apply_config("c2", &example(), t0(), 100)
+            .apply_config("c2", &example(), t0(), 100, false)
+            .await
+            .unwrap()
+            .changes;
+        assert_eq!(changes, SyncChanges::default());
+    }
+
+    // ---- closing what is no longer monitored ----
+
+    use crate::alerting::{Params, active_triggers, eval::evaluate};
+    use crate::gitops::{CompiledHost, EffectiveTrigger};
+    use cerbrix_common::MetricValue;
+    use cerbrix_common::config::Severity;
+
+    const T0_MS: i64 = 1_800_000_000_000;
+
+    fn later() -> OffsetDateTime {
+        t0() + Duration::minutes(10)
+    }
+
+    fn host_with(name: &str, triggers: &[(&str, &str)]) -> CompiledHost {
+        let mut h = host(name);
+        h.groups = vec!["production".to_owned()];
+        h.effective.triggers = triggers
+            .iter()
+            .map(|(n, e)| EffectiveTrigger {
+                name: (*n).to_owned(),
+                expression: (*e).to_owned(),
+                severity: Severity::High,
+                origin: "host".to_owned(),
+            })
+            .collect();
+        h
+    }
+
+    /// The hosts plus the example notification rule (`ops@example.com`, high, production).
+    fn world(hosts: Vec<CompiledHost>) -> Compiled {
+        Compiled {
+            hosts,
+            documents: example().documents,
+        }
+    }
+
+    async fn id_of(store: &StateStore, name: &str) -> Uuid {
+        store.host_by_name(name).await.unwrap().unwrap().id
+    }
+
+    /// Delivers one value through the real evaluation; returns the number of events.
+    async fn feed(
+        store: &StateStore,
+        host: Uuid,
+        key: &str,
+        params: &[(&str, &str)],
+        value: f64,
+        at_ms: i64,
+    ) -> usize {
+        let v = MetricValue {
+            key: key.to_owned(),
+            params: params
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            ts_ms: at_ms,
+            value,
+        };
+        let events = store
+            .evaluate_host(host, true, |ctx| {
+                let triggers = ctx.config.as_ref().map(active_triggers).unwrap_or_default();
+                evaluate(&triggers, &ctx.states, &[v], at_ms, i64::MAX / 2)
+            })
             .await
             .unwrap();
-        assert_eq!(changes, SyncChanges::default());
+        events.len()
+    }
+
+    /// (host, trigger, resolved_at, reason) of every problem, ordered.
+    type ProblemRow = (String, String, Option<OffsetDateTime>, Option<String>);
+
+    async fn problems(pool: &PgPool) -> Vec<ProblemRow> {
+        sqlx::query_as(
+            "SELECT h.name, p.trigger_name, p.resolved_at, p.resolve_reason \
+             FROM problems p JOIN hosts h ON h.id = p.host_id \
+             ORDER BY h.name, p.trigger_name, p.started_at",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn count(pool: &PgPool, table: &str) -> i64 {
+        let sql = match table {
+            "trigger_states" => "SELECT count(*) FROM trigger_states",
+            "series_seen" => "SELECT count(*) FROM series_seen",
+            "notification_outbox" => "SELECT count(*) FROM notification_outbox",
+            other => panic!("unexpected table {other}"),
+        };
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    async fn resolved_mail(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT recipient FROM notification_outbox WHERE event = 'resolved' ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn last_seen(pool: &PgPool, host: Uuid) -> Option<OffsetDateTime> {
+        sqlx::query_scalar("SELECT last_seen_at FROM hosts WHERE id = $1")
+            .bind(host)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn removed_host_closes_its_problems(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let cpu = [("CPU", "cpu.usage > 90")];
+        let both = world(vec![host_with("db-01", &cpu), host_with("web-01", &cpu)]);
+        store
+            .apply_config("c1", &both, t0(), 100, true)
+            .await
+            .unwrap();
+        for name in ["db-01", "web-01"] {
+            let id = id_of(&store, name).await;
+            assert_eq!(feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await, 1);
+            store
+                .touch_seen(id, t0(), &[("cpu.usage".to_owned(), Params::new())])
+                .await
+                .unwrap();
+        }
+        let db = id_of(&store, "db-01").await;
+        assert_eq!(count(&pool, "series_seen").await, 2);
+
+        let only_web = world(vec![host_with("web-01", &cpu)]);
+        let applied = store
+            .apply_config("c2", &only_web, later(), 100, true)
+            .await
+            .unwrap();
+        assert_eq!(applied.problems_closed, 1);
+        assert_eq!(applied.changes.hosts.removed, ["db-01"]);
+
+        let rows = problems(&pool).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            (
+                "db-01".into(),
+                "CPU".into(),
+                Some(later()),
+                Some("host_removed".into())
+            )
+        );
+        assert_eq!((rows[1].2, rows[1].3.as_deref()), (None, None));
+        assert_eq!(resolved_mail(&pool).await, ["ops@example.com"]);
+        for sql in [
+            "SELECT count(*) FROM trigger_states WHERE host_id = $1",
+            "SELECT count(*) FROM series_seen WHERE host_id = $1",
+        ] {
+            let left: i64 = sqlx::query_scalar(sql)
+                .bind(db)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(left, 0, "{sql}");
+        }
+        // The other host keeps its rows.
+        assert_eq!(count(&pool, "trigger_states").await, 1);
+        assert_eq!(count(&pool, "series_seen").await, 1);
+        assert_eq!(last_seen(&pool, db).await, None);
+        assert!(
+            last_seen(&pool, id_of(&store, "web-01").await)
+                .await
+                .is_some()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn removed_trigger_closes_its_problem(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let both = [
+            ("CPU", "cpu.usage > 90"),
+            ("Memory", "memory.used_percent > 90"),
+        ];
+        store
+            .apply_config(
+                "c1",
+                &world(vec![host_with("web-01", &both)]),
+                t0(),
+                100,
+                true,
+            )
+            .await
+            .unwrap();
+        let id = id_of(&store, "web-01").await;
+        feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+        feed(&store, id, "memory.used_percent", &[], 95.0, T0_MS).await;
+
+        let without_cpu = world(vec![host_with("web-01", &both[1..])]);
+        let applied = store
+            .apply_config("c2", &without_cpu, later(), 100, true)
+            .await
+            .unwrap();
+        assert_eq!(applied.problems_closed, 1);
+        let rows = problems(&pool).await;
+        assert_eq!(
+            rows[0],
+            (
+                "web-01".into(),
+                "CPU".into(),
+                Some(later()),
+                Some("trigger_removed".into())
+            )
+        );
+        assert_eq!((rows[1].1.as_str(), rows[1].2), ("Memory", None));
+        let states: Vec<String> =
+            sqlx::query_scalar("SELECT trigger_name FROM trigger_states WHERE host_id = $1")
+                .bind(id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(states, ["Memory"]);
+        assert_eq!(resolved_mail(&pool).await, ["ops@example.com"]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn resolved_at_is_never_before_started_at(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let cpu = [("CPU", "cpu.usage > 90")];
+        store
+            .apply_config(
+                "c1",
+                &world(vec![host_with("web-01", &cpu)]),
+                t0(),
+                100,
+                false,
+            )
+            .await
+            .unwrap();
+        let id = id_of(&store, "web-01").await;
+        // The value was measured after the time of the later revision.
+        let started_ms = T0_MS + 3_600_000;
+        feed(&store, id, "cpu.usage", &[], 95.0, started_ms).await;
+        store
+            .apply_config(
+                "c2",
+                &world(vec![host_with("web-01", &[])]),
+                later(),
+                100,
+                false,
+            )
+            .await
+            .unwrap();
+        let rows = problems(&pool).await;
+        assert_eq!(
+            rows[0].2,
+            Some(OffsetDateTime::from_unix_timestamp(started_ms / 1000).unwrap())
+        );
+    }
+
+    type StateRow = (bool, Option<OffsetDateTime>, OffsetDateTime, Option<f64>);
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn changed_threshold_keeps_problem_and_state(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let old = world(vec![host_with("web-01", &[("CPU", "cpu.usage > 90")])]);
+        store
+            .apply_config("c1", &old, t0(), 100, true)
+            .await
+            .unwrap();
+        let id = id_of(&store, "web-01").await;
+        feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+        let state_sql = "SELECT firing, condition_since, last_ts, last_value FROM trigger_states";
+        let before: Vec<StateRow> = sqlx::query_as(state_sql).fetch_all(&pool).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        let new = world(vec![host_with(
+            "web-01",
+            &[("CPU", "cpu.usage > 95 for 5m")],
+        )]);
+        let applied = store
+            .apply_config("c2", &new, later(), 100, true)
+            .await
+            .unwrap();
+        assert_eq!(applied.problems_closed, 0);
+        assert_eq!(applied.changes.hosts.changed, ["web-01"]);
+        let rows = problems(&pool).await;
+        assert_eq!((rows.len(), rows[0].2), (1, None));
+        let after: Vec<StateRow> = sqlx::query_as(state_sql).fetch_all(&pool).await.unwrap();
+        assert_eq!(before, after);
+
+        // Meets the new condition: no second problem, no event.
+        let meets = feed(&store, id, "cpu.usage", &[], 99.0, T0_MS + 60_000).await;
+        assert_eq!(meets, 0);
+        assert_eq!(problems(&pool).await.len(), 1);
+        // Does not meet it: resolved because the condition ended.
+        let ends = feed(&store, id, "cpu.usage", &[], 10.0, T0_MS + 120_000).await;
+        assert_eq!(ends, 1);
+        let rows = problems(&pool).await;
+        assert_eq!(rows[0].3.as_deref(), Some("condition_ended"));
+        assert_eq!(resolved_mail(&pool).await, ["ops@example.com"]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn changed_selector_closes_problem(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let old = [
+            ("Disk", "disk.used_percent{mount=/} > 90"),
+            ("CPU", "cpu.usage > 90"),
+            ("Memory", "memory.used_percent > 90"),
+        ];
+        store
+            .apply_config(
+                "c1",
+                &world(vec![host_with("web-01", &old)]),
+                t0(),
+                100,
+                true,
+            )
+            .await
+            .unwrap();
+        let id = id_of(&store, "web-01").await;
+        feed(
+            &store,
+            id,
+            "disk.used_percent",
+            &[("mount", "/")],
+            95.0,
+            T0_MS,
+        )
+        .await;
+        feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+        feed(&store, id, "memory.used_percent", &[], 95.0, T0_MS).await;
+
+        let new = [
+            ("Disk", "disk.used_percent{mount=/data} > 90"),
+            ("CPU", "no data for 5m"),
+            ("Memory", "memory.used_percent > 95"),
+        ];
+        let applied = store
+            .apply_config(
+                "c2",
+                &world(vec![host_with("web-01", &new)]),
+                later(),
+                100,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.problems_closed, 2);
+        let rows = problems(&pool).await;
+        let by_name: BTreeMap<&str, (Option<OffsetDateTime>, Option<&str>)> = rows
+            .iter()
+            .map(|r| (r.1.as_str(), (r.2, r.3.as_deref())))
+            .collect();
+        assert_eq!(by_name["CPU"], (Some(later()), Some("trigger_removed")));
+        assert_eq!(by_name["Disk"], (Some(later()), Some("trigger_removed")));
+        assert_eq!(by_name["Memory"], (None, None));
+        let states: Vec<String> =
+            sqlx::query_scalar("SELECT trigger_name FROM trigger_states ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(states, ["Memory"]);
+        assert_eq!(
+            resolved_mail(&pool).await,
+            ["ops@example.com", "ops@example.com"]
+        );
+        assert_eq!(count(&pool, "notification_outbox").await, 5);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn unparsable_stored_expression_counts_as_changed(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let cpu = world(vec![host_with("web-01", &[("CPU", "cpu.usage > 90")])]);
+        store
+            .apply_config("c1", &cpu, t0(), 100, false)
+            .await
+            .unwrap();
+        let id = id_of(&store, "web-01").await;
+        feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+        sqlx::query(
+            "UPDATE hosts SET config = jsonb_set(config, '{triggers,0,expression}', '\"???\"')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let applied = store
+            .apply_config("c2", &cpu, later(), 100, false)
+            .await
+            .unwrap();
+        assert_eq!(applied.problems_closed, 1);
+        assert_eq!(
+            problems(&pool).await[0].3.as_deref(),
+            Some("trigger_removed")
+        );
+        assert_eq!(count(&pool, "trigger_states").await, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn no_mail_without_queue_mail(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let cpu = [("CPU", "cpu.usage > 90")];
+        let both = world(vec![host_with("db-01", &cpu), host_with("web-01", &cpu)]);
+        store
+            .apply_config("c1", &both, t0(), 100, true)
+            .await
+            .unwrap();
+        for name in ["db-01", "web-01"] {
+            let id = id_of(&store, name).await;
+            feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+        }
+        // The starts were mailed; closing with queue_mail off must not queue anything.
+        assert_eq!(count(&pool, "notification_outbox").await, 2);
+        let next = world(vec![host_with("web-01", &[])]);
+        let applied = store
+            .apply_config("c2", &next, later(), 100, false)
+            .await
+            .unwrap();
+        assert_eq!(applied.problems_closed, 2);
+        assert!(problems(&pool).await.iter().all(|p| p.2.is_some()));
+        assert_eq!(count(&pool, "notification_outbox").await, 2);
+        assert!(resolved_mail(&pool).await.is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn readded_host_starts_clean(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let cpu = [("CPU", "cpu.usage > 90")];
+        let with = world(vec![host_with("web-01", &cpu)]);
+        store
+            .apply_config("c1", &with, t0(), 100, true)
+            .await
+            .unwrap();
+        let id = id_of(&store, "web-01").await;
+        feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+        store
+            .touch_seen(id, t0(), &[("cpu.usage".to_owned(), Params::new())])
+            .await
+            .unwrap();
+        store
+            .apply_config("c2", &world(vec![]), later(), 100, true)
+            .await
+            .unwrap();
+        store
+            .apply_config("c3", &with, later() + Duration::minutes(1), 100, true)
+            .await
+            .unwrap();
+        let rows = problems(&pool).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].3.as_deref(), Some("host_removed"));
+        assert_eq!(count(&pool, "trigger_states").await, 0);
+        assert_eq!(count(&pool, "series_seen").await, 0);
+        assert_eq!(last_seen(&pool, id).await, None);
+        // A value after the re-add opens a fresh problem.
+        let again = feed(&store, id, "cpu.usage", &[], 95.0, T0_MS + 900_000).await;
+        assert_eq!(again, 1);
+        assert_eq!(problems(&pool).await.len(), 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn mass_removal_refusal_closes_nothing(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let cpu = [("CPU", "cpu.usage > 90")];
+        let all = world((0..10).map(|i| host_with(&format!("h{i}"), &cpu)).collect());
+        store
+            .apply_config("c1", &all, t0(), 100, true)
+            .await
+            .unwrap();
+        let id = id_of(&store, "h9").await;
+        feed(&store, id, "cpu.usage", &[], 95.0, T0_MS).await;
+
+        // Drops 6 hosts and the trigger of the others.
+        let few = world((0..4).map(|i| host_with(&format!("h{i}"), &[])).collect());
+        let err = store
+            .apply_config("c2", &few, later(), 50, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApplyError::MassRemoval { .. }));
+        let rows = problems(&pool).await;
+        assert_eq!((rows.len(), rows[0].2, rows[0].3.clone()), (1, None, None));
+        assert_eq!(count(&pool, "trigger_states").await, 1);
+        assert!(resolved_mail(&pool).await.is_empty());
     }
 }

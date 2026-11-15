@@ -591,7 +591,10 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/config-repo");
         let compiled = compile(&read_tree(&dir, "c1").unwrap()).unwrap();
         let store = StateStore::from_pool(pool);
-        store.apply_config("c1", &compiled, t0(), 50).await.unwrap();
+        store
+            .apply_config("c1", &compiled, t0(), 50, false)
+            .await
+            .unwrap();
         let host = store.host_by_name("web-01").await.unwrap().unwrap();
         (store, host.id)
     }

@@ -727,7 +727,13 @@ mod tests {
     /// Applies the example repository and enrols `web-01`; returns its credential.
     async fn enrol_web_01(store: &StateStore) -> String {
         store
-            .apply_config("commit-a", &example_compiled("commit-a"), apply_time(), 50)
+            .apply_config(
+                "commit-a",
+                &example_compiled("commit-a"),
+                apply_time(),
+                50,
+                false,
+            )
             .await
             .unwrap();
         let host = store.host_by_name("web-01").await.unwrap().unwrap();
@@ -820,6 +826,7 @@ mod tests {
                 &changed,
                 apply_time() + Duration::minutes(1),
                 50,
+                false,
             )
             .await
             .unwrap();
@@ -861,6 +868,7 @@ mod tests {
                 &without,
                 apply_time() + Duration::minutes(1),
                 100,
+                false,
             )
             .await
             .unwrap();
@@ -904,7 +912,7 @@ mod tests {
         );
         let compiled = crate::gitops::compile(&snapshot).unwrap();
         store
-            .apply_config("commit-t", &compiled, apply_time(), 50)
+            .apply_config("commit-t", &compiled, apply_time(), 50, false)
             .await
             .unwrap();
         let host = store.host_by_name("web-01").await.unwrap().unwrap();

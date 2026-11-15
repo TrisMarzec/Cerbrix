@@ -63,6 +63,8 @@ pub async fn serve(
             store.clone(),
             Arc::new(GitSource::new(&config.gitops)),
             config.gitops.clone(),
+            // Mail for closed problems is switched on with the sender in a later task.
+            false,
             shutdown_token.clone(),
         ))
     });

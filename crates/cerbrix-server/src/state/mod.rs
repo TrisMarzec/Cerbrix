@@ -10,8 +10,8 @@ mod sync;
 pub use alerting::{AlertContext, OutboxItem, Problem, ProblemEvent, ProblemFilter};
 pub use enrollment::UnknownAgent;
 pub use sync::{
-    ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock, SyncState,
-    SyncStatus,
+    Applied, ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock,
+    SyncState, SyncStatus,
 };
 
 use sqlx::PgPool;

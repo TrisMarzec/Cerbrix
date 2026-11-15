@@ -214,6 +214,80 @@ enum Action<'a> {
 }
 
 /// The notification rules in the database; a document that does not parse is skipped.
+/// Queues a `resolved` mail for each problem: to exactly those who were told about its
+/// start, created and due at `at`. Safe to repeat.
+pub(super) async fn queue_resolved_mail(
+    tx: &mut sqlx::PgConnection,
+    problem_ids: &[Uuid],
+    at: OffsetDateTime,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "INSERT INTO notification_outbox \
+         (problem_id, event, recipient, created_at, next_attempt_at) \
+         SELECT problem_id, 'resolved', recipient, $2, $2 \
+         FROM notification_outbox WHERE problem_id = ANY($1) AND event = 'started' \
+         ON CONFLICT (problem_id, event, recipient) DO NOTHING",
+    )
+    .bind(problem_ids)
+    .bind(at)
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
+/// Resolves the open problems of `host_ids`, except those of a (host, trigger) pair in
+/// `keep`, with `reason` (`host_removed` or `trigger_removed`). `resolved_at` is `now`,
+/// never earlier than `started_at`. With `queue_mail` the closures are mailed like any other
+/// resolution. Returns the number of problems closed.
+pub(super) async fn close_open_problems(
+    tx: &mut sqlx::PgConnection,
+    host_ids: &[Uuid],
+    keep: &[(Uuid, String)],
+    reason: &str,
+    now: OffsetDateTime,
+    queue_mail: bool,
+) -> Result<usize, StateError> {
+    let (keep_hosts, keep_names): (Vec<Uuid>, Vec<String>) = keep.iter().cloned().unzip();
+    let closed: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE problems p SET resolved_at = GREATEST($2, p.started_at), resolve_reason = $3 \
+         WHERE p.host_id = ANY($1) AND p.resolved_at IS NULL AND NOT EXISTS ( \
+             SELECT 1 FROM UNNEST($4::uuid[], $5::text[]) AS k(h, n) \
+             WHERE k.h = p.host_id AND k.n = p.trigger_name) \
+         RETURNING p.id",
+    )
+    .bind(host_ids)
+    .bind(now)
+    .bind(reason)
+    .bind(&keep_hosts)
+    .bind(&keep_names)
+    .fetch_all(&mut *tx)
+    .await?;
+    if queue_mail && !closed.is_empty() {
+        queue_resolved_mail(tx, &closed, now).await?;
+    }
+    Ok(closed.len())
+}
+
+/// Deletes the trigger states of `host_ids`, except those of a (host, trigger) pair in `keep`.
+pub(super) async fn delete_trigger_states(
+    tx: &mut sqlx::PgConnection,
+    host_ids: &[Uuid],
+    keep: &[(Uuid, String)],
+) -> Result<(), StateError> {
+    let (keep_hosts, keep_names): (Vec<Uuid>, Vec<String>) = keep.iter().cloned().unzip();
+    sqlx::query(
+        "DELETE FROM trigger_states s WHERE s.host_id = ANY($1) AND NOT EXISTS ( \
+             SELECT 1 FROM UNNEST($2::uuid[], $3::text[]) AS k(h, n) \
+             WHERE k.h = s.host_id AND k.n = s.trigger_name)",
+    )
+    .bind(host_ids)
+    .bind(&keep_hosts)
+    .bind(&keep_names)
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
 async fn load_rules(tx: &mut sqlx::PgConnection) -> Result<Vec<NotificationFile>, StateError> {
     let docs: Vec<(String, serde_json::Value)> = sqlx::query_as(
         "SELECT id, body FROM config_documents WHERE kind = 'notification' ORDER BY id",
@@ -375,18 +449,7 @@ impl StateStore {
                         kind: EventKind::Resolved,
                     });
                     if queue_mail {
-                        // Tell exactly those who were told about the start.
-                        sqlx::query(
-                            "INSERT INTO notification_outbox \
-                             (problem_id, event, recipient, created_at, next_attempt_at) \
-                             SELECT problem_id, 'resolved', recipient, $2, $2 \
-                             FROM notification_outbox WHERE problem_id = $1 AND event = 'started' \
-                             ON CONFLICT (problem_id, event, recipient) DO NOTHING",
-                        )
-                        .bind(problem_id)
-                        .bind(ended)
-                        .execute(&mut *tx)
-                        .await?;
+                        queue_resolved_mail(&mut tx, &[problem_id], ended).await?;
                     }
                 }
             }
@@ -791,7 +854,7 @@ mod tests {
         let compiled = compile(&read_tree(&dir, "c1").unwrap()).unwrap();
         let store = StateStore::from_pool(pool);
         store
-            .apply_config("c1", &compiled, at(T0_MS), 50)
+            .apply_config("c1", &compiled, at(T0_MS), 50, false)
             .await
             .unwrap();
         let host = store.host_by_name("web-01").await.unwrap().unwrap();
@@ -1514,7 +1577,7 @@ mod tests {
         let compiled = compile(&snapshot).unwrap_or_else(|i| panic!("{i:?}"));
         let store = StateStore::from_pool(pool.clone());
         store
-            .apply_config("c1", &compiled, at(T0_MS), 50)
+            .apply_config("c1", &compiled, at(T0_MS), 50, false)
             .await
             .unwrap();
         sqlx::query("UPDATE hosts SET active = false WHERE name = 'c-inactive'")

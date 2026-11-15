@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{ConfigSource, SourceError, SyncIssue, compile, format_issue, strip_control};
 use crate::config::GitopsConfig;
-use crate::state::{ApplyError, StateError, StateStore, SyncChanges};
+use crate::state::{Applied, ApplyError, StateError, StateStore};
 
 /// What one call of [`sync_once`] did.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,7 +21,7 @@ use crate::state::{ApplyError, StateError, StateStore, SyncChanges};
 #[allow(clippy::large_enum_variant)]
 pub enum SyncOutcome {
     /// A new revision was applied.
-    Applied(SyncChanges),
+    Applied(Applied),
     /// The repository is at the revision that is already active.
     Unchanged,
     /// The revision could not be applied; the previous configuration stays active.
@@ -35,12 +35,13 @@ pub async fn sync_once(
     store: &StateStore,
     source: &dyn ConfigSource,
     max_host_removal_percent: u8,
+    queue_mail: bool,
     now: OffsetDateTime,
 ) -> Result<SyncOutcome, StateError> {
     let Some(lock) = store.try_sync_lock().await? else {
         return Ok(SyncOutcome::Skipped);
     };
-    let result = run_cycle(store, source, max_host_removal_percent, now).await;
+    let result = run_cycle(store, source, max_host_removal_percent, queue_mail, now).await;
     let released = lock.release().await;
     let outcome = result?;
     released?;
@@ -63,6 +64,7 @@ async fn run_cycle(
     store: &StateStore,
     source: &dyn ConfigSource,
     max_host_removal_percent: u8,
+    queue_mail: bool,
     now: OffsetDateTime,
 ) -> Result<SyncOutcome, StateError> {
     let snapshot = match source.fetch().await {
@@ -101,10 +103,16 @@ async fn run_cycle(
     };
 
     match store
-        .apply_config(&commit, &compiled, now, max_host_removal_percent)
+        .apply_config(
+            &commit,
+            &compiled,
+            now,
+            max_host_removal_percent,
+            queue_mail,
+        )
         .await
     {
-        Ok(changes) => Ok(SyncOutcome::Applied(changes)),
+        Ok(applied) => Ok(SyncOutcome::Applied(applied)),
         Err(ApplyError::MassRemoval { removed, active }) => {
             let reason = format!(
                 "this revision removes {removed} of {active} active hosts; \
@@ -172,6 +180,7 @@ pub async fn run_sync_loop(
     store: StateStore,
     source: Arc<dyn ConfigSource>,
     cfg: GitopsConfig,
+    queue_mail: bool,
     shutdown: CancellationToken,
 ) {
     let period = Duration::from_secs(cfg.interval_secs.max(1));
@@ -179,6 +188,7 @@ pub async fn run_sync_loop(
         store,
         source,
         cfg.max_host_removal_percent,
+        queue_mail,
         period,
         shutdown,
     )
@@ -189,6 +199,7 @@ async fn run_loop_every(
     store: StateStore,
     source: Arc<dyn ConfigSource>,
     max_host_removal_percent: u8,
+    queue_mail: bool,
     period: Duration,
     shutdown: CancellationToken,
 ) {
@@ -209,7 +220,16 @@ async fn run_loop_every(
             let store = store.clone();
             let source = Arc::clone(&source);
             let max = max_host_removal_percent;
-            async move { sync_once(&store, source.as_ref(), max, OffsetDateTime::now_utc()).await }
+            async move {
+                sync_once(
+                    &store,
+                    source.as_ref(),
+                    max,
+                    queue_mail,
+                    OffsetDateTime::now_utc(),
+                )
+                .await
+            }
         });
         let joined = tokio::select! {
             () = shutdown.cancelled() => {
@@ -224,7 +244,10 @@ async fn run_loop_every(
         };
 
         match joined {
-            Ok(Ok(SyncOutcome::Applied(changes))) => {
+            Ok(Ok(SyncOutcome::Applied(Applied {
+                changes,
+                problems_closed,
+            }))) => {
                 previous_issues = None;
                 let commit = store
                     .sync_state()
@@ -241,6 +264,7 @@ async fn run_loop_every(
                     notifications = changes.notifications.added.len() + changes.notifications.changed.len() + changes.notifications.removed.len(),
                     dashboards = changes.dashboards.added.len() + changes.dashboards.changed.len() + changes.dashboards.removed.len(),
                     displays = changes.displays.added.len() + changes.displays.changed.len() + changes.displays.removed.len(),
+                    problems_closed,
                     "applied configuration from Git"
                 );
             }
@@ -351,11 +375,60 @@ mod tests {
     }
 
     async fn cycle_at(store: &StateStore, source: &FakeSource, secs: i64) -> SyncOutcome {
-        sync_once(store, source, 50, at(secs)).await.unwrap()
+        sync_once(store, source, 50, false, at(secs)).await.unwrap()
     }
 
     async fn cycle(store: &StateStore, source: &FakeSource) -> SyncOutcome {
-        sync_once(store, source, 50, t0()).await.unwrap()
+        sync_once(store, source, 50, false, t0()).await.unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn applied_revision_reports_closed_problems_and_mails(pool: PgPool) {
+        use crate::alerting::{Evaluation, OpenProblem};
+        use cerbrix_common::config::Severity;
+
+        let store = StateStore::from_pool(pool.clone());
+        let mut without_db = fixture("commit-b");
+        without_db.files.remove("hosts/db/db-01.json");
+        without_db.files.remove("dashboards/production.json");
+        without_db.files.remove("displays/noc.json");
+        let source = FakeSource::new(vec![Ok(fixture("commit-a")), Ok(without_db)]);
+        let first = sync_once(&store, &source, 50, true, t0()).await.unwrap();
+        assert!(matches!(
+            first,
+            SyncOutcome::Applied(Applied {
+                problems_closed: 0,
+                ..
+            })
+        ));
+        let db = store.host_by_name("db-01").await.unwrap().unwrap();
+        let events = store
+            .evaluate_host(db.id, true, |_| Evaluation {
+                open: vec![OpenProblem {
+                    trigger: "Disk almost full".to_owned(),
+                    instance: String::new(),
+                    severity: Severity::High,
+                    at_ms: 1_800_000_000_000,
+                    summary: "disk".to_owned(),
+                }],
+                ..Evaluation::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+
+        let outcome = sync_once(&store, &source, 50, true, at(60)).await.unwrap();
+        let SyncOutcome::Applied(applied) = outcome else {
+            panic!("expected Applied, got {outcome:?}");
+        };
+        assert_eq!(applied.changes.hosts.removed, ["db-01"]);
+        assert_eq!(applied.problems_closed, 1);
+        let resolved: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM notification_outbox WHERE event = 'resolved'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(resolved, 1);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -363,7 +436,7 @@ mod tests {
         let store = StateStore::from_pool(pool);
         let source = FakeSource::new(vec![Ok(fixture("commit-a"))]);
         let outcome = cycle(&store, &source).await;
-        let SyncOutcome::Applied(changes) = outcome else {
+        let SyncOutcome::Applied(Applied { changes, .. }) = outcome else {
             panic!("expected Applied");
         };
         assert_eq!(changes.hosts.added, ["db-01", "web-01"]);
@@ -575,6 +648,7 @@ mod tests {
             store.clone(),
             source.clone(),
             cfg,
+            false,
             shutdown.clone(),
         ));
         assert!(
@@ -626,6 +700,7 @@ mod tests {
             store.clone(),
             source.clone(),
             50,
+            false,
             Duration::from_millis(100),
             shutdown.clone(),
         ));
@@ -657,7 +732,7 @@ mod tests {
         let store = StateStore::from_pool(pool.clone());
         break_history(&pool).await;
         let source = FakeSource::new(vec![Ok(fixture("commit-a"))]);
-        let result = sync_once(&store, &source, 50, t0()).await;
+        let result = sync_once(&store, &source, 50, false, t0()).await;
         assert!(
             matches!(result, Ok(SyncOutcome::OutOfSync(_))),
             "{result:?}"

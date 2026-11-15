@@ -421,7 +421,7 @@ mod tests {
     async fn host_show_prints_effective_configuration(pool: PgPool) {
         let store = StateStore::from_pool(pool);
         store
-            .apply_config("c1", &example_compiled(), now(), 50)
+            .apply_config("c1", &example_compiled(), now(), 50, false)
             .await
             .unwrap();
         let show = |name: &str| {
@@ -457,7 +457,7 @@ mod tests {
 
         let t = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
         store
-            .apply_config("abc123", &example_compiled(), t, 50)
+            .apply_config("abc123", &example_compiled(), t, 50, false)
             .await
             .unwrap();
         store
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(out, "no sync history");
         let t = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
         store
-            .apply_config("0123456789abcdef0123", &example_compiled(), t, 50)
+            .apply_config("0123456789abcdef0123", &example_compiled(), t, 50, false)
             .await
             .unwrap();
         let out = run(&store, history(20), now(), true).await.unwrap();
