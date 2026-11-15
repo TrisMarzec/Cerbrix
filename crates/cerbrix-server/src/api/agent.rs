@@ -1,13 +1,14 @@
-//! Agent-facing routes: health, enrolment and value ingest.
+//! Agent-facing routes: health, enrolment, configuration and value ingest.
 
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use cerbrix_common::{
     EnrollRequest, IngestResponse, MAX_BATCH_VALUES, MetricValue, PROTOCOL_VERSION, ValueBatch,
+    default_agent_items,
 };
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use serde::de::DeserializeOwned;
@@ -15,6 +16,7 @@ use time::OffsetDateTime;
 
 use super::{ApiError, AppState};
 use crate::enroll::{self, EnrollError};
+use crate::gitops::item_config;
 use crate::metrics::MetricsError;
 use crate::state::Host;
 
@@ -151,6 +153,59 @@ pub(super) async fn values(
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
+/// The item configuration of the authenticated host. The version is the ETag; a matching
+/// `If-None-Match` is answered with 304 and no body. A host without stored configuration
+/// (created manually, not from Git) gets the default items.
+pub(super) async fn config(
+    State(app): State<AppState>,
+    AuthedHost(host): AuthedHost,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let config = match app.store.host_config(host.id).await {
+        Ok(Some(effective)) => effective.agent_config(),
+        Ok(None) => item_config(default_agent_items()),
+        Err(e) => {
+            tracing::error!(host = %host.name, error = %e, "loading host configuration failed");
+            return Err(ApiError::internal());
+        }
+    };
+    // The version is lower-case hex, so the quoted form is always a valid header value.
+    let etag = format!("\"{}\"", config.version);
+    let matches = headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| if_none_match_hits(v, &config.version));
+    let status = if matches {
+        StatusCode::NOT_MODIFIED
+    } else {
+        StatusCode::OK
+    };
+    let response_headers = [
+        (header::ETAG, etag),
+        (header::CACHE_CONTROL, "no-cache".to_owned()),
+    ];
+    if matches {
+        Ok((status, response_headers).into_response())
+    } else {
+        Ok((status, response_headers, Json(config)).into_response())
+    }
+}
+
+/// True when an `If-None-Match` value names `version`: `*`, or a comma-separated list with
+/// the strong or weak form of its ETag (weak comparison, as RFC 9110 prescribes here).
+fn if_none_match_hits(value: &str, version: &str) -> bool {
+    value.split(',').map(str::trim).any(|candidate| {
+        candidate == "*"
+            || candidate
+                .strip_prefix("W/")
+                .unwrap_or(candidate)
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+                == Some(version)
+    })
+}
+
 /// Reads at most `limit` bytes of body and parses them as JSON.
 async fn read_json<T: DeserializeOwned>(body: Body, limit: usize) -> Result<T, ApiError> {
     let bytes = match Limited::new(body, limit).collect().await {
@@ -226,6 +281,7 @@ mod tests {
                 max_body_bytes,
                 ..IngestConfig::default()
             },
+            gitops: Default::default(),
         })
     }
 
@@ -540,6 +596,186 @@ mod tests {
         let (s, b) = send(&router, "POST", "/api/agent/v1/enroll", None, b"{".to_vec()).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert_eq!(error_code(&b), "malformed");
+    }
+
+    const CONFIG_URI: &str = "/api/agent/v1/config";
+
+    async fn get_config(
+        router: &Router,
+        credential: Option<&str>,
+        if_none_match: Option<&str>,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let mut req = Request::builder().method("GET").uri(CONFIG_URI);
+        if let Some(c) = credential {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {c}"));
+        }
+        if let Some(v) = if_none_match {
+            req = req.header(header::IF_NONE_MATCH, v);
+        }
+        let resp = router
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, bytes.to_vec())
+    }
+
+    fn example_compiled(commit: &str) -> crate::gitops::Compiled {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/config-repo");
+        crate::gitops::compile(&crate::gitops::read_tree(&dir, commit).unwrap()).unwrap()
+    }
+
+    fn apply_time() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap()
+    }
+
+    /// Applies the example repository and enrols `web-01`; returns its credential.
+    async fn enrol_web_01(store: &StateStore) -> String {
+        store
+            .apply_config("commit-a", &example_compiled("commit-a"), apply_time(), 50)
+            .await
+            .unwrap();
+        let host = store.host_by_name("web-01").await.unwrap().unwrap();
+        store.bind_credential(host.id).await.unwrap()
+    }
+
+    fn etag(headers: &axum::http::HeaderMap) -> String {
+        headers
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn config_requires_credential(pool: PgPool) {
+        let (router, _, _) = app(pool);
+        let (status, _, body) = get_config(&router, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&body), "unauthorized");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn config_returns_effective_items(pool: PgPool) {
+        let (router, _, store) = app(pool);
+        let cred = enrol_web_01(&store).await;
+        let (status, headers, body) = get_config(&router, Some(&cred), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let config: cerbrix_common::ItemConfig = serde_json::from_slice(&body).unwrap();
+        let cpu = config.items.iter().find(|i| i.key == "cpu.usage").unwrap();
+        assert_eq!(cpu.interval_secs, 10);
+        assert_eq!(etag(&headers), format!("\"{}\"", config.version));
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-cache");
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["items", "version"]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn config_not_modified(pool: PgPool) {
+        let (router, _, store) = app(pool);
+        let cred = enrol_web_01(&store).await;
+        let (_, headers, _) = get_config(&router, Some(&cred), None).await;
+        let tag = etag(&headers);
+        let version = tag.trim_matches('"').to_owned();
+
+        for matching in [
+            tag.clone(),
+            format!("W/{tag}"),
+            format!("\"other\", {tag}"),
+            "*".to_owned(),
+        ] {
+            let (status, h304, body) = get_config(&router, Some(&cred), Some(&matching)).await;
+            assert_eq!(status, StatusCode::NOT_MODIFIED, "{matching}");
+            assert!(body.is_empty());
+            assert_eq!(etag(&h304), tag);
+            assert_eq!(h304.get(header::CACHE_CONTROL).unwrap(), "no-cache");
+        }
+        for other in ["\"other\"", &version, "W/", "", "\"a\" \"b\""] {
+            let (status, _, body) = get_config(&router, Some(&cred), Some(other)).await;
+            assert_eq!(status, StatusCode::OK, "{other}");
+            assert!(!body.is_empty());
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn config_version_changes_after_sync(pool: PgPool) {
+        let (router, _, store) = app(pool);
+        let cred = enrol_web_01(&store).await;
+        let (_, before, _) = get_config(&router, Some(&cred), None).await;
+
+        let mut changed = example_compiled("commit-b");
+        let web = changed
+            .hosts
+            .iter_mut()
+            .find(|h| h.name == "web-01")
+            .unwrap();
+        let cpu = web
+            .effective
+            .items
+            .iter_mut()
+            .find(|i| i.key == "cpu.usage")
+            .unwrap();
+        cpu.interval_secs = 30;
+        store
+            .apply_config(
+                "commit-b",
+                &changed,
+                apply_time() + Duration::minutes(1),
+                50,
+            )
+            .await
+            .unwrap();
+
+        let (status, after, body) = get_config(&router, Some(&cred), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(etag(&before), etag(&after));
+        let config: cerbrix_common::ItemConfig = serde_json::from_slice(&body).unwrap();
+        let cpu = config.items.iter().find(|i| i.key == "cpu.usage").unwrap();
+        assert_eq!(cpu.interval_secs, 30);
+        let (status, _, _) = get_config(&router, Some(&cred), Some(&etag(&before))).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn manual_host_gets_defaults(pool: PgPool) {
+        let (router, _, store) = app(pool);
+        let cred = enrolled(&router, &store, "manual-01").await;
+        let (status, headers, body) = get_config(&router, Some(&cred), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let config: cerbrix_common::ItemConfig = serde_json::from_slice(&body).unwrap();
+        assert_eq!(config.items.len(), 17);
+        assert_eq!(
+            config,
+            crate::gitops::item_config(cerbrix_common::default_agent_items())
+        );
+        assert_eq!(etag(&headers), format!("\"{}\"", config.version));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn removed_host_is_unauthorized(pool: PgPool) {
+        let (router, _, store) = app(pool);
+        let cred = enrol_web_01(&store).await;
+        let mut without = example_compiled("commit-b");
+        without.hosts.retain(|h| h.name != "web-01");
+        store
+            .apply_config(
+                "commit-b",
+                &without,
+                apply_time() + Duration::minutes(1),
+                100,
+            )
+            .await
+            .unwrap();
+        let (status, _, body) = get_config(&router, Some(&cred), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_code(&body), "unauthorized");
     }
 
     #[sqlx::test(migrations = "./migrations")]

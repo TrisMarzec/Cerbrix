@@ -4,8 +4,13 @@
 
 mod enrollment;
 mod hosts;
+mod sync;
 
 pub use enrollment::UnknownAgent;
+pub use sync::{
+    ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock, SyncState,
+    SyncStatus,
+};
 
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -159,6 +164,56 @@ mod tests {
         assert!(store.host_for_credential(&first).await.unwrap().is_none());
         let second = store.bind_credential(host.id).await.unwrap();
         assert_ne!(first, second);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn bind_credential_refuses_inactive_host(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let host = store.create_host("h").await.unwrap();
+        store.set_host_active(host.id, false).await.unwrap();
+        assert!(matches!(
+            store.bind_credential(host.id).await,
+            Err(StateError::NotFound)
+        ));
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_credentials")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn removal_wins_over_concurrent_bind(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let host = store.create_host("h").await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM hosts WHERE id = $1 FOR UPDATE")
+            .bind(host.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE hosts SET active = false WHERE id = $1")
+            .bind(host.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM agent_credentials WHERE host_id = $1")
+            .bind(host.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let binder = store.clone();
+        let id = host.id;
+        let bind = tokio::spawn(async move { binder.bind_credential(id).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!bind.is_finished(), "bind must wait for the row lock");
+        tx.commit().await.unwrap();
+        assert!(matches!(bind.await.unwrap(), Err(StateError::NotFound)));
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_credentials")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[sqlx::test(migrations = "./migrations")]

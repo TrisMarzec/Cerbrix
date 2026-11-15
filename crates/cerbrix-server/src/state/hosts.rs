@@ -64,7 +64,9 @@ impl StateStore {
     /// The primary key on `host_id` decides the race: `Conflict` when the host is already bound.
     pub async fn bind_credential(&self, host_id: Uuid) -> Result<String, StateError> {
         let plain = tokens::generate(tokens::AGENT_CREDENTIAL_PREFIX);
-        sqlx::query("INSERT INTO agent_credentials (host_id, credential_hash) VALUES ($1, $2)")
+        let done = sqlx::query(
+            "INSERT INTO agent_credentials (host_id, credential_hash) \n             SELECT id, $2 FROM hosts WHERE id = $1 AND active FOR SHARE",
+        )
             .bind(host_id)
             .bind(tokens::hash(&plain).as_slice())
             .execute(&self.pool)
@@ -81,6 +83,9 @@ impl StateStore {
                     e.into()
                 }
             })?;
+        if done.rows_affected() == 0 {
+            return Err(StateError::NotFound);
+        }
         Ok(plain)
     }
 

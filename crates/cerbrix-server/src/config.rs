@@ -24,6 +24,8 @@ pub struct Config {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub ingest: IngestConfig,
+    #[serde(default)]
+    pub gitops: GitopsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +63,222 @@ impl Default for IngestConfig {
             max_future_skew_secs: default_max_future_skew_secs(),
             max_body_bytes: default_max_body_bytes(),
         }
+    }
+}
+
+/// Settings for configuration from a Git repository.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct GitopsConfig {
+    pub enabled: bool,
+    pub url: Option<String>,
+    pub branch: String,
+    pub interval_secs: u64,
+    /// Access token for an `https://` URL. Never printed or logged.
+    pub token: Option<String>,
+    pub ssh_key_file: Option<PathBuf>,
+    pub known_hosts_file: Option<PathBuf>,
+    pub cache_dir: PathBuf,
+    pub max_host_removal_percent: u8,
+}
+
+impl Default for GitopsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: None,
+            branch: "main".to_owned(),
+            interval_secs: 60,
+            token: None,
+            ssh_key_file: None,
+            known_hosts_file: None,
+            cache_dir: PathBuf::from("/var/lib/cerbrix/git"),
+            max_host_removal_percent: 50,
+        }
+    }
+}
+
+/// Prints a placeholder instead of a secret.
+struct Redacted(bool);
+
+impl fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0 { "<redacted>" } else { "<unset>" })
+    }
+}
+
+/// The URL for display: without user name and password.
+fn url_without_userinfo(raw: &str) -> String {
+    if raw.contains("://") {
+        match url::Url::parse(raw) {
+            Ok(mut u) => {
+                let _ = u.set_username("");
+                let _ = u.set_password(None);
+                u.to_string()
+            }
+            Err(_) => "<unparseable>".to_owned(),
+        }
+    } else {
+        // `user@host:path` and local paths: drop everything up to the `@`.
+        match raw.split_once('@') {
+            Some((_, rest)) => rest.to_owned(),
+            None => raw.to_owned(),
+        }
+    }
+}
+
+impl fmt::Debug for GitopsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitopsConfig")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url.as_deref().map(url_without_userinfo))
+            .field("branch", &self.branch)
+            .field("interval_secs", &self.interval_secs)
+            .field("token", &Redacted(self.token.is_some()))
+            .field("ssh_key_file", &self.ssh_key_file)
+            .field("known_hosts_file", &self.known_hosts_file)
+            .field("cache_dir", &self.cache_dir)
+            .field("max_host_removal_percent", &self.max_host_removal_percent)
+            .finish()
+    }
+}
+
+/// The forms of repository URL the Git source accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitUrlKind {
+    Https,
+    Ssh,
+    /// `user@host:path`
+    ScpLike,
+    /// An absolute path or a `file://` URL.
+    Local,
+}
+
+const URL_FORMS: &str = "must use https://, ssh://, file://, user@host:path or an absolute path";
+
+/// Classifies a repository URL, or says why it is not acceptable. The text never
+/// contains the URL: it may carry credentials.
+pub(crate) fn classify_git_url(url: &str) -> Result<GitUrlKind, String> {
+    const CREDENTIALS: &str = "contains credentials; put the token in gitops.token";
+    if url.is_empty() {
+        return Err("must not be empty".into());
+    }
+    if url.chars().any(char::is_control) {
+        return Err("must not contain control characters".into());
+    }
+    if url.starts_with('-') {
+        return Err("must not start with a dash".into());
+    }
+    if Path::new(url).is_absolute() {
+        return Ok(GitUrlKind::Local);
+    }
+    if let Some((scheme, rest)) = url.split_once("://") {
+        return match scheme.to_ascii_lowercase().as_str() {
+            "file" if !rest.is_empty() => Ok(GitUrlKind::Local),
+            kind @ ("https" | "ssh") => {
+                let parsed = url::Url::parse(url).map_err(|_| "is not a valid URL".to_owned())?;
+                match parsed.host_str() {
+                    Some(host) if !host.is_empty() && !host.starts_with('-') => {}
+                    _ => return Err("has no valid host".into()),
+                }
+                if parsed.password().is_some() || (kind == "https" && !parsed.username().is_empty())
+                {
+                    return Err(CREDENTIALS.into());
+                }
+                Ok(if kind == "https" {
+                    GitUrlKind::Https
+                } else {
+                    GitUrlKind::Ssh
+                })
+            }
+            "http" => {
+                Err("uses http://, which would send the token unencrypted; use https://".into())
+            }
+            _ => Err(URL_FORMS.into()),
+        };
+    }
+    if let Some((before_colon, path)) = url.split_once(':')
+        && let Some((user, host)) = before_colon.split_once('@')
+    {
+        let plain = |s: &str| !s.is_empty() && !s.contains(['/', '@', ' ']);
+        if plain(user) && plain(host) && !host.starts_with('-') && !path.is_empty() {
+            return Ok(GitUrlKind::ScpLike);
+        }
+    }
+    Err(URL_FORMS.into())
+}
+
+/// A branch name that is safe to hand to `git fetch` as `refs/heads/<branch>`.
+pub(crate) fn valid_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && !branch.starts_with(['-', '/'])
+        && !branch.ends_with(['/', '.'])
+        && !branch.ends_with(".lock")
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch.contains("@{")
+        && !branch.contains(|c: char| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        })
+}
+
+impl GitopsConfig {
+    /// Messages never contain the URL or the token.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let bad = |msg: &str| Err(ConfigError::Invalid(msg.to_owned()));
+        if !(5..=3600).contains(&self.interval_secs) {
+            return bad("gitops.interval_secs must be between 5 and 3600");
+        }
+        if !(1..=100).contains(&self.max_host_removal_percent) {
+            return bad("gitops.max_host_removal_percent must be between 1 and 100");
+        }
+        if !self.enabled {
+            return Ok(());
+        }
+        let Some(url) = &self.url else {
+            return bad("gitops.url is required when gitops.enabled is true");
+        };
+        let kind = classify_git_url(url)
+            .map_err(|why| ConfigError::Invalid(format!("gitops.url {why}")))?;
+        if !valid_branch(&self.branch) {
+            return bad("gitops.branch is not a valid branch name");
+        }
+        if self.token.is_some() && self.ssh_key_file.is_some() {
+            return bad("gitops.token and gitops.ssh_key_file are mutually exclusive");
+        }
+        if self.token.as_deref() == Some("") {
+            return bad("gitops.token must not be empty");
+        }
+        if self.token.is_some() && kind != GitUrlKind::Https {
+            return bad("gitops.token requires an https:// gitops.url");
+        }
+        if self.ssh_key_file.is_some() && !matches!(kind, GitUrlKind::Ssh | GitUrlKind::ScpLike) {
+            return bad("gitops.ssh_key_file requires an ssh:// or user@host:path gitops.url");
+        }
+        for (key, path) in [
+            ("gitops.ssh_key_file", &self.ssh_key_file),
+            ("gitops.known_hosts_file", &self.known_hosts_file),
+        ] {
+            if let Some(path) = path
+                && (path.as_os_str().is_empty()
+                    || path.to_string_lossy().contains(char::is_control))
+            {
+                return Err(ConfigError::Invalid(format!("{key} is not a valid path")));
+            }
+            if let Some(path) = path
+                && !path.is_absolute()
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} must be an absolute path"
+                )));
+            }
+        }
+        if self.cache_dir.as_os_str().is_empty() {
+            return bad("gitops.cache_dir must not be empty");
+        }
+        Ok(())
     }
 }
 
@@ -145,6 +363,7 @@ impl Config {
         }
         check_url("database.url", &self.database.url)?;
         check_url("metrics.url", &self.metrics.url)?;
+        self.gitops.validate()?;
         Ok(())
     }
 }
@@ -347,6 +566,275 @@ mod tests {
             jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
             let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
             assert!(!msg.contains("ENVSECRET"), "{msg}");
+            Ok(())
+        });
+    }
+
+    const GIT_URL: &str = "https://git.example.com/org/config.git";
+
+    fn gitops_toml_with_url(url: &str, extra: &str) -> String {
+        format!(
+            "{}[gitops]\nenabled = true\nurl = \"{url}\"\n{extra}",
+            base_toml(DB, VM)
+        )
+    }
+
+    fn gitops_toml(extra: &str) -> String {
+        gitops_toml_with_url(GIT_URL, extra)
+    }
+
+    fn load_gitops(toml: &str) -> Result<Config, ConfigError> {
+        std::fs::write("cerbrix.toml", toml).unwrap();
+        Config::load(Some(Path::new("cerbrix.toml")))
+    }
+
+    #[test]
+    fn gitops_defaults() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            let g = &cfg.gitops;
+            assert!(!g.enabled);
+            assert_eq!(g.url, None);
+            assert_eq!(g.branch, "main");
+            assert_eq!(g.interval_secs, 60);
+            assert_eq!(g.max_host_removal_percent, 50);
+            assert_eq!(g.cache_dir, PathBuf::from("/var/lib/cerbrix/git"));
+            assert!(g.token.is_none() && g.ssh_key_file.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn enabled_requires_url() {
+        Jail::expect_with(|jail| {
+            let toml = format!("{}[gitops]\nenabled = true\n", base_toml(DB, VM));
+            jail.create_file("cerbrix.toml", &toml)?;
+            let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
+            assert!(msg.contains("gitops.url"), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn token_and_key_are_exclusive() {
+        Jail::expect_with(|_| {
+            let msg = invalid(load_gitops(&gitops_toml(&format!(
+                "token = \"tok\"\nssh_key_file = \"{ABS_KEY}\"\n"
+            ))));
+            assert!(
+                msg.contains("gitops.token") && msg.contains("gitops.ssh_key_file"),
+                "{msg}"
+            );
+            assert!(!msg.contains("\"tok\""), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn token_requires_https() {
+        Jail::expect_with(|_| {
+            for url in [
+                "ssh://git@host/org/r.git",
+                "git@host:org/r.git",
+                "/srv/repo",
+            ] {
+                let msg = invalid(load_gitops(&gitops_toml_with_url(url, "token = \"tok\"\n")));
+                assert!(msg.contains("https://"), "{url}: {msg}");
+            }
+            let msg = invalid(load_gitops(&gitops_toml_with_url(
+                "http://host/r.git",
+                "token = \"tok\"\n",
+            )));
+            assert!(msg.contains("unencrypted"), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ssh_key_requires_ssh_url() {
+        Jail::expect_with(|_| {
+            let key = format!("ssh_key_file = \"{ABS_KEY}\"\n");
+            let msg = invalid(load_gitops(&gitops_toml(&key)));
+            assert!(msg.contains("gitops.ssh_key_file"), "{msg}");
+            for url in ["ssh://git@host/org/r.git", "git@host:org/r.git"] {
+                let toml = gitops_toml_with_url(url, &key);
+                assert!(load_gitops(&toml).is_ok(), "{url}");
+            }
+            Ok(())
+        });
+    }
+
+    /// An absolute path on the platform the tests run on.
+    const ABS_KEY: &str = if cfg!(windows) { "C:/k" } else { "/k" };
+
+    #[test]
+    fn relative_ssh_key_file_rejected() {
+        Jail::expect_with(|_| {
+            let toml =
+                gitops_toml_with_url("git@host:org/r.git", "ssh_key_file = \"keys/id_ed25519\"\n");
+            let msg = invalid(load_gitops(&toml));
+            assert!(
+                msg.contains("gitops.ssh_key_file") && msg.contains("absolute"),
+                "{msg}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn relative_known_hosts_file_rejected() {
+        Jail::expect_with(|_| {
+            let toml = gitops_toml_with_url(
+                "git@host:org/r.git",
+                &format!("ssh_key_file = \"{ABS_KEY}\"\nknown_hosts_file = \"known_hosts\"\n"),
+            );
+            let msg = invalid(load_gitops(&toml));
+            assert!(
+                msg.contains("gitops.known_hosts_file") && msg.contains("absolute"),
+                "{msg}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn url_with_password_rejected() {
+        Jail::expect_with(|_| {
+            for url in [
+                "https://user:hunter2@git.example.com/r.git",
+                "ssh://user:hunter2@git.example.com/r.git",
+            ] {
+                let msg = invalid(load_gitops(&gitops_toml_with_url(url, "")));
+                assert!(msg.contains("put the token in gitops.token"), "{msg}");
+                assert!(!msg.contains("hunter2"), "{msg}");
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn dangerous_urls_and_branches_rejected() {
+        Jail::expect_with(|_| {
+            for url in [
+                "-oProxyCommand=evil",
+                "--upload-pack=evil",
+                "ext::sh -c evil",
+                "git://host/r.git",
+                "ftp://host/r.git",
+                "http://host/r.git",
+                "relative/path",
+                "git@-oProxyCommand=x:r",
+            ] {
+                assert!(
+                    matches!(
+                        load_gitops(&gitops_toml_with_url(url, "")),
+                        Err(ConfigError::Invalid(_))
+                    ),
+                    "{url} accepted"
+                );
+            }
+            for branch in [
+                "-x", "a b", "a..b", "a\tb", "a:b", "a~1", "x.lock", "/x", "x/",
+            ] {
+                let msg = invalid(load_gitops(&gitops_toml(&format!("branch = {branch:?}\n"))));
+                assert!(msg.contains("gitops.branch"), "{branch}: {msg}");
+            }
+            assert!(load_gitops(&gitops_toml("branch = \"release/2026\"\n")).is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn local_paths_and_file_urls_are_accepted() {
+        Jail::expect_with(|_| {
+            assert!(load_gitops(&gitops_toml_with_url("file:///srv/repo", "")).is_ok());
+            #[cfg(unix)]
+            assert!(load_gitops(&gitops_toml_with_url("/srv/repo", "")).is_ok());
+            #[cfg(windows)]
+            assert!(load_gitops(&gitops_toml_with_url("C:/repo", "")).is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn interval_bounds() {
+        Jail::expect_with(|_| {
+            for (value, ok) in [(4, false), (5, true), (3600, true), (3601, false)] {
+                let result = load_gitops(&gitops_toml(&format!("interval_secs = {value}\n")));
+                assert_eq!(result.is_ok(), ok, "interval {value}");
+                if !ok {
+                    assert!(invalid(result).contains("gitops.interval_secs"));
+                }
+            }
+            for (value, ok) in [(0, false), (1, true), (100, true), (101, false)] {
+                let toml = gitops_toml(&format!("max_host_removal_percent = {value}\n"));
+                assert_eq!(load_gitops(&toml).is_ok(), ok, "percent {value}");
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn debug_redacts_token() {
+        Jail::expect_with(|_| {
+            let cfg = load_gitops(&gitops_toml("token = \"ghp_SECRETTOKEN\"\n")).unwrap();
+            let shown = format!("{cfg:?} {:?}", cfg.gitops);
+            assert!(!shown.contains("ghp_SECRETTOKEN"), "{shown}");
+            assert!(shown.contains("token: <redacted>"), "{shown}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn debug_hides_url_userinfo() {
+        let cfg = GitopsConfig {
+            url: Some("https://user:hunter2@git.example.com/r.git".into()),
+            ..GitopsConfig::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(
+            !shown.contains("hunter2") && !shown.contains("user"),
+            "{shown}"
+        );
+        assert!(shown.contains("git.example.com"), "{shown}");
+    }
+
+    #[test]
+    fn token_from_environment() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &gitops_toml(""))?;
+            jail.set_env("CERBRIX_GITOPS__TOKEN", "envtoken123");
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert_eq!(cfg.gitops.token.as_deref(), Some("envtoken123"));
+            assert!(!format!("{cfg:?}").contains("envtoken123"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn token_is_not_echoed_in_errors() {
+        Jail::expect_with(|jail| {
+            // Wrong type.
+            let msg = invalid(load_gitops(&gitops_toml("token = 8675309\n")));
+            assert!(!msg.contains("8675309"), "{msg}");
+            assert!(msg.contains("gitops.token"), "{msg}");
+            // Syntax error on the token line.
+            let msg = invalid(load_gitops(&gitops_toml("token = \"ghp_SECRETTOKEN\n")));
+            assert!(!msg.contains("ghp_SECRETTOKEN"), "{msg}");
+            // Wrong type through the environment.
+            jail.create_file("cerbrix.toml", &gitops_toml(""))?;
+            jail.set_env("CERBRIX_GITOPS__INTERVAL_SECS", "ENVSECRET");
+            jail.set_env("CERBRIX_GITOPS__TOKEN", "ghp_ENVTOKEN");
+            let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
+            assert!(
+                !msg.contains("ENVSECRET") && !msg.contains("ghp_ENVTOKEN"),
+                "{msg}"
+            );
+            // A validation failure while a token is set.
+            jail.set_env("CERBRIX_GITOPS__INTERVAL_SECS", "1");
+            let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
+            assert!(!msg.contains("ghp_ENVTOKEN"), "{msg}");
             Ok(())
         });
     }

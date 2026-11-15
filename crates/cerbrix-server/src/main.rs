@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use anyhow::Context;
 use cerbrix_server::admin::{self, AdminCommand};
 use cerbrix_server::config::Config;
+use cerbrix_server::gitops;
 use cerbrix_server::state::StateStore;
 use cerbrix_server::tls;
 use clap::{Parser, Subcommand};
@@ -27,6 +28,12 @@ enum Command {
     /// Administrative commands.
     #[command(subcommand)]
     Admin(AdminCommand),
+    /// Validate a checkout of the configuration repository. Needs no
+    /// configuration file and no database.
+    CheckConfig {
+        /// Directory containing hosts/, templates/, notifications/, dashboards/ and displays/.
+        dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -35,6 +42,21 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+
+    if let Command::CheckConfig { dir } = &cli.command {
+        return match gitops::check_config(dir) {
+            Ok(summary) => {
+                println!("{summary}");
+                ExitCode::SUCCESS
+            }
+            Err(lines) => {
+                for line in lines {
+                    eprintln!("{line}");
+                }
+                ExitCode::from(1)
+            }
+        };
+    }
 
     let config = match Config::load(cli.config.as_deref()) {
         Ok(config) => config,
@@ -45,6 +67,7 @@ async fn main() -> ExitCode {
     };
 
     match cli.command {
+        Command::CheckConfig { .. } => unreachable!("handled before the configuration is loaded"),
         Command::Serve => match run_server(config).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
@@ -55,7 +78,13 @@ async fn main() -> ExitCode {
         Command::Admin(command) => {
             let result = async {
                 let store = StateStore::connect(&config.database.url).await?;
-                admin::run(&store, command, OffsetDateTime::now_utc()).await
+                admin::run(
+                    &store,
+                    command,
+                    OffsetDateTime::now_utc(),
+                    config.gitops.enabled,
+                )
+                .await
             }
             .await;
             match result {

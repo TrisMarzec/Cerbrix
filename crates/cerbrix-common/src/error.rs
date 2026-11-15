@@ -21,6 +21,10 @@ pub enum ValidationError {
         "invalid value for parameter {0:?}: must be 1 to 256 bytes of UTF-8 without control characters"
     )]
     ParamValue(String),
+    #[error(
+        "invalid name {0:?}: use 1 to 63 lowercase letters, digits, '_' or '-', starting with a letter or digit"
+    )]
+    Name(String),
     #[error("too many parameters: a metric value may carry at most 8")]
     TooManyParams,
     #[error("metric value is not a finite number (NaN and infinity are not accepted)")]

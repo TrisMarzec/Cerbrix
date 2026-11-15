@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "Interval": {
+      "description": "Collection interval between 1s and 24h, for example \"30s\", \"5m\" or \"1h\".",
+      "pattern": "^[0-9]+[smhd]$",
+      "type": "string"
+    },
+    "Severity": {
+      "description": "Problem severity. Ordered from least to most severe.",
+      "enum": [
+        "info",
+        "warning",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    },
+    "Show": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "dashboard": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "dashboard"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "every": {
+              "$ref": "#/$defs/Interval"
+            },
+            "rotate": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "rotate",
+            "every"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "What a display shows when no alarm switches it."
+    },
+    "SwitchOnAlarm": {
+      "additionalProperties": false,
+      "description": "Switching to a dashboard with an alarm.",
+      "properties": {
+        "min_severity": {
+          "$ref": "#/$defs/Severity",
+          "default": "critical"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/display.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A file in `displays/`. The file name without `.json` is the display id.",
+  "properties": {
+    "dashboards": {
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "name": {
+      "type": "string"
+    },
+    "show": {
+      "$ref": "#/$defs/Show"
+    },
+    "switch_on_alarm": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SwitchOnAlarm"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "name",
+    "show"
+  ],
+  "title": "DisplayFile",
+  "type": "object"
+}

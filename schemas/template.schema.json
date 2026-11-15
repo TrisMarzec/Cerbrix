@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "Interval": {
+      "description": "Collection interval between 1s and 24h, for example \"30s\", \"5m\" or \"1h\".",
+      "pattern": "^[0-9]+[smhd]$",
+      "type": "string"
+    },
+    "ItemEntry": {
+      "additionalProperties": false,
+      "description": "An item a host or template collects.",
+      "properties": {
+        "interval": {
+          "$ref": "#/$defs/Interval"
+        },
+        "key": {
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "interval"
+      ],
+      "type": "object"
+    },
+    "Severity": {
+      "description": "Problem severity. Ordered from least to most severe.",
+      "enum": [
+        "info",
+        "warning",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    },
+    "TriggerEntry": {
+      "additionalProperties": false,
+      "description": "A condition that opens a problem.",
+      "properties": {
+        "expression": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "name",
+        "expression",
+        "severity"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/template.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A file in `templates/`.",
+  "properties": {
+    "items": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ItemEntry"
+      },
+      "type": "array"
+    },
+    "template": {
+      "type": "string"
+    },
+    "triggers": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/TriggerEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "template"
+  ],
+  "title": "TemplateFile",
+  "type": "object"
+}

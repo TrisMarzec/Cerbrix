@@ -1,0 +1,9 @@
+{
+  "host": "web-01",
+  "address": "10.0.4.12",
+  "groups": ["production", "web"],
+  "templates": ["linux-base"],
+  "items": [
+    { "key": "cpu.usage", "interval": "10s" }
+  ]
+}

@@ -57,6 +57,10 @@ pub async fn enroll(
     match store.bind_credential(host.id).await {
         Ok(credential) => Ok(EnrollResponse { credential }),
         Err(StateError::Conflict(_)) => Err(EnrollError::AlreadyBound),
+        Err(StateError::NotFound) => {
+            store.record_unknown_agent(&req.host, now).await?;
+            Err(EnrollError::UnknownHost)
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -98,6 +102,16 @@ mod tests {
         assert!(resp.credential.starts_with("cbx_ac_"));
         let found = store.host_for_credential(&resp.credential).await.unwrap();
         assert_eq!(found, Some(host));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn inactive_host_cannot_enrol(pool: PgPool) {
+        let (store, key) = setup(pool).await;
+        let host = store.create_host("web-01").await.unwrap();
+        store.set_host_active(host.id, false).await.unwrap();
+        let r = enroll(&store, &req("web-01", &key), now()).await;
+        assert!(matches!(r, Err(EnrollError::UnknownHost)));
+        assert!(store.host_for_credential("x").await.unwrap().is_none());
     }
 
     #[sqlx::test(migrations = "./migrations")]

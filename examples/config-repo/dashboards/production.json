@@ -1,0 +1,16 @@
+{
+  "name": "Production",
+  "hosts": { "groups": ["production"] },
+  "panels": [
+    { "type": "problems", "x": 0, "y": 0, "w": 8, "h": 6 },
+    { "type": "host-states", "x": 8, "y": 0, "w": 4, "h": 3 },
+    {
+      "type": "graph",
+      "host": "db-01",
+      "item": "disk.used_percent",
+      "params": { "mount": "/" },
+      "range": "6h",
+      "x": 8, "y": 3, "w": 4, "h": 3
+    }
+  ]
+}

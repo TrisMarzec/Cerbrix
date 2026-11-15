@@ -10,10 +10,12 @@ use anyhow::Context;
 use axum::http::StatusCode;
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
+use tokio_util::sync::CancellationToken;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::api::{AppState, router};
 use crate::config::Config;
+use crate::gitops::{GitSource, run_sync_loop};
 use crate::metrics::VictoriaMetrics;
 use crate::state::StateStore;
 
@@ -50,6 +52,19 @@ pub async fn serve(
         .await
         .context("cannot connect to the state database")?;
     let metrics = VictoriaMetrics::new(&config.metrics.url).context("invalid metrics.url")?;
+    let shutdown_token = CancellationToken::new();
+    let sync_task = config.gitops.enabled.then(|| {
+        tracing::info!(
+            interval_secs = config.gitops.interval_secs,
+            "Git sync enabled"
+        );
+        tokio::spawn(run_sync_loop(
+            store.clone(),
+            Arc::new(GitSource::new(&config.gitops)),
+            config.gitops.clone(),
+            shutdown_token.clone(),
+        ))
+    });
     let state = AppState {
         store,
         metrics: Arc::new(metrics),
@@ -62,32 +77,49 @@ pub async fn serve(
 
     let handle = Handle::new();
     let signal_handle = handle.clone();
+    let signal_token = shutdown_token.clone();
     tokio::spawn(async move {
         shutdown.await;
+        signal_token.cancel();
         signal_handle.graceful_shutdown(Some(SHUTDOWN_GRACE));
     });
 
-    let addr = listener
-        .local_addr()
-        .context("cannot read listen address")?;
-    match tls {
-        Some(tls) => {
-            tracing::info!(%addr, "listening (HTTPS)");
-            axum_server::from_tcp_rustls(listener, tls)?
-                .handle(handle)
-                .serve(app.into_make_service())
-                .await?;
+    let served: anyhow::Result<()> = async {
+        let addr = listener
+            .local_addr()
+            .context("cannot read listen address")?;
+        match tls {
+            Some(tls) => {
+                tracing::info!(%addr, "listening (HTTPS)");
+                axum_server::from_tcp_rustls(listener, tls)?
+                    .handle(handle)
+                    .serve(app.into_make_service())
+                    .await?;
+            }
+            None => {
+                tracing::info!(%addr, "listening (HTTP)");
+                axum_server::from_tcp(listener)?
+                    .handle(handle)
+                    .serve(app.into_make_service())
+                    .await?;
+            }
         }
-        None => {
-            tracing::info!(%addr, "listening (HTTP)");
-            axum_server::from_tcp(listener)?
-                .handle(handle)
-                .serve(app.into_make_service())
-                .await?;
-        }
+        Ok(())
+    }
+    .await;
+
+    // Stop the sync loop however serving ended. A running cycle is aborted and the loop
+    // waits for it to be dropped before it returns: its apply transaction rolls back and
+    // the lock connection is closed, which releases the lock (PostgreSQL does that
+    // shortly after the connection closes).
+    shutdown_token.cancel();
+    if let Some(task) = sync_task
+        && let Err(err) = task.await
+    {
+        tracing::error!(%err, "Git sync loop ended abnormally");
     }
     tracing::info!("server stopped");
-    Ok(())
+    served
 }
 
 /// Resolves when the process receives Ctrl-C or, on Unix, SIGTERM.

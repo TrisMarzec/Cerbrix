@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use cerbrix_common::validate_host_name;
 use figment::Figment;
@@ -44,42 +43,9 @@ pub struct AgentConfig {
     #[serde(default = "default_spool_max_bytes")]
     pub spool_max_bytes: u64,
     #[serde(default)]
-    pub intervals: Intervals,
-    #[serde(default)]
     pub disk: DiskOptions,
     #[serde(default)]
     pub net: NetOptions,
-}
-
-/// How often each collector runs. Written as `30s`, `5m`, `1h`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Intervals {
-    #[serde(with = "humantime_serde")]
-    pub cpu: Duration,
-    #[serde(with = "humantime_serde")]
-    pub load: Duration,
-    #[serde(with = "humantime_serde")]
-    pub memory: Duration,
-    #[serde(with = "humantime_serde")]
-    pub uptime: Duration,
-    #[serde(with = "humantime_serde")]
-    pub disk: Duration,
-    #[serde(with = "humantime_serde")]
-    pub net: Duration,
-}
-
-impl Default for Intervals {
-    fn default() -> Self {
-        Self {
-            cpu: Duration::from_secs(30),
-            load: Duration::from_secs(30),
-            memory: Duration::from_secs(30),
-            uptime: Duration::from_secs(300),
-            disk: Duration::from_secs(300),
-            net: Duration::from_secs(30),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,7 +98,6 @@ impl fmt::Debug for AgentConfig {
             .field("allow_insecure_http", &self.allow_insecure_http)
             .field("state_dir", &self.state_dir)
             .field("spool_max_bytes", &self.spool_max_bytes)
-            .field("intervals", &self.intervals)
             .field("disk", &self.disk)
             .field("net", &self.net)
             .finish()
@@ -142,7 +107,7 @@ impl fmt::Debug for AgentConfig {
 impl AgentConfig {
     /// Loads the configuration. Later sources win: defaults, the TOML file, then
     /// environment variables such as `CERBRIX_AGENT_ENROLLMENT_KEY` (`__` separates
-    /// nested keys, e.g. `CERBRIX_AGENT_INTERVALS__CPU`).
+    /// nested keys, e.g. `CERBRIX_AGENT_NET__EXCLUDE_INTERFACES`).
     ///
     /// An explicit `path` must exist; without one, [`DEFAULT_CONFIG_PATH`] is read
     /// if it exists.
@@ -196,21 +161,6 @@ impl AgentConfig {
         }
         if self.spool_max_bytes < MIN_SPOOL_BYTES {
             return invalid("spool_max_bytes must be at least 1048576 (1 MiB)");
-        }
-        let i = &self.intervals;
-        for (name, value) in [
-            ("cpu", i.cpu),
-            ("load", i.load),
-            ("memory", i.memory),
-            ("uptime", i.uptime),
-            ("disk", i.disk),
-            ("net", i.net),
-        ] {
-            if value.is_zero() {
-                return Err(ConfigError::Invalid(format!(
-                    "intervals.{name} must be greater than zero"
-                )));
-            }
         }
         Patterns::new(&self.disk.exclude_mounts)
             .map_err(|e| ConfigError::Invalid(format!("disk.exclude_mounts is not valid: {e}")))?;
@@ -287,7 +237,6 @@ impl AgentConfig {
             allow_insecure_http: true,
             state_dir: state_dir.to_path_buf(),
             spool_max_bytes: default_spool_max_bytes(),
-            intervals: Intervals::default(),
             disk: DiskOptions::default(),
             net: NetOptions::default(),
         }
@@ -338,12 +287,6 @@ mod tests {
             assert_eq!(cfg.spool_max_bytes, 64 * 1024 * 1024);
             assert!(!cfg.allow_insecure_http);
             assert!(cfg.enrollment_key.is_none() && cfg.ca_file.is_none());
-            assert_eq!(cfg.intervals.cpu, Duration::from_secs(30));
-            assert_eq!(cfg.intervals.load, Duration::from_secs(30));
-            assert_eq!(cfg.intervals.memory, Duration::from_secs(30));
-            assert_eq!(cfg.intervals.uptime, Duration::from_secs(300));
-            assert_eq!(cfg.intervals.disk, Duration::from_secs(300));
-            assert_eq!(cfg.intervals.net, Duration::from_secs(30));
             assert_eq!(cfg.disk.exclude_fs.len(), DEFAULT_EXCLUDED_FS.len());
             assert!(cfg.disk.exclude_mounts.is_empty() && cfg.net.exclude_interfaces.is_empty());
             Ok(())
@@ -351,16 +294,23 @@ mod tests {
     }
 
     #[test]
-    fn durations_parse_from_strings_and_env_overrides_file() {
+    fn env_overrides_file() {
         Jail::expect_with(|jail| {
             jail.set_env("CERBRIX_AGENT_HOST", "from-env");
-            jail.set_env("CERBRIX_AGENT_INTERVALS__NET", "2m");
-            let toml = format!("{MINIMAL}[intervals]\ncpu = \"5s\"\nuptime = \"1h\"\n");
-            let cfg = load_str(jail, &toml).unwrap();
+            jail.set_env("CERBRIX_AGENT_NET__EXCLUDE_INTERFACES", "[\"veth*\"]");
+            let cfg = load_str(jail, MINIMAL).unwrap();
             assert_eq!(cfg.host, "from-env");
-            assert_eq!(cfg.intervals.cpu, Duration::from_secs(5));
-            assert_eq!(cfg.intervals.uptime, Duration::from_secs(3600));
-            assert_eq!(cfg.intervals.net, Duration::from_secs(120));
+            assert_eq!(cfg.net.exclude_interfaces, vec!["veth*".to_owned()]);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn config_rejects_intervals_section() {
+        Jail::expect_with(|jail| {
+            let toml = format!("{MINIMAL}[intervals]\ncpu = \"5s\"\n");
+            let msg = invalid(load_str(jail, &toml));
+            assert!(msg.contains("intervals"), "{msg}");
             Ok(())
         });
     }
@@ -368,8 +318,6 @@ mod tests {
     #[test]
     fn rejects_bad_values() {
         Jail::expect_with(|jail| {
-            let zero = format!("{MINIMAL}[intervals]\ncpu = \"0s\"\n");
-            assert!(invalid(load_str(jail, &zero)).contains("intervals.cpu"));
             let small = format!("{MINIMAL}spool_max_bytes = 1000\n");
             assert!(invalid(load_str(jail, &small)).contains("spool_max_bytes"));
             let host = MINIMAL.replace("web-01", "-bad host");
