@@ -16,7 +16,7 @@ use base64::Engine as _;
 use tokio::process::Command;
 
 use super::tree::{ROOTS, SYMLINK_REASON, read_tree};
-use super::{MAX_ISSUES, Snapshot, SyncIssue};
+use super::{MAX_ISSUES, Snapshot, SyncIssue, replace_control, strip_control};
 use crate::config::{GitUrlKind, GitopsConfig, classify_git_url, valid_branch};
 
 /// Why a fetch did not produce a snapshot.
@@ -119,7 +119,7 @@ impl Runner {
             }
             Ok(Err(e)) => {
                 return Err(RunError::Failed(
-                    self.scrub(&format!("cannot run git: {e}")),
+                    self.clean(&format!("cannot run git: {e}")),
                 ));
             }
             Ok(Ok(output)) => output,
@@ -127,20 +127,11 @@ impl Runner {
         if output.status.success() {
             return Ok(output.stdout);
         }
-        let stderr = self.scrub(&String::from_utf8_lossy(&output.stderr));
-        let reason = stderr
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(|line| line.chars().take(REASON_MAX_CHARS).collect::<String>())
-            .unwrap_or_else(|| {
-                format!(
-                    "git {} failed with {}",
-                    args.first().copied().unwrap_or(""),
-                    output.status
-                )
-            });
-        Err(RunError::Failed(reason))
+        Err(RunError::Failed(failure_reason(
+            &self.scrub(&String::from_utf8_lossy(&output.stderr)),
+            args.first().copied().unwrap_or(""),
+            &output.status.to_string(),
+        )))
     }
 
     fn scrub(&self, text: &str) -> String {
@@ -148,9 +139,25 @@ impl Runner {
         scrub(text, &secrets)
     }
 
-    fn io_error(&self, what: &str, error: &std::io::Error) -> RunError {
-        RunError::Failed(self.scrub(&format!("{what}: {error}")))
+    /// Scrubbed of secrets, then of control characters and escape sequences.
+    fn clean(&self, text: &str) -> String {
+        strip_control(&self.scrub(text))
     }
+
+    fn io_error(&self, what: &str, error: &std::io::Error) -> RunError {
+        RunError::Failed(self.clean(&format!("{what}: {error}")))
+    }
+}
+
+/// The first non-empty line of git's (already scrubbed) standard error, without
+/// control characters or escape sequences, cut to [`REASON_MAX_CHARS`].
+fn failure_reason(stderr: &str, command: &str, status: &str) -> String {
+    stderr
+        .lines()
+        .map(|line| strip_control(line).trim().to_owned())
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(REASON_MAX_CHARS).collect::<String>())
+        .unwrap_or_else(|| format!("git {command} failed with {status}"))
 }
 
 #[async_trait]
@@ -324,7 +331,7 @@ fn special_entries(listing: &[u8]) -> Vec<SyncIssue> {
             _ => continue,
         };
         if ROOTS.contains(&path.split('/').next().unwrap_or("")) {
-            issues.push(SyncIssue::new(Some(path), reason));
+            issues.push(SyncIssue::new(Some(&replace_control(path)), reason));
         }
     }
     issues.truncate(MAX_ISSUES);
@@ -431,6 +438,9 @@ pub(crate) fn git_config(cfg: &GitopsConfig) -> Vec<(String, String)> {
     set("fetch.recurseSubmodules", "false".into());
     set("advice.detachedHead", "false".into());
     set("transfer.fsckObjects", "true".into());
+    // A redirect could carry the token's header to another host: the configured
+    // URL must be the final one.
+    set("http.followRedirects", "false".into());
 
     // Only the transports the source needs.
     let url = cfg.url.as_deref().unwrap_or_default();
@@ -480,7 +490,8 @@ pub(crate) fn safe_config_path(cache_dir: &Path) -> PathBuf {
 }
 
 /// The directories git must trust although another user may own them: the cache
-/// repository and, for a local origin, the origin (as a path, never a `file://` URL).
+/// repository and, for a local origin, the origin (as a path, never a `file://` URL)
+/// and its `.git` directory, which is what git checks for a non-bare origin.
 pub(crate) fn safe_directories(cfg: &GitopsConfig) -> Vec<String> {
     let mut dirs = vec![format!(
         "{}/repo",
@@ -488,7 +499,10 @@ pub(crate) fn safe_directories(cfg: &GitopsConfig) -> Vec<String> {
     )];
     let url = cfg.url.as_deref().unwrap_or_default();
     if classify_git_url(url) == Ok(GitUrlKind::Local) {
-        dirs.push(git_path(&local_path(url)));
+        let origin = git_path(&local_path(url));
+        let dot_git = format!("{}/.git", origin.trim_end_matches('/'));
+        dirs.push(origin);
+        dirs.push(dot_git);
     }
     dirs
 }
@@ -504,10 +518,14 @@ async fn write_safe_config(
     let target = safe_config_path(cache_dir);
     let temp = cache_dir.join("gitconfig.tmp");
     let io = |e: std::io::Error| runner.io_error("cannot write the git configuration", &e);
-    match tokio::fs::remove_file(&temp).await {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io(e)),
+    // Leftovers of a killed run: the lock file git keeps while it writes the temporary
+    // file would make every later `git config --file` fail.
+    for leftover in [cache_dir.join("gitconfig.tmp.lock"), temp.clone()] {
+        match tokio::fs::remove_file(&leftover).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io(e)),
+        }
     }
     {
         let mut options = std::fs::OpenOptions::new();
@@ -1001,7 +1019,38 @@ mod tests {
             assert_eq!(value(&config, "core.fsmonitor"), Some("false"));
             assert_eq!(value(&config, "fetch.recurseSubmodules"), Some("false"));
             assert_eq!(value(&config, "advice.detachedHead"), Some("false"));
+            assert_eq!(value(&config, "http.followRedirects"), Some("false"));
         }
+    }
+
+    #[test]
+    fn failure_reason_has_no_control_characters() {
+        let stderr = "\n  \u{1b}[31mfatal:\u{1b}[0m repo \u{1b}]0;title\u{7}gone\r\u{8}\nsecond\n";
+        assert_eq!(
+            failure_reason(stderr, "fetch", "exit 1"),
+            "fatal: repo gone"
+        );
+        // A line of nothing but escape sequences counts as empty.
+        assert_eq!(
+            failure_reason("\u{1b}[2J\n\u{1b}]8;;x\u{1b}\\", "fetch", "exit code: 128"),
+            "git fetch failed with exit code: 128"
+        );
+        let long = "x".repeat(1000);
+        assert_eq!(failure_reason(&long, "fetch", "1").len(), REASON_MAX_CHARS);
+    }
+
+    #[tokio::test]
+    async fn stale_config_lock_is_removed() {
+        let origin = origin();
+        let cache = tempfile::tempdir().unwrap();
+        let src = source(origin.path(), cache.path());
+        src.fetch().await.unwrap();
+        // What a git killed while writing the temporary configuration leaves behind.
+        std::fs::write(cache.path().join("gitconfig.tmp.lock"), b"").unwrap();
+        std::fs::write(cache.path().join("gitconfig.tmp"), b"").unwrap();
+        let snapshot = src.fetch().await.unwrap();
+        assert_eq!(snapshot.commit, git(origin.path(), &["rev-parse", "HEAD"]));
+        assert!(!cache.path().join("gitconfig.tmp.lock").exists());
     }
 
     #[test]
@@ -1034,11 +1083,13 @@ mod tests {
             ..remote_cfg()
         };
         let dirs = safe_directories(&local);
-        assert_eq!(dirs.len(), 2, "{dirs:?}");
+        assert_eq!(dirs.len(), 3, "{dirs:?}");
         assert!(
             dirs[1].ends_with("srv/origin") && !dirs[1].contains("file:"),
             "{dirs:?}"
         );
+        // A non-bare origin is checked by git at its `.git` directory.
+        assert_eq!(dirs[2], format!("{}/.git", dirs[1]), "{dirs:?}");
     }
 
     #[tokio::test]
@@ -1083,7 +1134,12 @@ mod tests {
         );
         let read: Vec<&str> = out.lines().collect();
         assert_eq!(read, dirs.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(read.len(), 3, "{read:?}");
         assert!(read[1].contains("with space"), "{read:?}");
+        assert!(
+            read[2].contains("with space") && read[2].ends_with("/.git"),
+            "{read:?}"
+        );
         assert!(!cache.path().join("gitconfig.tmp").exists());
         assert!(std::fs::read_to_string(&file).unwrap().contains("[safe]"));
     }
