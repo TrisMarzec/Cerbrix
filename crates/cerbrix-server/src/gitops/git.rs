@@ -184,79 +184,125 @@ impl ConfigSource for GitSource {
             timeout: self.timeout,
         };
 
-        // A damaged checkout is thrown away and rebuilt once.
-        match prepare(&runner, &repo, url).await {
-            Ok(()) => {}
-            Err(RunError::Failed(_)) => {
-                remove_repo(&runner, &repo).await?;
-                prepare(&runner, &repo, url).await?;
-            }
-            Err(other) => return Err(other.into()),
-        }
-
+        // The cache is disposable: if git fails or hangs (a killed git leaves lock
+        // files behind), it is rebuilt and the whole sequence runs once more.
         let refspec = format!("refs/heads/{}", cfg.branch);
-        runner
-            .run(
-                &repo,
-                &[
-                    "fetch",
-                    "--quiet",
-                    "--depth",
-                    "1",
-                    "--no-tags",
-                    "--",
-                    "origin",
-                    &refspec,
-                ],
-            )
-            .await?;
-        runner
-            .run(
-                &repo,
-                &["checkout", "--quiet", "--force", "--detach", "FETCH_HEAD"],
-            )
-            .await?;
-        runner.run(&repo, &["clean", "--quiet", "-fdx"]).await?;
-
-        let head = runner.run(&repo, &["rev-parse", "HEAD"]).await?;
-        let commit = String::from_utf8_lossy(&head).trim().to_owned();
-        if !(commit.len() == 40 || commit.len() == 64)
-            || !commit.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Err(SourceError::Fetch(
-                "git reported an invalid commit id".into(),
-            ));
-        }
-
-        // `core.symlinks=false` turns links into plain files on disk, so they are
-        // looked for in the committed tree instead.
-        let listing = runner.run(&repo, &["ls-tree", "-r", "-z", "HEAD"]).await?;
-        let mut issues = special_entries(&listing);
-
-        tracing::debug!(commit = %commit, "fetched the configuration repository");
-        let read = {
-            let (repo, commit) = (repo.clone(), commit.clone());
-            tokio::task::spawn_blocking(move || read_tree(&repo, &commit))
-                .await
-                .map_err(|_| SourceError::Fetch("reading the checkout failed".into()))?
-        };
-        match read {
-            Ok(snapshot) if issues.is_empty() => Ok(snapshot),
-            Ok(_) => Err(SourceError::Invalid(issues)),
-            Err(more) => {
-                issues.extend(more);
-                issues.truncate(MAX_ISSUES);
-                Err(SourceError::Invalid(issues))
+        match sync_once(&runner, &repo, url, &refspec).await {
+            Err(SyncFail::Run(first @ (RunError::Failed(_) | RunError::Timeout))) => {
+                // If the cache cannot be removed, the original failure is the useful one.
+                if remove_repo(&runner, &repo).await.is_err() {
+                    return Err(first.into());
+                }
+                sync_once(&runner, &repo, url, &refspec)
+                    .await
+                    .map_err(SourceError::from)
             }
+            other => other.map_err(SourceError::from),
         }
     }
 }
 
+/// Why one pass failed: a git or io problem that a rebuild may fix, or a final answer.
+enum SyncFail {
+    Run(RunError),
+    Final(SourceError),
+}
+
+impl From<RunError> for SyncFail {
+    fn from(e: RunError) -> Self {
+        SyncFail::Run(e)
+    }
+}
+
+impl From<SourceError> for SyncFail {
+    fn from(e: SourceError) -> Self {
+        SyncFail::Final(e)
+    }
+}
+
+impl From<SyncFail> for SourceError {
+    fn from(e: SyncFail) -> Self {
+        match e {
+            SyncFail::Run(e) => e.into(),
+            SyncFail::Final(e) => e,
+        }
+    }
+}
+
+async fn sync_once(
+    runner: &Runner,
+    repo: &Path,
+    url: &str,
+    refspec: &str,
+) -> Result<Snapshot, SyncFail> {
+    prepare(runner, repo, url).await?;
+    runner
+        .run(
+            repo,
+            &[
+                "fetch",
+                "--quiet",
+                "--depth",
+                "1",
+                "--no-tags",
+                "--",
+                "origin",
+                refspec,
+            ],
+        )
+        .await?;
+    runner
+        .run(
+            repo,
+            &["checkout", "--quiet", "--force", "--detach", "FETCH_HEAD"],
+        )
+        .await?;
+    runner.run(repo, &["clean", "--quiet", "-fdx"]).await?;
+
+    let head = runner.run(repo, &["rev-parse", "HEAD"]).await?;
+    let commit = String::from_utf8_lossy(&head).trim().to_owned();
+    if !(commit.len() == 40 || commit.len() == 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(SourceError::Fetch("git reported an invalid commit id".into()).into());
+    }
+
+    // `core.symlinks=false` turns links into plain files on disk, so they are
+    // looked for in the committed tree instead.
+    let listing = runner.run(repo, &["ls-tree", "-r", "-z", "HEAD"]).await?;
+    let mut issues = special_entries(&listing);
+
+    tracing::debug!(commit = %commit, "fetched the configuration repository");
+    let read = {
+        let (repo, commit) = (repo.to_path_buf(), commit.clone());
+        tokio::task::spawn_blocking(move || read_tree(&repo, &commit))
+            .await
+            .map_err(|_| SourceError::Fetch("reading the checkout failed".into()))?
+    };
+    match read {
+        Ok(snapshot) if issues.is_empty() => Ok(snapshot),
+        Ok(_) => Err(SourceError::Invalid(issues).into()),
+        Err(more) => {
+            issues.extend(more);
+            issues.truncate(MAX_ISSUES);
+            Err(SourceError::Invalid(issues).into())
+        }
+    }
+}
+
+/// Deletes the checkout. A killed git may still hold files for a moment (on
+/// Windows), so a failure is retried a few times.
 async fn remove_repo(runner: &Runner, repo: &Path) -> Result<(), RunError> {
-    match tokio::fs::remove_dir_all(repo).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(runner.io_error("cannot reset the cache", &e)),
+    let mut attempt = 0;
+    loop {
+        match tokio::fs::remove_dir_all(repo).await {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if attempt >= 20 => return Err(runner.io_error("cannot reset the cache", &e)),
+            Err(_) => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
 }
 
@@ -708,6 +754,30 @@ mod tests {
         std::fs::write(cache.path().join("repo/.git/HEAD"), b"garbage\n").unwrap();
         let snapshot = src.fetch().await.unwrap();
         assert_eq!(snapshot.commit, git(origin.path(), &["rev-parse", "HEAD"]));
+    }
+
+    async fn recovers_from_lock(lock: &str) {
+        let origin = origin();
+        let cache = tempfile::tempdir().unwrap();
+        let src = source(origin.path(), cache.path());
+        src.fetch().await.unwrap();
+        let lock = cache.path().join("repo/.git").join(lock);
+        std::fs::write(&lock, b"").unwrap();
+        std::fs::write(origin.path().join("hosts/new.json"), b"{}").unwrap();
+        let head = commit_all(origin.path(), "more");
+        let snapshot = src.fetch().await.unwrap();
+        assert_eq!(snapshot.commit, head);
+        assert!(snapshot.files.contains_key("hosts/new.json"));
+    }
+
+    #[tokio::test]
+    async fn stale_index_lock_is_recovered() {
+        recovers_from_lock("index.lock").await;
+    }
+
+    #[tokio::test]
+    async fn stale_shallow_lock_is_recovered() {
+        recovers_from_lock("shallow.lock").await;
     }
 
     #[tokio::test]

@@ -267,6 +267,13 @@ impl GitopsConfig {
             {
                 return Err(ConfigError::Invalid(format!("{key} is not a valid path")));
             }
+            if let Some(path) = path
+                && !path.is_absolute()
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} must be an absolute path"
+                )));
+            }
         }
         if self.cache_dir.as_os_str().is_empty() {
             return bad("gitops.cache_dir must not be empty");
@@ -612,9 +619,9 @@ mod tests {
     #[test]
     fn token_and_key_are_exclusive() {
         Jail::expect_with(|_| {
-            let msg = invalid(load_gitops(&gitops_toml(
-                "token = \"tok\"\nssh_key_file = \"/k\"\n",
-            )));
+            let msg = invalid(load_gitops(&gitops_toml(&format!(
+                "token = \"tok\"\nssh_key_file = \"{ABS_KEY}\"\n"
+            ))));
             assert!(
                 msg.contains("gitops.token") && msg.contains("gitops.ssh_key_file"),
                 "{msg}"
@@ -647,12 +654,46 @@ mod tests {
     #[test]
     fn ssh_key_requires_ssh_url() {
         Jail::expect_with(|_| {
-            let msg = invalid(load_gitops(&gitops_toml("ssh_key_file = \"/k\"\n")));
+            let key = format!("ssh_key_file = \"{ABS_KEY}\"\n");
+            let msg = invalid(load_gitops(&gitops_toml(&key)));
             assert!(msg.contains("gitops.ssh_key_file"), "{msg}");
             for url in ["ssh://git@host/org/r.git", "git@host:org/r.git"] {
-                let toml = gitops_toml_with_url(url, "ssh_key_file = \"/k\"\n");
+                let toml = gitops_toml_with_url(url, &key);
                 assert!(load_gitops(&toml).is_ok(), "{url}");
             }
+            Ok(())
+        });
+    }
+
+    /// An absolute path on the platform the tests run on.
+    const ABS_KEY: &str = if cfg!(windows) { "C:/k" } else { "/k" };
+
+    #[test]
+    fn relative_ssh_key_file_rejected() {
+        Jail::expect_with(|_| {
+            let toml =
+                gitops_toml_with_url("git@host:org/r.git", "ssh_key_file = \"keys/id_ed25519\"\n");
+            let msg = invalid(load_gitops(&toml));
+            assert!(
+                msg.contains("gitops.ssh_key_file") && msg.contains("absolute"),
+                "{msg}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn relative_known_hosts_file_rejected() {
+        Jail::expect_with(|_| {
+            let toml = gitops_toml_with_url(
+                "git@host:org/r.git",
+                &format!("ssh_key_file = \"{ABS_KEY}\"\nknown_hosts_file = \"known_hosts\"\n"),
+            );
+            let msg = invalid(load_gitops(&toml));
+            assert!(
+                msg.contains("gitops.known_hosts_file") && msg.contains("absolute"),
+                "{msg}"
+            );
             Ok(())
         });
     }
