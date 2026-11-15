@@ -8,6 +8,11 @@ use cerbrix_common::{TriggerExpr, parse_trigger};
 use crate::gitops::EffectiveHost;
 
 pub mod eval;
+pub mod message;
+pub mod rules;
+
+pub use message::{EventKind, Notification};
+pub use rules::recipients;
 
 /// Parameters of an item instance, e.g. `{"mount": "/"}`.
 pub type Params = BTreeMap<String, String>;
