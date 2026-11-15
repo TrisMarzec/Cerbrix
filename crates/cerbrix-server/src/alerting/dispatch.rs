@@ -1,10 +1,17 @@
 //! Delivers queued notifications through a channel, with retries.
 //!
 //! The queue is the `notification_outbox` table: `claim_notifications` hands each row to one
-//! caller only (a lease), so several server instances never send the same message twice,
-//! and it holds a `resolved` row back while its `started` row is still pending, so the end
-//! of a problem is never mailed before its start. A row that could not be sent stays in the
-//! table and is tried again later; an alert survives a mail server that is down for a while.
+//! caller only (a lease), so several server instances do not work on the same message at
+//! once, and it holds a `resolved` row back while its `started` row is still pending, so the
+//! end of a problem is never mailed before its start. A row that could not be sent stays in
+//! the table and is tried again later; an alert survives a mail server that is down for a
+//! while.
+//!
+//! Delivery is at least once, not exactly once. A message is normally sent once, but it is
+//! sent again when the server stops or loses its database between the mail server's
+//! acceptance and `mark_notification_sent`, when that mark fails, or when the timeout ends a
+//! send after the mail server had already accepted the message: the lease ends and the row
+//! is claimed again. Duplicates are possible in those cases; losses are not.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -555,8 +562,12 @@ mod tests {
         let total = count(&pool, "true").await;
         assert!(total >= 3);
         let channel = FakeChannel::new();
-        channel.delay.store(100, Ordering::SeqCst);
-        let sent = dispatch_with_budget(&store, &channel, at(T0_MS), Duration::from_millis(150))
+        // Each send takes at least one second, so after two sends at least two seconds have
+        // passed and the 1.5 s budget is used up whatever the machine: at most two are sent.
+        // The first send starts right after the claim; only a stall of 1.5 s before it could
+        // leave nothing sent.
+        channel.delay.store(1000, Ordering::SeqCst);
+        let sent = dispatch_with_budget(&store, &channel, at(T0_MS), Duration::from_millis(1500))
             .await
             .unwrap();
         assert!(

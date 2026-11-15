@@ -296,11 +296,11 @@ checks are:
 - No key or string value contains a control character.
 - Every trigger watches an item its host collects.
 - A host with an item-level no-data trigger (`cpu.usage no data for 5m`) also has a host-level one
-  (`no data for 3m`). While a host is silent as a whole only the host-level trigger fires, so
-  that an agent outage is one problem; without it the outage would give no problem at all.
-  While a host as a whole is silent, item-level no-data triggers do not fire; the host-level
-  trigger reports at its own window. After a server start, no-data detection begins counting
-  from that start, so a restart never makes hosts look silent.
+  (`no data for 3m`). An item-level trigger fires only for an item that stopped while the rest
+  of the host went on reporting; when the whole host is silent only the host-level trigger
+  fires, at its own window, so that an agent outage is one problem. Without it the outage would
+  give no problem at all. After a server start, no-data detection begins counting from that
+  start, so a restart never makes hosts look silent.
 - Notifications have at least one valid address.
 - Dashboards: at most 72 panels, panels inside the grid, no overlap (the first overlapping pair
   is reported), graph and value panels refer to existing hosts

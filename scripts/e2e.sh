@@ -404,6 +404,9 @@ wait_until "problem \"Agent silent\" is open" "$NODATA_TIMEOUT" silent_open
 wait_until "a message to ops@example.com with the subject \"$SILENT_START\"" "$ALERT_TIMEOUT" silent_mailed
 
 # Nothing may be sent twice: give a late duplicate time to show up, then look at all subjects.
+# This fixed sleep is not a wait for a condition; it only bounds how long a late duplicate is
+# awaited. Every message checked below has already arrived (wait_until above), so the check
+# cannot fail because the sleep was too short; a duplicate later than this would go unnoticed.
 sleep 10
 echo "e2e: messages in Mailpit:"
 mail_summary >&2

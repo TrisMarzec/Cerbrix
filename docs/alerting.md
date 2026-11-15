@@ -7,7 +7,7 @@ the server does with it, and what you see.
 
 What is not there yet, so that you do not look for it:
 
-- There is **no web interface and no HTTP API for problems**. You list and acknowledge
+- There is **no web interface and no HTTP API for problems**. You list, acknowledge and close
   problems with `cerbrix-server admin problem ...` commands. The interface comes with the
   next milestone (M4).
 - **E-mail is the only channel.** No chat, SMS or webhook.
@@ -140,9 +140,13 @@ Points to know:
   example the mount `/var`) from the first value of it that arrived.
 - **An outage is one problem.** If the agent or the host dies, all its items go silent at the
   same time. To get one problem for that and not one per item, a host that has an item-level
-  no-data trigger must also have a host-level one. While the host as a whole is silent, item-level
-  triggers do not fire, and only the host-level trigger reports, at its own window. The
-  configuration is refused when the host-level trigger is missing:
+  no-data trigger must also have a host-level one. An item-level trigger fires only for an item
+  that was already silent for its whole window at the moment the host last reported, that is,
+  an item that stopped while the rest of the host went on. When everything stops at once, no
+  item-level trigger fires, whatever its window compared with the host-level one, and only the
+  host-level trigger reports, at its own window. While the host as a whole is silent, an
+  item-level problem that is already open stays open. The configuration is refused when the
+  host-level trigger is missing:
 
   ```
   hosts/db-02.json: trigger "Var silent" watches one item for missing data; add a host-level trigger such as "no data for 5m" so that an agent outage is one problem
@@ -162,8 +166,19 @@ Points to know:
   database was unavailable, for example), silence counts from the moment it checks again. A
   problem that is already open is never closed by this; it closes only when values arrive
   again.
-- **When values arrive again, the problem closes.** The problem for a host closes when a value
-  of the host arrives (for an item-level trigger: a value of that item, while the host reports).
+- **When values arrive again, the problem closes**, at the next check after the first value
+  arrived, so up to one check interval later. The problem for a host closes after a value of the
+  host arrived (for an item-level trigger: a value of that item, while the host reports).
+- **An instance that disappears keeps its problem.** When a file system is unmounted or a
+  network interface is removed, no value of it will ever arrive again, so its problem (a no-data
+  problem, or for example `disk.used_percent > 90` on a disk that was full) stays open until you
+  close it by hand with `admin problem close` (see
+  [the admin commands](#looking-at-problems-the-admin-commands)).
+- **A removed and restored trigger starts afresh.** When an item-level no-data trigger is
+  removed (or its selector narrowed), the server forgets when the items it no longer watches
+  last reported. If you restore it later, for example by reverting the commit, it knows an
+  instance again from the first value of it that arrives after the restore; until then that
+  instance cannot alarm.
 
 An example with both levels:
 
@@ -202,6 +217,7 @@ and the e-mail give the reason in these words:
 | the condition no longer holds | A new value does not meet the condition any more, or, for a no-data trigger, values arrive again. |
 | the host was removed from the configuration | The host's file was deleted from the repository (or the host was otherwise deactivated). |
 | the trigger was removed from the configuration | The trigger was deleted or renamed, or it now watches something else (see below). |
+| the problem was closed by an operator | Someone closed it with `admin problem close`. |
 
 When a trigger is changed in the repository:
 
@@ -374,8 +390,9 @@ pauses that start at 1 minute and double each time, up to one hour (1, 2, 4, ...
 
 How long it is tried depends on the error:
 
-- **Retried for 24 hours:** connection errors and timeouts, temporary failures of the mail
-  server (answers starting with 4), and failed logins (answers 530, 534, 535 and 538). A wrong
+- **Retried for 24 hours:** connection errors and timeouts, TLS errors (including a certificate
+  that cannot be verified, and a server that does not offer STARTTLS), temporary failures of the
+  mail server (answers starting with 4), and failed logins (answers 530, 534, 535 and 538). A wrong
   password is a problem of the setup, which you will fix, so the alerts wait for you.
 - **Retried for one hour, then given up:** other permanent refusals, for example an address that
   the mail server rejects. Trying such a message for a day would not help.
@@ -383,7 +400,15 @@ How long it is tried depends on the error:
 When a message is given up, the server writes an error to its log (`notification given up after
 24 hours of failed attempts` or `... after one hour of permanent errors`) and the message is not
 sent. The e-mail about the end of a problem is never sent before the e-mail about its start while
-that one is still waiting, so the two arrive in the right order after an outage.
+that one is still waiting, so the two arrive in the right order after an outage. When the e-mail
+about the start was given up, the e-mail about the end is still sent: it names the start, the end
+and the duration, and it may be the only notice a recipient gets.
+
+A message is normally sent once, but delivery is "at least once", not "exactly once": if the
+server stops or loses its database between the mail server accepting a message and the server
+recording that it was sent, or if the time allowed for a send runs out after the mail server
+had already accepted it, the message is sent again later. Duplicates are possible in those
+cases; lost messages are not.
 
 To see the state of the queue:
 
@@ -459,6 +484,24 @@ docker compose exec server cerbrix-server admin problem ack d33ac168 --comment "
 problem d33ac168-0f8b-4278-8b1c-f094dbaced14 acknowledged
 ```
 
+`admin problem close <id> --comment "..." [--by <name>]` closes an open problem by hand. Use it
+for a problem that can never end by itself because its instance is gone: a file system that was
+unmounted, a network interface that was removed. The problem is resolved with the reason "the
+problem was closed by an operator", the comment and the name are recorded as its
+acknowledgement (unless it was acknowledged already), the server forgets the state of that
+trigger and instance, and the e-mail about the end goes to everyone who was mailed about the
+start (when SMTP is configured). If the condition still holds, for example the disk is still
+mounted and still full, the next value opens a new problem. Closing a problem that is already
+resolved fails with `problem <id> is already resolved`.
+
+```sh
+docker compose exec server cerbrix-server admin problem close f8ed5ec3 --comment "USB disk unmounted" --by anna
+```
+
+```
+problem f8ed5ec3-2c1a-4f0e-9d5b-7a61c0e4b2d9 closed
+```
+
 An unknown id gives `no problem with id ...`; an id of fewer than 4 characters or one that matches
 several problems is refused with a message that says so.
 
@@ -471,7 +514,9 @@ several problems is refused with a message that says so.
 
 The [SMTP settings](#smtp-settings) are described above. If you run more than one server
 instance, they reach the same decisions: the state of triggers, problems and queued e-mails is in
-PostgreSQL, and no message is sent twice.
+PostgreSQL, and two instances never work on the same message at the same time. Delivery is at
+least once, as described in [When the mail server is not
+reachable](#when-the-mail-server-is-not-reachable).
 
 ## How this is tested
 
