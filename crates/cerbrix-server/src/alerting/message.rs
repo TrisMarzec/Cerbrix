@@ -40,16 +40,16 @@ pub struct Notification {
 }
 
 impl Notification {
-    /// The subject line: no control characters, at most 200 characters.
+    /// The subject line (host and trigger name): no control characters, at most 200 characters.
     pub fn subject(&self) -> String {
         let host = clean(&self.host);
-        let summary = clean(&self.summary);
+        let trigger = clean(&self.trigger);
         let instance = clean(&self.instance);
         let head = match self.kind {
             EventKind::Started => severity_word(self.severity),
             EventKind::Resolved => "Resolved",
         };
-        let mut subject = format!("[Cerbrix] {head} {host}: {summary}");
+        let mut subject = format!("[Cerbrix] {head} {host}: {trigger}");
         if !instance.is_empty() {
             subject.push_str(&format!(" ({instance})"));
         }
@@ -161,10 +161,10 @@ mod tests {
         Notification {
             kind: EventKind::Started,
             host: "db-02".to_string(),
-            trigger: "disk_free".to_string(),
+            trigger: "Disk almost full".to_string(),
             instance: "mount=/".to_string(),
             severity: Severity::High,
-            summary: "Disk almost full".to_string(),
+            summary: "disk.used_percent > 90 for 10m: value 96.5 on mount=/".to_string(),
             started_at: at(T0),
             resolved_at: None,
             resolve_reason: None,
@@ -212,11 +212,11 @@ mod tests {
         assert_eq!(
             started().body(),
             "Host: db-02\n\
-             Trigger: disk_free\n\
+             Trigger: Disk almost full\n\
              Instance: mount=/\n\
              Severity: HIGH\n\
              State: problem\n\
-             Detail: Disk almost full\n\
+             Detail: disk.used_percent > 90 for 10m: value 96.5 on mount=/\n\
              Started: 2026-11-15T14:20:00Z\n\
              \n\
              Sent by Cerbrix.\n"
@@ -233,11 +233,11 @@ mod tests {
         assert_eq!(
             resolved(3_900).body(),
             "Host: db-02\n\
-             Trigger: disk_free\n\
+             Trigger: Disk almost full\n\
              Instance: mount=/\n\
              Severity: HIGH\n\
              State: resolved\n\
-             Detail: Disk almost full\n\
+             Detail: disk.used_percent > 90 for 10m: value 96.5 on mount=/\n\
              Started: 2026-11-15T14:20:00Z\n\
              Ended: 2026-11-15T15:25:00Z\n\
              Duration: 1 h 5 min\n\
@@ -312,7 +312,7 @@ mod tests {
         };
         let subject = n.subject();
         assert!(!subject.contains('\r') && !subject.contains('\n'));
-        assert_eq!(subject, "[Cerbrix] HIGH h ost: x  Bcc: x@y (k=v )");
+        assert_eq!(subject, "[Cerbrix] HIGH h ost: t rig (k=v )");
         let body = n.body();
         assert!(body.contains("Detail: x  Bcc: x@y\n"));
         assert!(body.contains("Host: h ost\n"));
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn subject_is_cut_to_200_characters() {
         let n = Notification {
-            summary: "\u{e4}".repeat(500),
+            trigger: "\u{e4}".repeat(500),
             ..started()
         };
         assert_eq!(n.subject().chars().count(), 200);

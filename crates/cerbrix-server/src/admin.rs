@@ -437,13 +437,11 @@ fn test_notification() -> Notification {
     Notification {
         kind: EventKind::Started,
         host: "cerbrix-test".to_owned(),
-        // The subject shows host and summary, the body shows the trigger: the summary stays
-        // short and the explanation goes into the trigger line of the body.
-        trigger: "This is a test message sent with \"cerbrix-server admin notify test\"."
-            .to_owned(),
+        trigger: "Test message".to_owned(),
         instance: String::new(),
         severity: cerbrix_common::config::Severity::Info,
-        summary: "Test message".to_owned(),
+        summary: "This is a test message sent with \"cerbrix-server admin notify test\"."
+            .to_owned(),
         started_at: OffsetDateTime::now_utc(),
         resolved_at: None,
         resolve_reason: None,

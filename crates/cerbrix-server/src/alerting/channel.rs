@@ -347,10 +347,10 @@ mod tests {
         Notification {
             kind: EventKind::Started,
             host: "db-02".to_owned(),
-            trigger: "disk_free".to_owned(),
+            trigger: "Disk almost full".to_owned(),
             instance: String::new(),
             severity: Severity::Critical,
-            summary: "Disk almost full".to_owned(),
+            summary: "disk.used_percent > 90 for 10m".to_owned(),
             started_at: OffsetDateTime::from_unix_timestamp(1_794_752_400).unwrap(),
             resolved_at: None,
             resolve_reason: None,
