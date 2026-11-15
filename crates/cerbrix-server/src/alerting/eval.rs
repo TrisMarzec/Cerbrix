@@ -10,8 +10,8 @@ use super::{ActiveTrigger, Evaluation, OpenProblem, ResolveProblem, TriggerState
 /// open and which resolve.
 ///
 /// Only `TriggerExpr::Compare` triggers are evaluated. A value older than
-/// `now_ms - max_age_ms` that matches at least one trigger is counted in
-/// `too_old` (once) and otherwise ignored. The result is deterministic: `states`,
+/// `now_ms - max_age_ms` is counted in `too_old` (once, whether or not a
+/// trigger watches it) and otherwise ignored. The result is deterministic: `states`,
 /// `open` and `resolve` are ordered by trigger name, then instance, then time.
 /// The function never panics; all time arithmetic saturates.
 pub fn evaluate(
@@ -41,10 +41,13 @@ pub fn evaluate(
     let mut groups: BTreeMap<(&str, String), (&ActiveTrigger, Vec<&MetricValue>)> = BTreeMap::new();
 
     for v in values {
+        if v.ts_ms < oldest_allowed {
+            out.too_old += 1;
+            continue;
+        }
         let Some(candidates) = by_key.get(v.key.as_str()) else {
             continue;
         };
-        let mut matched = false;
         for t in candidates {
             let TriggerExpr::Compare { selector, .. } = &t.expr else {
                 continue;
@@ -56,18 +59,11 @@ pub fn evaluate(
             {
                 continue;
             }
-            matched = true;
-            if v.ts_ms < oldest_allowed {
-                break;
-            }
             groups
                 .entry((t.name.as_str(), instance_key(&v.params)))
                 .or_insert_with(|| (t, Vec::new()))
                 .1
                 .push(v);
-        }
-        if matched && v.ts_ms < oldest_allowed {
-            out.too_old += 1;
         }
     }
 
@@ -399,6 +395,18 @@ mod tests {
         assert_eq!(r.too_old, 1);
         assert!(r.states.is_empty());
         assert!(r.open.is_empty());
+    }
+
+    #[test]
+    fn too_old_counts_values_no_trigger_watches() {
+        let t = [trig("cpu", "cpu.usage > 90", Severity::High)];
+        let r = ev(&t, &[], &[val("mem.used", &[], NOW - 301_000, 1.0)]);
+        assert_eq!(r.too_old, 1);
+        let r = ev(&[], &[], &[val("mem.used", &[], NOW - 301_000, 1.0)]);
+        assert_eq!(r.too_old, 1);
+        let t = [trig("nd", "cpu.usage no data for 5m", Severity::High)];
+        let r = ev(&t, &[], &[val("cpu.usage", &[], NOW - 301_000, 1.0)]);
+        assert_eq!(r.too_old, 1);
     }
 
     #[test]

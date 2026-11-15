@@ -91,6 +91,6 @@ pub struct Evaluation {
     pub states: Vec<TriggerState>,
     pub open: Vec<OpenProblem>,
     pub resolve: Vec<ResolveProblem>,
-    /// Values older than the tolerance that match a trigger (counted once each).
+    /// Values older than the tolerance (counted once each, watched by a trigger or not).
     pub too_old: usize,
 }
