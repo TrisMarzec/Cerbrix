@@ -78,7 +78,8 @@ cleanup() {
         echo "e2e: last agent log lines:" >&2
         tail -n 20 "$WORK/agent.log" >&2
     fi
-    if [ "$status" -ne 0 ] && [ "${CERBRIX_E2E_KEEP_STACK:-0}" != 1 ]; then
+    # Printed whether or not the stack is kept, so a failed run always shows the state.
+    if [ "$status" -ne 0 ]; then
         echo "e2e: admin sync status:" >&2
         compose exec -T server cerbrix-server admin sync status >&2 2>&1
         compose logs --tail 30 server >&2 2>/dev/null

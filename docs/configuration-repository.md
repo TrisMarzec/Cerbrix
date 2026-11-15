@@ -28,9 +28,14 @@ displays/         what a screen shows, and when it switches dashboards
 - The identifier of a dashboard or display is its file name without `.json`
   (`dashboards/production.json` is `production`). Hosts, templates and notifications are
   identified by the name inside the file, not by the file name.
-- Limits: a file may be at most 1 MiB, the repository at most 20,000 files and 64 MiB of
-  configuration files, directories may be nested at most 16 levels deep. Symbolic links and Git
-  submodules are not allowed. Each of these makes the revision invalid.
+- Limits: a file may be at most 1 MiB; the five directories may hold at most 20,000 files
+  together (all files count, not only `.json` files) and 64 MiB of configuration files;
+  directories may be nested at most 16 levels deep. A dashboard may have at most 72 panels, a
+  host may list at most 32 templates. Symbolic links and Git submodules are not allowed. Each of
+  these makes the revision invalid.
+- No string in a file, neither a key nor a value, may contain a control character (for example
+  NUL, a tab or a line break, written as `\u0000`, `\t` or `\n`), and no file or directory name
+  in the five directories may contain one.
 - The server reads one branch (default `main`), the newest commit only. There is no history to
   manage: to undo a change, revert the commit.
 
@@ -70,7 +75,7 @@ Intervals and durations are written as digits followed by `s`, `m`, `h` or `d` (
 | `host` | yes | The host name. This is the name the agent uses in its `host` setting. Letters, digits, `.`, `_` and `-`, starting with a letter or digit, at most 253 characters. Unique in the repository. |
 | `address` | no | Free text, for example the IP address. Shown by `admin host show`. |
 | `groups` | no | Group names (see [Names](#names)). Dashboards and notifications select hosts by group. |
-| `templates` | no | Names of templates to apply, in order. Each must exist and may be listed once. |
+| `templates` | no | Names of templates to apply, in order, at most 32. Each must exist and may be listed once. |
 | `items` | no | Items the host collects, see below. |
 | `triggers` | no | Trigger definitions, see below. |
 
@@ -180,7 +185,7 @@ the result of the merge, with the origin (`host` or `template:<name>`) of every 
 
 Panels are placed on a grid of 12 columns and 6 rows. `x` and `y` are the top left cell
 (starting at 0), `w` and `h` the size in cells. A panel must lie inside the grid and panels
-must not overlap. Panel types:
+must not overlap, so a dashboard has at most 72 panels. Panel types:
 
 | `type` | Extra fields | Shows |
 | --- | --- | --- |
@@ -192,7 +197,8 @@ must not overlap. Panel types:
 For `graph` and `value`, the host must exist, be selected by the dashboard's `hosts`, and
 collect the item.
 
-A dashboard that only selects hosts and uses the standard layout:
+A dashboard that only selects hosts and uses the standard layout. Save it as
+`dashboards/web.json`: its id is then `web`, which the display example below refers to.
 
 ```json
 {
@@ -249,7 +255,8 @@ operator    = ">" | "<" | ">=" | "<=" | "==" | "!="
 
 - `item-key` is a [built-in item](items.md). `param` is `mount` or `interface`. A `value` is
   written bare (`/var`, `eth0`; it ends at `,`, `}`, a space or a quote) or in double quotes
-  when it contains such characters (`{mount="/mnt/my disk"}`).
+  when it contains such characters (`{mount="/mnt/my disk"}`). A quoted value cannot contain a
+  double quote itself; there is no escape for it.
 - `number` is a decimal number, optionally negative, such as `90`, `0.5` or `-1`.
 - `duration` uses the interval form (`10m`, `1h`).
 - `for duration` means the condition must hold for that long before the problem opens. Without
@@ -281,10 +288,12 @@ checks are:
   display ids and names), and follow the [name rules](#names).
 - Item keys are built-in items; parameters are the ones the item takes.
 - Intervals are valid; trigger expressions parse; severities are one of the four values.
-- Every template a host lists exists and is listed once.
+- Every template a host lists exists and is listed once; a host lists at most 32 templates.
+- No key or string value contains a control character.
 - Every trigger watches an item its host collects.
 - Notifications have at least one valid address.
-- Dashboards: panels inside the grid, no overlap, graph and value panels refer to existing hosts
+- Dashboards: at most 72 panels, panels inside the grid, no overlap (the first overlapping pair
+  is reported), graph and value panels refer to existing hosts
   that the dashboard selects and that collect the item.
 - Displays: every referenced dashboard exists; rotation has at least one dashboard and an `every`
   from 5 s to 1 h.
@@ -297,8 +306,9 @@ syntax errors, the line and column.
 
 The installation is **Out Of Sync** when the latest sync attempt did not produce a valid
 configuration: the repository could not be fetched (unreachable, credentials rejected, branch
-missing, `git` timed out after 60 s), the revision is invalid, or it was refused by the
-[mass-removal guard](#mass-removal-guard). While Out Of Sync, the last valid configuration stays
+missing, `git` timed out after 60 s), the revision is invalid, it was refused by the
+[mass-removal guard](#mass-removal-guard), or the database could not store it (shown as
+`the configuration could not be stored: ...`; the server log has the full error). While Out Of Sync, the last valid configuration stays
 active: hosts keep being monitored and agents keep their configuration. The state clears by
 itself with the next successful sync, for example after you push a fix.
 
@@ -406,19 +416,19 @@ settings (`.vscode/settings.json` of your configuration repository):
       "url": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/host.schema.json"
     },
     {
-      "fileMatch": ["/templates/*.json"],
+      "fileMatch": ["/templates/**/*.json"],
       "url": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/template.schema.json"
     },
     {
-      "fileMatch": ["/notifications/*.json"],
+      "fileMatch": ["/notifications/**/*.json"],
       "url": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/notification.schema.json"
     },
     {
-      "fileMatch": ["/dashboards/*.json"],
+      "fileMatch": ["/dashboards/**/*.json"],
       "url": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/dashboard.schema.json"
     },
     {
-      "fileMatch": ["/displays/*.json"],
+      "fileMatch": ["/displays/**/*.json"],
       "url": "https://raw.githubusercontent.com/TrisMarzec/Cerbrix/main/schemas/display.schema.json"
     }
   ]

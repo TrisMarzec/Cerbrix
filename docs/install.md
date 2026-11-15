@@ -183,6 +183,9 @@ the server and need no editing; if the checkout is damaged the server rebuilds i
 - The server runs `git` with a cleared environment. Proxy settings (`HTTPS_PROXY`) and custom CA
   certificate variables are not passed on, so the repository must be reachable directly and with
   a certificate that the system trusts. This is a known limitation.
+- HTTP redirects are not followed, so the token is never sent to another address. The
+  configured URL must be the final one: after a repository was renamed or moved, set the new
+  URL instead of relying on the provider's redirect.
 - Each `git` call is stopped after 60 seconds.
 - Symbolic links and submodules in the repository are rejected.
 - Fetching with a token over HTTPS and with an SSH key is described here from the code; the
@@ -190,12 +193,19 @@ the server and need no editing; if the checkout is damaged the server rebuilds i
 
 ### Agents
 
-With GitOps on, an agent no longer decides what it measures. It fetches its configuration from
-the server at start and every 60 seconds, keeps the last one in its state directory (so it
-continues if the server is unreachable) and measures nothing until it has received one. A host
-created with `admin host add` while GitOps is off gets all built-in items at their default
+An agent no longer decides what it measures, whether GitOps is on or off. It fetches its
+configuration from the server at start and every 60 seconds, keeps the last one in its state
+directory (so it continues if the server is unreachable) and measures nothing until it has
+received one. With GitOps on, the configuration comes from the host's file in the repository; a
+host created with `admin host add` while GitOps is off gets all built-in items at their default
 intervals. The `[intervals]` section of `agent.toml` is gone: an agent file that still has it is
 rejected, so remove the section when you upgrade an existing agent.
+
+**Upgrading from M1** (the release without configuration from Git): upgrade the server first, then the agents, and remove `[intervals]` from
+each `agent.toml` as part of the agent upgrade. A new agent asks the server for its
+configuration; an M1 server does not have that endpoint, so a new agent without a cached
+configuration measures nothing until its server is upgraded. An M1 agent keeps working against a
+new server with its local intervals until it is upgraded.
 
 ## Making the server reachable for agents
 
