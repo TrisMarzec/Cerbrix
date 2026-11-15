@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use cerbrix_common::agent_config::ItemConfig;
 use cerbrix_common::{
     EnrollRequest, EnrollResponse, ErrorBody, IngestResponse, MetricValue, PROTOCOL_VERSION,
 };
@@ -12,6 +13,8 @@ use serde::Serialize;
 use crate::config::AgentConfig;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Most bytes of a configuration answer the agent reads.
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 /// Why a request to the server did not succeed. Messages never contain the
 /// enrolment key or the credential.
@@ -32,6 +35,7 @@ pub struct ServerClient {
     http: reqwest::Client,
     enroll_url: Url,
     values_url: Url,
+    config_url: Url,
 }
 
 impl ServerClient {
@@ -70,6 +74,7 @@ impl ServerClient {
             http,
             enroll_url: endpoint("api/agent/v1/enroll")?,
             values_url: endpoint("api/agent/v1/values")?,
+            config_url: endpoint("api/agent/v1/config")?,
         })
     }
 
@@ -118,6 +123,55 @@ impl ServerClient {
             .json()
             .await
             .map_err(|e| ClientError::Retryable(format!("unreadable server answer: {e}")))
+    }
+}
+
+impl ServerClient {
+    /// Fetches this agent's configuration. `Ok(None)` means the server's version
+    /// is still `known_version` (304).
+    pub async fn fetch_config(
+        &self,
+        credential: &str,
+        known_version: Option<&str>,
+    ) -> Result<Option<ItemConfig>, ClientError> {
+        let mut request = self
+            .http
+            .get(self.config_url.clone())
+            .bearer_auth(credential);
+        if let Some(version) = known_version {
+            request = request.header(reqwest::header::IF_NONE_MATCH, format!("\"{version}\""));
+        }
+        let response = send_request(request).await?;
+        if response.status() == StatusCode::NOT_MODIFIED {
+            return Ok(None);
+        }
+        let mut response = check_status(response, StatusCode::OK, true).await?;
+        let too_large = || ClientError::Retryable("configuration answer is too large".into());
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_CONFIG_BYTES as u64)
+        {
+            return Err(too_large());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| ClientError::Retryable(e.without_url().to_string()))?
+        {
+            if body.len() + chunk.len() > MAX_CONFIG_BYTES {
+                return Err(too_large());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let config: ItemConfig = serde_json::from_slice(&body)
+            .map_err(|e| ClientError::Retryable(format!("unreadable configuration: {e}")))?;
+        if config.version.is_empty() {
+            return Err(ClientError::Retryable(
+                "configuration without a version".into(),
+            ));
+        }
+        Ok(Some(config))
     }
 }
 
@@ -359,6 +413,111 @@ mod tests {
         let body: ValueBatch = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body.protocol_version, PROTOCOL_VERSION);
         assert_eq!(body.values, vec![value()]);
+    }
+
+    fn config_body() -> serde_json::Value {
+        serde_json::json!({
+            "version": "v1",
+            "items": [{ "key": "cpu.usage", "params": null, "interval_secs": 30 }]
+        })
+    }
+
+    async fn answer_get(template: ResponseTemplate) -> (MockServer, ServerClient) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(template)
+            .mount(&server)
+            .await;
+        let client = ServerClient::new(&cfg(&server.uri())).unwrap();
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn fetch_config_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/agent/v1/config"))
+            .and(header("authorization", "Bearer cred-9"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"v1\"")
+                    .set_body_json(config_body()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ServerClient::new(&cfg(&server.uri())).unwrap();
+        let config = client.fetch_config("cred-9", None).await.unwrap().unwrap();
+        assert_eq!(config.version, "v1");
+        assert_eq!(config.items.len(), 1);
+        assert_eq!(config.items[0].key, "cpu.usage");
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests[0].headers.contains_key("if-none-match"));
+    }
+
+    #[tokio::test]
+    async fn fetch_config_not_modified() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/agent/v1/config"))
+            .and(header("if-none-match", "\"v1\""))
+            .respond_with(ResponseTemplate::new(304))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ServerClient::new(&cfg(&server.uri())).unwrap();
+        assert!(
+            client
+                .fetch_config("c", Some("v1"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_config_unauthorized() {
+        let body = serde_json::json!({ "error": "unauthorized", "message": "no" });
+        let (_server, client) = answer_get(ResponseTemplate::new(401).set_body_json(body)).await;
+        assert!(matches!(
+            client.fetch_config("c", None).await,
+            Err(ClientError::Unauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_config_garbage_is_retryable() {
+        for template in [
+            ResponseTemplate::new(200).set_body_string("<html>hello</html>"),
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "version": "", "items": [] })),
+            ResponseTemplate::new(200).set_body_bytes(vec![b' '; MAX_CONFIG_BYTES + 1]),
+        ] {
+            let (_server, client) = answer_get(template).await;
+            assert!(matches!(
+                client.fetch_config("c", None).await,
+                Err(ClientError::Retryable(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_config_500_is_retryable() {
+        let (_server, client) = answer_get(ResponseTemplate::new(500)).await;
+        assert!(matches!(
+            client.fetch_config("c", None).await,
+            Err(ClientError::Retryable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_config_refused_with_error_body() {
+        let body = serde_json::json!({ "error": "no_config", "message": "none" });
+        let (_server, client) = answer_get(ResponseTemplate::new(409).set_body_json(body)).await;
+        assert!(matches!(
+            client.fetch_config("c", None).await,
+            Err(ClientError::Refused { .. })
+        ));
     }
 
     #[tokio::test]
