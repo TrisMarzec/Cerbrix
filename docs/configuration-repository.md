@@ -85,7 +85,7 @@ A parameter value must not be empty and at most 256 bytes long. A host collects 
 that its files list, directly or through templates; there are no hidden defaults.
 
 A trigger entry has a `name`, an `expression` and a `severity`, one of `info`, `warning`,
-`high`, `critical`. See [Trigger expressions](#trigger-expressions).
+`high`, `critical`. See [Trigger expressions](#trigger-expressions). What the server does with a trigger (problems, e-mails, no-data detection) is described in [Alerting](alerting.md).
 
 ## Template files (`templates/`)
 
@@ -152,6 +152,8 @@ the result of the merge, with the origin (`host` or `template:<name>`) of every 
 | `email` | yes | At least one address, each with exactly one `@` and text on both sides. |
 | `min_severity` | yes | Problems of this severity or higher are sent. |
 | `groups` | no | Group names; the rule applies to hosts in these groups. |
+
+A rule applies to a problem when its severity is at least `min_severity` and the host is in all the listed groups (no `groups`: every host). How the e-mails look and what happens when the mail server is down is described in [Alerting](alerting.md#who-is-told-notification-rules); the SMTP server itself is set up in [E-mail notifications](install.md#e-mail-notifications).
 
 ## Dashboard files (`dashboards/`)
 
@@ -244,6 +246,8 @@ digits, `_` or `-`, starting with a letter or digit. Host names follow the rule 
 ## Trigger expressions
 
 An expression is a condition on one item, or a check that data stopped arriving.
+
+A trigger opens a problem and sends an e-mail when the condition holds; see [Alerting](alerting.md) for how holding, instances and no-data detection work.
 
 ```
 expression  = comparison | no-data
