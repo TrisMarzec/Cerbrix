@@ -2,10 +2,12 @@
 //!
 //! Enrolment keys and agent credentials are stored only as SHA-256 hashes.
 
+mod alerting;
 mod enrollment;
 mod hosts;
 mod sync;
 
+pub use alerting::{AlertContext, OutboxItem, Problem, ProblemEvent, ProblemFilter};
 pub use enrollment::UnknownAgent;
 pub use sync::{
     ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock, SyncState,
