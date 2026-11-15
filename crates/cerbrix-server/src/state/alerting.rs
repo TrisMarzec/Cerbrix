@@ -2,13 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use cerbrix_common::NotificationFile;
 use cerbrix_common::config::Severity;
+use cerbrix_common::{NotificationFile, TriggerExpr, parse_trigger};
 use sqlx::types::Json;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use super::{StateError, StateStore};
+use crate::alerting::nodata::Seen;
 use crate::alerting::{
     Evaluation, EventKind, Notification, OpenProblem, Params, ResolveProblem, TriggerState,
     instance_key, recipients,
@@ -443,6 +444,86 @@ impl StateStore {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Records that the no-data check is running and returns the baseline: the time since
+    /// which silence counts. If the previous heartbeat is missing or older than
+    /// 3 x `check_every` the server was not checking (a gap), and the baseline moves to
+    /// `now`; otherwise it stays. One statement, so instances that call it at the same
+    /// moment cannot both see a gap and set different baselines.
+    pub async fn alerting_heartbeat(
+        &self,
+        now: OffsetDateTime,
+        check_every: std::time::Duration,
+    ) -> Result<Option<OffsetDateTime>, StateError> {
+        let tolerance = Duration::try_from(check_every)
+            .unwrap_or(Duration::MAX)
+            .saturating_mul(3);
+        let stale_before = now
+            .checked_sub(tolerance)
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+        let baseline: Option<OffsetDateTime> = sqlx::query_scalar(
+            "UPDATE alerting_state SET \
+                 baseline_at = CASE WHEN heartbeat_at IS NULL OR heartbeat_at < $2 \
+                                    THEN $1 ELSE baseline_at END, \
+                 heartbeat_at = GREATEST(heartbeat_at, $1) \
+             WHERE singleton RETURNING baseline_at",
+        )
+        .bind(now)
+        .bind(stale_before)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(baseline)
+    }
+
+    /// Active hosts whose effective triggers include a no-data trigger, ordered by name.
+    /// A stored configuration that cannot be read is skipped and logged.
+    pub async fn hosts_with_nodata_triggers(&self) -> Result<Vec<Uuid>, StateError> {
+        let rows: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
+            "SELECT id, config FROM hosts WHERE active AND config IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, config)| {
+                let host = match serde_json::from_value::<EffectiveHost>(config) {
+                    Ok(host) => host,
+                    Err(err) => {
+                        tracing::error!(host_id = %id, %err, "skipping unreadable host configuration");
+                        return None;
+                    }
+                };
+                host.triggers
+                    .iter()
+                    .any(|t| matches!(parse_trigger(&t.expression), Ok(TriggerExpr::NoData { .. })))
+                    .then_some(id)
+            })
+            .collect())
+    }
+
+    /// When values last arrived for the host and for each of its watched series.
+    pub async fn seen(&self, host_id: Uuid) -> Result<Seen, StateError> {
+        let last_seen: Option<OffsetDateTime> =
+            sqlx::query_scalar("SELECT last_seen_at FROM hosts WHERE id = $1")
+                .bind(host_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten();
+        let rows: Vec<(String, Json<Params>, OffsetDateTime)> = sqlx::query_as(
+            "SELECT item_key, params, last_arrival FROM series_seen \
+             WHERE host_id = $1 ORDER BY item_key, instance",
+        )
+        .bind(host_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(Seen {
+            last_seen_ms: last_seen.map(to_ms),
+            series: rows
+                .into_iter()
+                .map(|(key, params, at)| (key, params.0, to_ms(at)))
+                .collect(),
+        })
     }
 
     /// Problems, at most `limit`: see [`ProblemFilter`] for the order.
@@ -1321,6 +1402,89 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(seen, Some(at(T0_MS)));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn heartbeat_sets_baseline_after_a_gap(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        let every = std::time::Duration::from_secs(15);
+        let t = at(T0_MS);
+        // The first call has no previous heartbeat: a gap.
+        assert_eq!(store.alerting_heartbeat(t, every).await.unwrap(), Some(t));
+        // 15 s later: no gap, the baseline stays.
+        assert_eq!(
+            store
+                .alerting_heartbeat(t + Duration::seconds(15), every)
+                .await
+                .unwrap(),
+            Some(t)
+        );
+        // 10 minutes after that: a gap, the baseline moves to now.
+        let later = t + Duration::seconds(15) + Duration::minutes(10);
+        assert_eq!(
+            store.alerting_heartbeat(later, every).await.unwrap(),
+            Some(later)
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn hosts_with_nodata_triggers_lists_only_active_hosts_with_such_triggers(pool: PgPool) {
+        use crate::gitops::Snapshot;
+        let host = |name: &str, trigger: &str| {
+            format!(
+                r#"{{"host":"{name}","items":[{{"key":"cpu.usage","interval":"1m"}}],
+                    "triggers":[{trigger}]}}"#
+            )
+        };
+        let silent = r#"{"name":"Silent","expression":"no data for 3m","severity":"high"}"#;
+        let cpu = r#"{"name":"Cpu","expression":"cpu.usage > 90","severity":"high"}"#;
+        let files = [
+            ("hosts/a.json", host("a-silent", silent)),
+            ("hosts/b.json", host("b-compare", cpu)),
+            ("hosts/c.json", host("c-inactive", silent)),
+            ("hosts/d.json", r#"{"host":"d-nothing"}"#.to_owned()),
+        ];
+        let snapshot = Snapshot {
+            commit: "c1".into(),
+            files: files
+                .into_iter()
+                .map(|(p, c)| (p.to_owned(), c.into_bytes()))
+                .collect(),
+        };
+        let compiled = compile(&snapshot).unwrap_or_else(|i| panic!("{i:?}"));
+        let store = StateStore::from_pool(pool.clone());
+        store
+            .apply_config("c1", &compiled, at(T0_MS), 50)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE hosts SET active = false WHERE name = 'c-inactive'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let a = store.host_by_name("a-silent").await.unwrap().unwrap().id;
+        assert_eq!(store.hosts_with_nodata_triggers().await.unwrap(), [a]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn seen_returns_host_and_series_arrivals(pool: PgPool) {
+        let (store, host) = setup(pool).await;
+        assert_eq!(store.seen(host).await.unwrap(), Seen::default());
+        let mount = Params::from([("mount".to_owned(), "/".to_owned())]);
+        store
+            .touch_seen(
+                host,
+                at(T0_MS),
+                &[("disk.used_percent".to_owned(), mount.clone())],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.seen(host).await.unwrap(),
+            Seen {
+                last_seen_ms: Some(T0_MS),
+                series: vec![("disk.used_percent".to_owned(), mount, T0_MS)],
+            }
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]

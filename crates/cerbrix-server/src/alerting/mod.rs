@@ -9,6 +9,7 @@ use crate::gitops::EffectiveHost;
 
 pub mod eval;
 pub mod message;
+pub mod nodata;
 pub mod rules;
 
 pub use message::{EventKind, Notification};

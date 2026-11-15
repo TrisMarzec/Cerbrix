@@ -291,6 +291,9 @@ checks are:
 - Every template a host lists exists and is listed once; a host lists at most 32 templates.
 - No key or string value contains a control character.
 - Every trigger watches an item its host collects.
+- A host with an item-level no-data trigger (`cpu.usage no data for 5m`) also has a host-level one
+  (`no data for 3m`). While a host is silent as a whole only the host-level trigger fires, so
+  that an agent outage is one problem; without it the outage would give no problem at all.
 - Notifications have at least one valid address.
 - Dashboards: at most 72 panels, panels inside the grid, no overlap (the first overlapping pair
   is reported), graph and value panels refer to existing hosts

@@ -13,6 +13,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use tokio_util::sync::CancellationToken;
 use tower_http::timeout::TimeoutLayer;
 
+use crate::alerting::nodata::run_nodata_loop;
 use crate::api::{AppState, router};
 use crate::config::Config;
 use crate::gitops::{GitSource, run_sync_loop};
@@ -65,6 +66,13 @@ pub async fn serve(
             shutdown_token.clone(),
         ))
     });
+    // Always on, with or without GitOps: hosts that stop reporting open problems.
+    let nodata_task = tokio::spawn(run_nodata_loop(
+        store.clone(),
+        false,
+        Duration::from_secs(config.alerting.nodata_check_secs),
+        shutdown_token.clone(),
+    ));
     let state = AppState {
         store,
         metrics: Arc::new(metrics),
@@ -118,6 +126,9 @@ pub async fn serve(
         && let Err(err) = task.await
     {
         tracing::error!(%err, "Git sync loop ended abnormally");
+    }
+    if let Err(err) = nodata_task.await {
+        tracing::error!(%err, "no-data loop ended abnormally");
     }
     tracing::info!("server stopped");
     served
