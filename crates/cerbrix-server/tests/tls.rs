@@ -24,6 +24,7 @@ fn config(listen: SocketAddr, cert: Option<&Path>, key: Option<&Path>, insecure:
             url: "http://localhost:8428".to_owned(),
         },
         ingest: IngestConfig::default(),
+        gitops: Default::default(),
     }
 }
 

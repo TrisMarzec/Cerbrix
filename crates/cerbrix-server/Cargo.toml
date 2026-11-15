@@ -26,7 +26,7 @@ sha2 = "0.11.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "uuid", "time", "macros", "json"] }
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
-tokio = { workspace = true, features = ["signal", "fs", "sync", "time", "net"] }
+tokio = { workspace = true, features = ["signal", "fs", "sync", "time", "net", "process"] }
 tower-http = { version = "0.7.1", features = ["timeout"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

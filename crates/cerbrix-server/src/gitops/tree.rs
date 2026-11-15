@@ -20,7 +20,7 @@ pub const MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 /// Directories nested deeper than this below a root are rejected.
 const MAX_DEPTH: usize = 16;
 
-const ROOTS: [&str; 5] = [
+pub(crate) const ROOTS: [&str; 5] = [
     "hosts",
     "templates",
     "notifications",
@@ -28,7 +28,8 @@ const ROOTS: [&str; 5] = [
     "displays",
 ];
 
-const SYMLINK_REASON: &str = "symbolic links are not allowed in the configuration repository";
+pub(crate) const SYMLINK_REASON: &str =
+    "symbolic links are not allowed in the configuration repository";
 
 /// Bounds on the size of a tree; injectable so tests do not need huge trees.
 struct Limits {

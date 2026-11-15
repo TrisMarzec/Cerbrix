@@ -226,6 +226,7 @@ mod tests {
                 max_body_bytes,
                 ..IngestConfig::default()
             },
+            gitops: Default::default(),
         })
     }
 
