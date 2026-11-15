@@ -115,6 +115,9 @@ pub enum SmtpEncryption {
     None,
 }
 
+/// Largest allowed `smtp.timeout_secs`; the dispatcher sizes its batch budget from it.
+pub const MAX_SMTP_TIMEOUT_SECS: u64 = 120;
+
 /// Settings for sending notifications by e-mail. Disabled while `host` is unset.
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -171,8 +174,10 @@ impl SmtpConfig {
         if self.port == 0 {
             return bad("smtp.port must not be 0");
         }
-        if !(1..=120).contains(&self.timeout_secs) {
-            return bad("smtp.timeout_secs must be between 1 and 120");
+        if !(1..=MAX_SMTP_TIMEOUT_SECS).contains(&self.timeout_secs) {
+            return bad(&format!(
+                "smtp.timeout_secs must be between 1 and {MAX_SMTP_TIMEOUT_SECS}"
+            ));
         }
         let Some(host) = &self.host else {
             return Ok(());

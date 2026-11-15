@@ -14,6 +14,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use super::channel::{Channel, ChannelError};
+use crate::config::MAX_SMTP_TIMEOUT_SECS;
 use crate::state::{LEASE_SECS, OutboxItem, StateError, StateStore};
 
 /// A message that keeps failing with a retryable error is given up after this long.
@@ -24,12 +25,19 @@ pub const GIVE_UP_AFTER: Duration = Duration::from_secs(24 * 3600);
 /// alert must not be lost to that within seconds.
 pub const GIVE_UP_PERMANENT_AFTER: Duration = Duration::from_secs(3600);
 
-/// A batch stops handling its rows this long after the claim. It must stay well inside the
-/// lease (`LEASE_SECS`), or rows still waiting in the batch could be claimed by another
-/// instance while this one is still working through the batch.
-const BATCH_BUDGET: Duration = Duration::from_secs(240);
+/// Safety margin between the end of the last send of a batch and the end of the lease.
+const LEASE_MARGIN_SECS: u64 = 10;
 
-const _: () = assert!(BATCH_BUDGET.as_secs() + 30 <= LEASE_SECS as u64);
+/// A batch starts no send later than this long after the claim. The last send it starts can
+/// take up to `MAX_SMTP_TIMEOUT_SECS`, and everything must end before the lease does,
+/// otherwise rows still waiting in the batch could be claimed by another instance while this
+/// one is working through it. With a 300 s lease and a 120 s timeout this is 170 s.
+const BATCH_BUDGET: Duration =
+    Duration::from_secs(LEASE_SECS as u64 - MAX_SMTP_TIMEOUT_SECS - LEASE_MARGIN_SECS);
+
+const _: () = assert!(LEASE_SECS > 0);
+const _: () = assert!(BATCH_BUDGET.as_secs() > 0);
+const _: () = assert!(BATCH_BUDGET.as_secs() + MAX_SMTP_TIMEOUT_SECS < LEASE_SECS as u64);
 
 /// Notifications claimed per cycle.
 const BATCH: i64 = 20;
