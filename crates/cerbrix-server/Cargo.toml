@@ -17,6 +17,7 @@ cerbrix-common = { version = "0.1.0", path = "../cerbrix-common" }
 clap.workspace = true
 figment.workspace = true
 http-body-util = "0.1.5"
+lettre = { version = "0.11.23", default-features = false, features = ["aws-lc-rs", "builder", "smtp-transport", "tokio1", "tokio1-rustls", "webpki-roots"] }
 rand = "0.10.3"
 reqwest.workspace = true
 rustls.workspace = true

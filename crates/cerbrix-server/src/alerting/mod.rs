@@ -7,6 +7,7 @@ use cerbrix_common::{TriggerExpr, parse_trigger};
 
 use crate::gitops::EffectiveHost;
 
+pub mod channel;
 pub mod eval;
 pub mod message;
 pub mod nodata;
