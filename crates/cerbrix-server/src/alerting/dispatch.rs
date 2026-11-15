@@ -14,7 +14,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use super::channel::{Channel, ChannelError};
-use crate::state::{OutboxItem, StateError, StateStore};
+use crate::state::{LEASE_SECS, OutboxItem, StateError, StateStore};
 
 /// A message that keeps failing with a retryable error is given up after this long.
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(24 * 3600);
@@ -23,6 +23,13 @@ pub const GIVE_UP_AFTER: Duration = Duration::from_secs(24 * 3600);
 /// retried until then, because a misconfigured relay can answer 5xx for every message and an
 /// alert must not be lost to that within seconds.
 pub const GIVE_UP_PERMANENT_AFTER: Duration = Duration::from_secs(3600);
+
+/// A batch stops handling its rows this long after the claim. It must stay well inside the
+/// lease (`LEASE_SECS`), or rows still waiting in the batch could be claimed by another
+/// instance while this one is still working through the batch.
+const BATCH_BUDGET: Duration = Duration::from_secs(240);
+
+const _: () = assert!(BATCH_BUDGET.as_secs() + 30 <= LEASE_SECS as u64);
 
 /// Notifications claimed per cycle.
 const BATCH: i64 = 20;
@@ -45,18 +52,40 @@ fn age_reaches(now: OffsetDateTime, created_at: OffsetDateTime, limit: Duration)
 ///
 /// An error from one notification does not stop the rest, and a store error while marking is
 /// logged (the lease expires and the row is tried again). Only a failing claim is an error.
+/// The batch stops after [`BATCH_BUDGET`]; see `dispatch_with_budget`.
 pub async fn dispatch_once(
     store: &StateStore,
     channel: &dyn Channel,
     now: OffsetDateTime,
 ) -> Result<usize, StateError> {
+    dispatch_with_budget(store, channel, now, BATCH_BUDGET).await
+}
+
+/// `dispatch_once` with the time budget as a parameter. Once `budget` has passed since the
+/// claim, the rest of the batch is left alone: those rows stay leased and become claimable
+/// when their lease ends, so a slow batch (a blackholed mail server) never outlives its lease
+/// and lets a second instance send the same rows.
+async fn dispatch_with_budget(
+    store: &StateStore,
+    channel: &dyn Channel,
+    now: OffsetDateTime,
+    budget: Duration,
+) -> Result<usize, StateError> {
     let items = store.claim_notifications(now, BATCH).await?;
+    let cycle_start = Instant::now();
     let mut sent = 0;
-    for item in items {
-        let started = Instant::now();
+    let total = items.len();
+    for (done, item) in items.into_iter().enumerate() {
+        if cycle_start.elapsed() >= budget {
+            tracing::warn!(
+                left = total - done,
+                "notification batch used up its time budget; the rest waits for its lease to end"
+            );
+            break;
+        }
         let result = channel.send(&item.recipient, &item.notification).await;
-        // A send can take minutes: the marks carry the time after it returned.
-        let after = now + started.elapsed();
+        // Sends can take minutes: the marks carry the time since the claim.
+        let after = now + cycle_start.elapsed();
         if record_outcome(store, channel, &item, result, after).await {
             sent += 1;
         }
@@ -201,6 +230,8 @@ mod tests {
         sent: Mutex<Vec<(String, EventKind)>>,
         panic_once: AtomicBool,
         panicked: AtomicBool,
+        /// Milliseconds each send sleeps.
+        delay: std::sync::atomic::AtomicU64,
     }
 
     impl FakeChannel {
@@ -211,6 +242,7 @@ mod tests {
                 sent: Mutex::default(),
                 panic_once: AtomicBool::new(false),
                 panicked: AtomicBool::new(false),
+                delay: std::sync::atomic::AtomicU64::new(0),
             }
         }
 
@@ -239,6 +271,10 @@ mod tests {
             if self.panic_once.swap(false, Ordering::SeqCst) {
                 self.panicked.store(true, Ordering::SeqCst);
                 panic!("scripted panic in a channel");
+            }
+            let delay = self.delay.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
             }
             let result = self
                 .script
@@ -502,6 +538,58 @@ mod tests {
         assert_eq!(i64::try_from(sent).unwrap(), total - 1);
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    async fn slow_batch_stops_before_the_lease_ends(pool: PgPool) {
+        let (store, host) = setup(pool.clone()).await;
+        for trigger in ["Disk", "Memory", "Load", "Swap"] {
+            open_problem(&store, host, trigger, T0_MS).await;
+        }
+        let total = count(&pool, "true").await;
+        assert!(total >= 3);
+        let channel = FakeChannel::new();
+        channel.delay.store(100, Ordering::SeqCst);
+        let sent = dispatch_with_budget(&store, &channel, at(T0_MS), Duration::from_millis(150))
+            .await
+            .unwrap();
+        assert!(
+            sent >= 1 && i64::try_from(sent).unwrap() < total,
+            "sent {sent}"
+        );
+        assert_eq!(
+            count(&pool, "sent_at IS NOT NULL").await,
+            i64::try_from(sent).unwrap()
+        );
+        // The rest is untouched: no error, not failed, still leased for its claimer.
+        let untouched = count(
+            &pool,
+            "sent_at IS NULL AND failed_at IS NULL AND last_error IS NULL AND locked_until IS NOT NULL",
+        )
+        .await;
+        assert_eq!(untouched, total - i64::try_from(sent).unwrap());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn marks_carry_the_time_spent_on_earlier_messages(pool: PgPool) {
+        let (store, host) = setup(pool.clone()).await;
+        open_problem(&store, host, "Disk", T0_MS).await;
+        open_problem(&store, host, "Memory", T0_MS).await;
+        let channel = FakeChannel::new();
+        channel.delay.store(200, Ordering::SeqCst);
+        dispatch_once(&store, &channel, at(T0_MS)).await.unwrap();
+        let times: Vec<OffsetDateTime> =
+            sqlx::query_scalar("SELECT sent_at FROM notification_outbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(times.len() >= 2);
+        let spread = *times.last().unwrap() - times[0];
+        // The last of n messages waited for n - 1 sends of 200 ms.
+        let n = i32::try_from(times.len()).unwrap();
+        assert!(
+            spread >= time::Duration::milliseconds(200 * i64::from(n - 1)),
+            "{spread}"
+        );
+    }
     /// Rows with times around the real clock, for tests that run the loop.
     async fn live_store(pool: PgPool) -> (StateStore, i64) {
         let (store, host) = setup(pool.clone()).await;

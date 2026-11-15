@@ -17,7 +17,8 @@ use crate::alerting::{
 use crate::gitops::EffectiveHost;
 
 /// How long a claimed outbox row stays reserved for its claimer.
-const LEASE: Duration = Duration::minutes(5);
+pub const LEASE_SECS: i64 = 300;
+const LEASE: Duration = Duration::seconds(LEASE_SECS);
 const MAX_ERROR_CHARS: usize = 500;
 const MAX_ACK_BY_CHARS: usize = 200;
 const MAX_ACK_COMMENT_CHARS: usize = 1000;

@@ -949,6 +949,46 @@ mod tests {
             .unwrap()
     }
 
+    fn app_with_mail(pool: PgPool, queue_mail: bool) -> (Router, StateStore) {
+        let store = StateStore::from_pool(pool);
+        let router = router(AppState {
+            store: store.clone(),
+            metrics: Arc::new(MemoryMetrics::new()),
+            config: config(2 * 1024 * 1024),
+            warnings: Arc::default(),
+            queue_mail,
+        });
+        (router, store)
+    }
+
+    async fn outbox_recipients(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar("SELECT recipient FROM notification_outbox ORDER BY recipient")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn triggering_value_queues_mail_when_smtp_is_configured(pool: PgPool) {
+        let (router, store) = app_with_mail(pool.clone(), true);
+        let cred = enrol_with_triggers(&store, cpu_trigger()).await;
+        let b = batch(vec![cpu(95.0, now_ms())]);
+        let (status, _) = post_values(&router, Some(&cred), &b).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(open_problems(&store).await.len(), 1);
+        assert_eq!(outbox_recipients(&pool).await, ["ops@example.com"]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn triggering_value_queues_nothing_without_smtp(pool: PgPool) {
+        let (router, store) = app_with_mail(pool.clone(), false);
+        let cred = enrol_with_triggers(&store, cpu_trigger()).await;
+        let b = batch(vec![cpu(95.0, now_ms())]);
+        let (status, _) = post_values(&router, Some(&cred), &b).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(open_problems(&store).await.len(), 1);
+        assert!(outbox_recipients(&pool).await.is_empty());
+    }
     #[sqlx::test(migrations = "./migrations")]
     async fn value_above_threshold_opens_a_problem(pool: PgPool) {
         let (router, _, store) = app(pool);

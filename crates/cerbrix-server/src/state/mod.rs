@@ -7,7 +7,7 @@ mod enrollment;
 mod hosts;
 mod sync;
 
-pub use alerting::{AlertContext, OutboxItem, Problem, ProblemEvent, ProblemFilter};
+pub use alerting::{AlertContext, LEASE_SECS, OutboxItem, Problem, ProblemEvent, ProblemFilter};
 pub use enrollment::UnknownAgent;
 pub use sync::{
     Applied, ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock,
