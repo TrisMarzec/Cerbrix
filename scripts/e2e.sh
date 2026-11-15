@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# End-to-end check: starts the production compose stack under its own project name,
-# enrols a locally built agent and waits until its values show up in VictoriaMetrics.
+# End-to-end check: starts the production compose stack under its own project name with
+# the configuration coming from a Git repository, enrols a locally built agent and waits
+# until its values show up in VictoriaMetrics.
+#
+# The repository is a bare repository in a temporary directory, mounted read-only into the
+# server container. The script then pushes a broken host file and checks that the
+# installation reports "out of sync" (naming the file) while values keep arriving, and that
+# reverting the commit brings it back "in sync".
 #
 # Environment variables (defaults in parentheses):
-#   CERBRIX_E2E_PROJECT      compose project name (cerbrix-e2e)
-#   CERBRIX_SERVER_PORT      host port of the server (18443)
-#   CERBRIX_VM_PORT          host port of VictoriaMetrics (18428)
-#   CERBRIX_E2E_TIMEOUT      seconds to wait for both series (120)
-#   CERBRIX_E2E_KEEP_STACK   set to 1 to leave the stack running (for debugging)
+#   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e)
+#   CERBRIX_SERVER_PORT       host port of the server (18443)
+#   CERBRIX_VM_PORT           host port of VictoriaMetrics (18428)
+#   CERBRIX_E2E_TIMEOUT       seconds to wait for both series (120)
+#   CERBRIX_E2E_SYNC_TIMEOUT  seconds to wait for a sync status (90)
+#   CERBRIX_E2E_KEEP_STACK    set to 1 to leave the stack running (for debugging)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -17,6 +24,7 @@ PROJECT=${CERBRIX_E2E_PROJECT:-cerbrix-e2e}
 export CERBRIX_SERVER_PORT=${CERBRIX_SERVER_PORT:-18443}
 export CERBRIX_VM_PORT=${CERBRIX_VM_PORT:-18428}
 TIMEOUT=${CERBRIX_E2E_TIMEOUT:-120}
+SYNC_TIMEOUT=${CERBRIX_E2E_SYNC_TIMEOUT:-90}
 HOST_NAME=e2e-host
 POLL_INTERVAL=5
 
@@ -24,10 +32,27 @@ WORK=$(mktemp -d)
 AGENT_PID=""
 export CERBRIX_ENV_FILE="$WORK/server.env"
 
-compose() { docker compose -p "$PROJECT" "$@"; }
-fail() { echo "e2e: FAIL: $*" >&2; exit 1; }
-# Native path for programs that are not MSYS aware (the agent on Windows).
+# Native path for programs that are not MSYS aware (docker and the agent on Windows).
 native_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+
+# The configuration repository: a bare repository (what the server fetches from) and a
+# normal clone next to it (where the commits are made). The bare repository is mounted at
+# /config-repo.git and used as the Git URL. The mount lives in an override file here, not
+# in the production compose file.
+REPO="$WORK/config-repo.git"
+CLONE="$WORK/config-clone"
+CONTAINER_REPO=/config-repo.git
+cat > "$WORK/compose.e2e.yml" <<YAML
+services:
+  server:
+    volumes:
+      - "$(native_path "$REPO"):$CONTAINER_REPO:ro"
+YAML
+
+compose() { docker compose -p "$PROJECT" -f "$ROOT/docker-compose.yml" -f "$WORK/compose.e2e.yml" "$@"; }
+fail() { echo "e2e: FAIL: $*" >&2; exit 1; }
+# Commits without depending on the user's Git configuration; no line ending is rewritten.
+g() { git -c user.name=e2e -c user.email=e2e@example.com -c commit.gpgsign=false -c core.autocrlf=false "$@"; }
 
 cleanup() {
     status=$?
@@ -54,6 +79,8 @@ cleanup() {
         tail -n 20 "$WORK/agent.log" >&2
     fi
     if [ "$status" -ne 0 ] && [ "${CERBRIX_E2E_KEEP_STACK:-0}" != 1 ]; then
+        echo "e2e: admin sync status:" >&2
+        compose exec -T server cerbrix-server admin sync status >&2 2>&1
         compose logs --tail 30 server >&2 2>/dev/null
     fi
     if [ "${CERBRIX_E2E_KEEP_STACK:-0}" = 1 ]; then
@@ -68,6 +95,7 @@ trap cleanup EXIT
 
 command -v docker >/dev/null 2>&1 || fail "docker is not installed"
 command -v curl >/dev/null 2>&1 || fail "curl is not installed"
+command -v git >/dev/null 2>&1 || fail "git is not installed"
 command -v cargo >/dev/null 2>&1 || export PATH="$HOME/.cargo/bin:$PATH"
 command -v cargo >/dev/null 2>&1 || fail "cargo is not installed"
 
@@ -77,7 +105,29 @@ AGENT_BIN="$ROOT/target/debug/cerbrix-agent"
 [ -x "$AGENT_BIN" ] || AGENT_BIN="$ROOT/target/debug/cerbrix-agent.exe"
 [ -x "$AGENT_BIN" ] || fail "agent binary not found in target/debug"
 
-# Throw-away server configuration with a random database password.
+echo "e2e: creating the configuration repository"
+git init --bare -q -b main "$REPO" || fail "cannot create the bare repository"
+g init -q -b main "$CLONE" || fail "cannot create the working clone"
+cp -R examples/config-repo/. "$CLONE/"
+# The host of this check uses the template of the example repository. Its own items override
+# the template's, with short intervals so that the check stays fast.
+cat > "$CLONE/hosts/$HOST_NAME.json" <<JSON
+{
+  "host": "$HOST_NAME",
+  "groups": ["e2e"],
+  "templates": ["linux-base"],
+  "items": [
+    { "key": "cpu.usage", "interval": "5s" },
+    { "key": "disk.used_percent", "interval": "5s" }
+  ]
+}
+JSON
+g -C "$CLONE" remote add origin "$(native_path "$REPO")"
+g -C "$CLONE" add -A
+g -C "$CLONE" commit -q -m "e2e configuration" || fail "cannot commit the configuration"
+g -C "$CLONE" push -q origin main 2>&1 || fail "cannot push to the bare repository"
+
+# Throw-away server configuration with a random database password and the Git settings.
 DB_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
 sed -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$DB_PASSWORD|" \
     -e "s|^\(CERBRIX_DATABASE__URL=postgres://cerbrix:\)@|\1$DB_PASSWORD@|" \
@@ -86,13 +136,48 @@ if ! { grep -q "^POSTGRES_PASSWORD=$DB_PASSWORD\$" "$WORK/server.env" \
     && grep -q "cerbrix:$DB_PASSWORD@postgres" "$WORK/server.env"; }; then
     fail "could not fill in the password in the example env file"
 fi
+cat >> "$WORK/server.env" <<ENV
+
+CERBRIX_GITOPS__ENABLED=true
+CERBRIX_GITOPS__URL=$CONTAINER_REPO
+CERBRIX_GITOPS__INTERVAL_SECS=5
+ENV
 
 echo "e2e: starting the stack '$PROJECT' (server on port $CERBRIX_SERVER_PORT, VictoriaMetrics on $CERBRIX_VM_PORT)"
 compose up -d --build --wait --wait-timeout 300 >&2 || fail "the stack did not become healthy"
 
-echo "e2e: creating host $HOST_NAME and an enrolment key"
-compose exec -T server cerbrix-server admin host add "$HOST_NAME" >/dev/null \
-    || fail "admin host add failed"
+# Prints the output of `admin sync status`.
+sync_status() { compose exec -T server cerbrix-server admin sync status 2>/dev/null | tr -d '\r'; }
+
+# Waits until the first line of `admin sync status` is $1 and, if given, the output
+# contains the text $2. Prints the final status.
+wait_for_sync() {
+    local want=$1 needle=${2:-} out
+    local deadline=$((SECONDS + SYNC_TIMEOUT))
+    while :; do
+        out=$(sync_status || true)
+        if [ "$(printf '%s\n' "$out" | head -n 1)" = "$want" ] \
+            && { [ -z "$needle" ] || grep -qF -- "$needle" <<<"$out"; }; then
+            printf '%s\n' "$out" >&2
+            return 0
+        fi
+        [ "$SECONDS" -lt "$deadline" ] || fail "sync status did not become \"$want\"${needle:+ with \"$needle\"} within ${SYNC_TIMEOUT}s; last status: $out"
+        sleep 2
+    done
+}
+
+echo "e2e: waiting for the first sync"
+FIRST_COMMIT=$(g -C "$CLONE" rev-parse HEAD)
+wait_for_sync "in sync" "$FIRST_COMMIT"
+
+echo "e2e: checking that hosts cannot be added by hand"
+if ADD_OUTPUT=$(compose exec -T server cerbrix-server admin host add manual-host 2>&1); then
+    fail "admin host add succeeded although hosts are managed by Git"
+fi
+grep -q "managed by Git" <<<"$ADD_OUTPUT" \
+    || fail "admin host add failed with an unexpected message: $ADD_OUTPUT"
+
+echo "e2e: creating an enrolment key for $HOST_NAME"
 KEY_OUTPUT=$(compose exec -T server cerbrix-server admin key create \
     --description e2e --expires-in 1h 2>/dev/null) || fail "admin key create failed"
 KEY=$(printf '%s\n' "$KEY_OUTPUT" | tr -d '\r' | sed -n 's/^key: //p')
@@ -106,14 +191,6 @@ allow_insecure_http = true
 host = "$HOST_NAME"
 enrollment_key = "$KEY"
 state_dir = "$(native_path "$WORK/state")"
-
-[intervals]
-cpu = "2s"
-load = "2s"
-memory = "2s"
-uptime = "2s"
-disk = "2s"
-net = "2s"
 TOML
 unset KEY
 
@@ -138,9 +215,37 @@ while :; do
     disk=$(sample_count cerbrix_disk_used_percent)
     echo "e2e: cerbrix_cpu_usage=$cpu cerbrix_disk_used_percent=$disk"
     if [ "$cpu" -gt 0 ] && [ "$disk" -gt 0 ]; then
-        echo "e2e: OK: cerbrix_cpu_usage has $cpu samples, cerbrix_disk_used_percent has $disk samples"
-        exit 0
+        echo "e2e: cerbrix_cpu_usage has $cpu samples, cerbrix_disk_used_percent has $disk samples"
+        break
     fi
     [ "$SECONDS" -lt "$deadline" ] || fail "no samples for both series within ${TIMEOUT}s"
     sleep "$POLL_INTERVAL"
 done
+
+echo "e2e: pushing a broken host file"
+printf '{ "host": "broken", ' > "$CLONE/hosts/broken.json"
+g -C "$CLONE" add -A
+g -C "$CLONE" commit -q -m "broken host file" || fail "cannot commit the broken file"
+g -C "$CLONE" push -q origin main 2>&1 || fail "cannot push the broken file"
+BROKEN_COMMIT=$(g -C "$CLONE" rev-parse HEAD)
+samples_before=$(sample_count cerbrix_cpu_usage)
+wait_for_sync "out of sync" "hosts/broken.json"
+
+# The agent keeps measuring with the last valid configuration.
+echo "e2e: waiting for new samples while out of sync (had $samples_before)"
+deadline=$((SECONDS + TIMEOUT))
+while :; do
+    kill -0 "$AGENT_PID" 2>/dev/null || fail "the agent exited early"
+    cpu=$(sample_count cerbrix_cpu_usage)
+    echo "e2e: cerbrix_cpu_usage=$cpu"
+    [ "$cpu" -gt "$samples_before" ] && break
+    [ "$SECONDS" -lt "$deadline" ] || fail "no new samples while the configuration was out of sync"
+    sleep "$POLL_INTERVAL"
+done
+
+echo "e2e: reverting the broken commit"
+g -C "$CLONE" revert --no-edit "$BROKEN_COMMIT" >/dev/null || fail "cannot revert the broken commit"
+g -C "$CLONE" push -q origin main 2>&1 || fail "cannot push the revert"
+wait_for_sync "in sync" "$(g -C "$CLONE" rev-parse HEAD)"
+
+echo "e2e: OK: configuration from Git, out of sync and back in sync, values kept arriving"

@@ -46,11 +46,16 @@ services:
       # Local machine only by default; see "Making the server reachable for agents"
       # in docs/install.md before setting CERBRIX_SERVER_BIND=0.0.0.0.
       - "${CERBRIX_SERVER_BIND:-127.0.0.1}:${CERBRIX_SERVER_PORT:-8443}:8443"
-    # To serve TLS directly, mount the certificate and key (read-only) and set
-    # CERBRIX_SERVER__TLS_CERT / CERBRIX_SERVER__TLS_KEY in deploy/server.env:
-    # volumes:
-    #   - ./tls:/etc/cerbrix/tls:ro
+    volumes:
+      # Git checkout cache for the configuration repository (see GitOps in
+      # docs/install.md). The image creates the directory owned by the server user.
+      - git-cache:/var/lib/cerbrix/git
+      # To serve TLS directly, mount the certificate and key (read-only) and set
+      # CERBRIX_SERVER__TLS_CERT / CERBRIX_SERVER__TLS_KEY in deploy/server.env:
+      # - ./tls:/etc/cerbrix/tls:ro
+      # For an SSH key and known_hosts file, see docs/install.md.
 
 volumes:
+  git-cache:
   postgres-data:
   victoriametrics-data:

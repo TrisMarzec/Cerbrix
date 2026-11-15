@@ -48,7 +48,9 @@ curl http://127.0.0.1:8443/healthz
 ## 3. Create a host and an enrolment key
 
 A host must be registered before its agent can enrol, and enrolment needs a key. The
-key is printed once and stored only as a hash:
+key is printed once and stored only as a hash. With [GitOps](#configuration-from-git) on, you
+register the host by adding a file to the repository instead of `admin host add`; the key
+command is the same.
 
 ```sh
 docker compose exec server cerbrix-server admin host add web-01
@@ -59,6 +61,136 @@ The `key:` line of the second command is the enrolment key; you need it in the a
 configuration, see [Agent installation](#agent-installation). Further commands:
 `admin key revoke <id>`, `admin host release <name>` (lets a host enrol again) and
 `admin unknown-agents` (agents that tried to enrol under an unknown name).
+
+## Configuration from Git
+
+Cerbrix can read its whole monitoring configuration (hosts, items, triggers, templates,
+notifications, dashboards, displays) from a Git repository; see
+[The configuration repository](configuration-repository.md) for what the repository contains.
+This is one switch for the whole installation: with GitOps on, hosts are managed only through
+the repository, and `admin host add` fails with `hosts are managed by Git`.
+
+> **Before you enable it:** when the first sync succeeds, every host that is not in the
+> repository is deactivated, including hosts created earlier with `admin host add`. Their
+> configuration is dropped and their agent credentials are deleted, so those agents are rejected
+> until the host has a file in the repository and the agent enrols again. Put your hosts in the
+> repository first and check it with `cerbrix-server check-config`.
+
+The settings go into `deploy/server.env` (a commented block is in the example file):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CERBRIX_GITOPS__ENABLED` | `false` | `true` turns GitOps on. |
+| `CERBRIX_GITOPS__URL` | none | The repository. Required when enabled. `https://...`, `ssh://...`, `user@host:path`, `file://...` or an absolute local path. `http://` is rejected. |
+| `CERBRIX_GITOPS__BRANCH` | `main` | The branch to read. |
+| `CERBRIX_GITOPS__INTERVAL_SECS` | `60` | Seconds between checks, 5 to 3600. |
+| `CERBRIX_GITOPS__TOKEN` | none | Access token for an `https://` URL. Not allowed together with an SSH key. |
+| `CERBRIX_GITOPS__SSH_KEY_FILE` | none | Absolute path of a private key inside the container, for an `ssh://` or `user@host:path` URL. |
+| `CERBRIX_GITOPS__KNOWN_HOSTS_FILE` | none | Absolute path of a `known_hosts` file inside the container. |
+| `CERBRIX_GITOPS__CACHE_DIR` | `/var/lib/cerbrix/git` | Where the server keeps its checkout. The Compose file mounts a volume here. |
+| `CERBRIX_GITOPS__MAX_HOST_REMOVAL_PERCENT` | `50` | Mass-removal guard, see [the repository guide](configuration-repository.md#mass-removal-guard). |
+
+An invalid value stops the server at start with a message that does not contain the URL or the
+token. The server runs `git` itself (the image contains `git` and `openssh-client`) and fetches
+only the newest commit of the branch. Only one server instance should run the sync.
+
+### With a token (HTTPS)
+
+Create an access token that can read the repository (a fine-grained token with read-only
+"Contents" access on GitHub, or a deploy token on GitLab), and set:
+
+```
+CERBRIX_GITOPS__ENABLED=true
+CERBRIX_GITOPS__URL=https://github.com/your-org/monitoring-config.git
+CERBRIX_GITOPS__TOKEN=the-token
+```
+
+The URL must not contain a user name or password; the token has its own setting. The token is
+never written to the log or the database. `deploy/server.env` is not committed, keep it private.
+A public repository needs no token.
+
+### With an SSH key
+
+Use a deploy key that can only read the repository. Put the private key and a `known_hosts`
+file in a directory such as `./git-ssh` next to `docker-compose.yml`. The container user
+(uid 10001) must be able to read them:
+
+```sh
+ssh-keygen -t ed25519 -N "" -f git-ssh/id_ed25519 -C cerbrix
+ssh-keyscan github.com > git-ssh/known_hosts
+chmod 644 git-ssh/known_hosts
+sudo chown 10001 git-ssh/id_ed25519 && chmod 400 git-ssh/id_ed25519
+```
+
+Check the `known_hosts` entries against the fingerprints your Git provider publishes before you
+trust them. Then add the deploy key's public part (`id_ed25519.pub`) to the repository, mount the
+directory read-only by adding this line to the `volumes` of the `server` service in
+`docker-compose.yml`:
+
+```yaml
+      - ./git-ssh:/etc/cerbrix/git:ro
+```
+
+and set:
+
+```
+CERBRIX_GITOPS__ENABLED=true
+CERBRIX_GITOPS__URL=git@github.com:your-org/monitoring-config.git
+CERBRIX_GITOPS__SSH_KEY_FILE=/etc/cerbrix/git/id_ed25519
+CERBRIX_GITOPS__KNOWN_HOSTS_FILE=/etc/cerbrix/git/known_hosts
+```
+
+**Host key handling.** With `KNOWN_HOSTS_FILE` set, the server connects only to hosts listed in
+that file (strict checking). Without it, the server trusts the host key it sees on the first
+connection and remembers it in the cache directory (trust on first use); use the file for any
+installation that matters.
+
+Apply the settings with `docker compose up -d`.
+
+### Checking and operating it
+
+```sh
+docker compose exec server cerbrix-server admin sync status
+docker compose exec server cerbrix-server admin sync history --limit 5
+docker compose exec server cerbrix-server admin host show web-01
+docker compose exec server cerbrix-server check-config /path/to/checkout
+```
+
+`sync status` shows `in sync`, `out of sync` (with the file and reason of every problem) or
+`never synced`; see [Out Of Sync](configuration-repository.md#out-of-sync). Example:
+
+```
+in sync
+active commit: ff92a585d63b9b3491fd8ee9c28f0d087ceaa5f6
+last successful sync: 2026-11-15T00:56:48.998Z
+last attempt: 2026-11-15T00:56:48.998Z
+```
+
+`host show` prints a host's file, groups and its merged items and triggers. `host release`,
+`key create`, `key revoke` and `unknown-agents` work as before. Note that the commands also print
+log lines to the error output; redirect it (`2>/dev/null`) in scripts.
+
+The server keeps a checkout and a file `gitconfig` in the cache directory. Both are managed by
+the server and need no editing; if the checkout is damaged the server rebuilds it.
+
+### Limits to know
+
+- The server runs `git` with a cleared environment. Proxy settings (`HTTPS_PROXY`) and custom CA
+  certificate variables are not passed on, so the repository must be reachable directly and with
+  a certificate that the system trusts. This is a known limitation.
+- Each `git` call is stopped after 60 seconds.
+- Symbolic links and submodules in the repository are rejected.
+- Fetching with a token over HTTPS and with an SSH key is described here from the code; the
+  automated end-to-end check (`scripts/e2e.sh`) uses a local repository.
+
+### Agents
+
+With GitOps on, an agent no longer decides what it measures. It fetches its configuration from
+the server at start and every 60 seconds, keeps the last one in its state directory (so it
+continues if the server is unreachable) and measures nothing until it has received one. A host
+created with `admin host add` while GitOps is off gets all built-in items at their default
+intervals. The `[intervals]` section of `agent.toml` is gone: an agent file that still has it is
+rejected, so remove the section when you upgrade an existing agent.
 
 ## Making the server reachable for agents
 
@@ -165,9 +297,11 @@ Then release the host on the server (`admin host release <name>`) if it will enr
 
 ## Verifying an installation
 
-`scripts/e2e.sh` starts a separate throw-away stack, enrols a locally built agent and checks
-that its values arrive in VictoriaMetrics. It needs Docker, curl and a Rust toolchain; CI runs
-it on every push.
+`scripts/e2e.sh` starts a separate throw-away stack with its configuration coming from a local
+Git repository, enrols a locally built agent and checks that its values arrive in
+VictoriaMetrics. It then pushes a broken host file, checks that the installation reports
+`out of sync` while values keep arriving, and that reverting the commit makes it `in sync`
+again. It needs Docker, curl, git and a Rust toolchain; CI runs it on every push.
 
 ## Troubleshooting
 

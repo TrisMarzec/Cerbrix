@@ -12,12 +12,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p cerbrix-server \
     && cp target/release/cerbrix-server /usr/local/bin/cerbrix-server
 
-# Runtime stage: only the server binary, running as an unprivileged user.
+# Runtime stage: the server binary and the git and ssh clients it needs to fetch the
+# configuration repository, running as an unprivileged user.
 FROM debian:stable-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin cerbrix
+    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin cerbrix \
+    && install -d -o cerbrix -g cerbrix -m 0700 /var/lib/cerbrix/git
 COPY --from=build /usr/local/bin/cerbrix-server /usr/local/bin/cerbrix-server
 USER cerbrix
 EXPOSE 8443
