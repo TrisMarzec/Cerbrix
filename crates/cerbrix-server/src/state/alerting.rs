@@ -782,6 +782,95 @@ impl StateStore {
         problem_from(row.ok_or(StateError::NotFound)?)
     }
 
+    /// Closes an open problem by hand, for an instance that no longer exists (an unmounted
+    /// disk, a removed interface): resolves it at `now` with the reason `closed_by_operator`,
+    /// records `by` and `comment` as the acknowledgement unless it was acknowledged already,
+    /// deletes the trigger state of its (trigger, instance) and the arrival of the series it
+    /// watched, and with `queue_mail` queues the end e-mail for those who were mailed the
+    /// start. One transaction under the host row lock. If the condition still holds, the next
+    /// value opens a new problem.
+    ///
+    /// `NotFound` for an unknown id, `Conflict` for a problem that is already resolved.
+    pub async fn close_problem(
+        &self,
+        id: Uuid,
+        by: &str,
+        comment: &str,
+        now: OffsetDateTime,
+        queue_mail: bool,
+    ) -> Result<Problem, StateError> {
+        let mut tx = self.pool.begin().await?;
+        let host_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT host_id FROM problems WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let host_id = host_id.ok_or(StateError::NotFound)?;
+        // The host row first, as everywhere else that writes problems and states.
+        let config: Option<Option<Json<serde_json::Value>>> =
+            sqlx::query_scalar("SELECT config FROM hosts WHERE id = $1 FOR UPDATE")
+                .bind(host_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let closed: Option<(String, String)> = sqlx::query_as(
+            "UPDATE problems SET resolved_at = GREATEST($2, started_at), \
+                 resolve_reason = 'closed_by_operator', \
+                 acknowledged_at = COALESCE(acknowledged_at, $2), \
+                 acknowledged_by = CASE WHEN acknowledged_at IS NULL THEN $3 \
+                                        ELSE acknowledged_by END, \
+                 ack_comment = CASE WHEN acknowledged_at IS NULL THEN $4 ELSE ack_comment END \
+             WHERE id = $1 AND resolved_at IS NULL RETURNING trigger_name, instance",
+        )
+        .bind(id)
+        .bind(now)
+        .bind(cut(by, MAX_ACK_BY_CHARS))
+        .bind(cut(comment, MAX_ACK_COMMENT_CHARS))
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((trigger, instance)) = closed else {
+            return Err(StateError::Conflict(format!(
+                "problem {id} is already resolved"
+            )));
+        };
+        sqlx::query(
+            "DELETE FROM trigger_states \
+             WHERE host_id = $1 AND trigger_name = $2 AND instance = $3",
+        )
+        .bind(host_id)
+        .bind(&trigger)
+        .bind(&instance)
+        .execute(&mut *tx)
+        .await?;
+        // The item the trigger watches, from the host's configuration.
+        let key = config
+            .flatten()
+            .and_then(|c| serde_json::from_value::<EffectiveHost>(c.0).ok())
+            .and_then(|h| h.triggers.into_iter().find(|t| t.name == trigger))
+            .and_then(|t| match parse_trigger(&t.expression).ok()? {
+                TriggerExpr::Compare { selector, .. } => Some(selector.key),
+                TriggerExpr::NoData { selector, .. } => selector.map(|s| s.key),
+            });
+        if let Some(key) = key {
+            sqlx::query(
+                "DELETE FROM series_seen WHERE host_id = $1 AND item_key = $2 AND instance = $3",
+            )
+            .bind(host_id)
+            .bind(&key)
+            .bind(&instance)
+            .execute(&mut *tx)
+            .await?;
+        }
+        if queue_mail {
+            queue_resolved_mail(&mut tx, &[id], now).await?;
+        }
+        let row: ProblemRow = sqlx::query_as(problem_query!("WHERE p.id = $1"))
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        problem_from(row)
+    }
+
     /// Reserves up to `limit` due outbox rows for five minutes and returns them, oldest
     /// first. Safe when several instances call it at the same moment: a row goes to one
     /// caller. A `resolved` row waits while the `started` row for the same problem and
@@ -1689,6 +1778,188 @@ mod tests {
             .touch_seen(Uuid::new_v4(), at(T0_MS), &[])
             .await
             .unwrap();
+    }
+
+    // ---- closing a problem by hand ----
+
+    async fn feed_cpu(store: &StateStore, host: Uuid, value: f64, at_ms: i64) -> usize {
+        let v = cerbrix_common::MetricValue {
+            key: "cpu.usage".to_owned(),
+            params: Params::new(),
+            ts_ms: at_ms,
+            value,
+        };
+        store
+            .evaluate_host(host, true, |ctx| {
+                let triggers = ctx
+                    .config
+                    .as_ref()
+                    .map(crate::alerting::active_triggers)
+                    .unwrap_or_default();
+                crate::alerting::eval::evaluate(&triggers, &ctx.states, &[v], at_ms, i64::MAX / 2)
+            })
+            .await
+            .unwrap()
+            .len()
+    }
+
+    async fn state_rows(pool: &PgPool) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT trigger_name, instance FROM trigger_states ORDER BY trigger_name, instance",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problem_close_resolves_and_cleans_state(pool: PgPool) {
+        let (store, host) = setup_watching(pool.clone()).await;
+        let disk_state = |instance: &str| TriggerState {
+            trigger: "Disk silent".into(),
+            instance: instance.into(),
+            firing: true,
+            condition_since_ms: None,
+            last_ts_ms: T0_MS,
+            last_value: None,
+        };
+        let disk_open = |instance: &str| OpenProblem {
+            trigger: "Disk silent".into(),
+            instance: instance.into(),
+            severity: Severity::High,
+            at_ms: T0_MS,
+            summary: "disk.used_percent: no data for 5m".into(),
+        };
+        let events = store
+            .evaluate_host(host, true, |_| Evaluation {
+                states: vec![disk_state("mount=/media/usb"), disk_state("mount=/")],
+                open: vec![disk_open("mount=/media/usb"), disk_open("mount=/")],
+                ..Evaluation::default()
+            })
+            .await
+            .unwrap();
+        let (usb, root) = (events[0].problem_id, events[1].problem_id);
+        store
+            .touch_seen(
+                host,
+                at(T0_MS),
+                &[
+                    ("disk.used_percent".to_owned(), mount("/media/usb")),
+                    ("disk.used_percent".to_owned(), mount("/")),
+                    ("cpu.usage".to_owned(), Params::new()),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .acknowledge_problem(root, "anna", "looking", at(T0_MS + 1000))
+            .await
+            .unwrap();
+
+        // The USB disk was unmounted: closed by hand, mail on.
+        let closed_at = at(T0_MS + 60_000);
+        let p = store
+            .close_problem(usb, "bob", "disk unmounted", closed_at, true)
+            .await
+            .unwrap();
+        assert_eq!(p.id, usb);
+        assert_eq!(p.resolved_at, Some(closed_at));
+        assert_eq!(p.resolve_reason.as_deref(), Some("closed_by_operator"));
+        assert_eq!(p.acknowledged_at, Some(closed_at));
+        assert_eq!(p.acknowledged_by.as_deref(), Some("bob"));
+        assert_eq!(p.ack_comment.as_deref(), Some("disk unmounted"));
+        assert_eq!(
+            state_rows(&pool).await,
+            [("Disk silent".to_owned(), "mount=/".to_owned())]
+        );
+        assert_eq!(
+            series_rows(&pool).await,
+            [
+                ("cpu.usage".to_owned(), String::new()),
+                ("disk.used_percent".to_owned(), "mount=/".to_owned()),
+            ]
+        );
+        let ends: Vec<(Uuid, String, OffsetDateTime)> = sqlx::query_as(
+            "SELECT problem_id, recipient, next_attempt_at FROM notification_outbox \
+             WHERE event = 'resolved'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ends, [(usb, "ops@example.com".to_owned(), closed_at)]);
+
+        // Mail off, and an acknowledgement that was there stays as it was.
+        let p = store
+            .close_problem(root, "bob", "gone too", closed_at, false)
+            .await
+            .unwrap();
+        assert_eq!(p.resolve_reason.as_deref(), Some("closed_by_operator"));
+        assert_eq!(p.acknowledged_by.as_deref(), Some("anna"));
+        assert_eq!(p.ack_comment.as_deref(), Some("looking"));
+        assert_eq!(p.acknowledged_at, Some(at(T0_MS + 1000)));
+        assert_eq!(outbox(&pool, "resolved").await.len(), 1);
+        assert!(state_rows(&pool).await.is_empty());
+        assert_eq!(series_rows(&pool).await.len(), 1);
+        assert!(
+            store
+                .problems(ProblemFilter::Open, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn closed_problem_reopens_if_the_condition_still_holds(pool: PgPool) {
+        let (store, host) = setup_watching(pool.clone()).await;
+        assert_eq!(feed_cpu(&store, host, 95.0, T0_MS).await, 1);
+        let id = store.problems(ProblemFilter::Open, 10).await.unwrap()[0].id;
+        store
+            .close_problem(id, "admin", "test", at(T0_MS + 1000), true)
+            .await
+            .unwrap();
+        assert!(state_rows(&pool).await.is_empty());
+        // Still above the threshold: the next value opens a new problem, and it is mailed.
+        assert_eq!(feed_cpu(&store, host, 96.0, T0_MS + 10_000).await, 1);
+        let open = store.problems(ProblemFilter::Open, 10).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_ne!(open[0].id, id);
+        assert_eq!(open[0].trigger, "Cpu high");
+        assert_eq!(outbox(&pool, "started").await.len(), 2);
+        assert_eq!(
+            store.problems(ProblemFilter::All, 10).await.unwrap().len(),
+            2
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn closing_a_resolved_problem_is_an_error(pool: PgPool) {
+        let (store, host) = setup_watching(pool.clone()).await;
+        feed_cpu(&store, host, 95.0, T0_MS).await;
+        let id = store.problems(ProblemFilter::Open, 10).await.unwrap()[0].id;
+        // Resolved because the condition ended.
+        assert_eq!(feed_cpu(&store, host, 10.0, T0_MS + 10_000).await, 1);
+        let err = store
+            .close_problem(id, "admin", "late", at(T0_MS + 20_000), true)
+            .await
+            .unwrap_err();
+        match err {
+            StateError::Conflict(text) => {
+                assert_eq!(text, format!("problem {id} is already resolved"));
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        // Nothing changed: still the reason it had, no acknowledgement, no extra mail.
+        let p = &store.problems(ProblemFilter::All, 10).await.unwrap()[0];
+        assert_eq!(p.resolve_reason.as_deref(), Some("condition_ended"));
+        assert_eq!(p.acknowledged_by, None);
+        assert_eq!(outbox(&pool, "resolved").await.len(), 1);
+        assert!(matches!(
+            store
+                .close_problem(Uuid::new_v4(), "admin", "x", at(T0_MS), true)
+                .await,
+            Err(StateError::NotFound)
+        ));
     }
 
     #[sqlx::test(migrations = "./migrations")]

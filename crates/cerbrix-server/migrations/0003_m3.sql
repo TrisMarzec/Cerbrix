@@ -20,7 +20,7 @@ CREATE TABLE problems (
     summary         text NOT NULL,
     started_at      timestamptz NOT NULL,
     resolved_at     timestamptz,
-    resolve_reason  text CHECK (resolve_reason IN ('condition_ended', 'host_removed', 'trigger_removed')),
+    resolve_reason  text CHECK (resolve_reason IN ('condition_ended', 'host_removed', 'trigger_removed', 'closed_by_operator')),
     acknowledged_at timestamptz,
     acknowledged_by text,
     ack_comment     text

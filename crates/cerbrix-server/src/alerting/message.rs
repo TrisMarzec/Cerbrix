@@ -35,7 +35,7 @@ pub struct Notification {
     pub summary: String,
     pub started_at: OffsetDateTime,
     pub resolved_at: Option<OffsetDateTime>,
-    /// `condition_ended`, `host_removed` or `trigger_removed`.
+    /// `condition_ended`, `host_removed`, `trigger_removed` or `closed_by_operator`.
     pub resolve_reason: Option<String>,
 }
 
@@ -113,6 +113,7 @@ pub(crate) fn reason_text(reason: &str) -> String {
         "condition_ended" => "the condition no longer holds".to_string(),
         "host_removed" => "the host was removed from the configuration".to_string(),
         "trigger_removed" => "the trigger was removed from the configuration".to_string(),
+        "closed_by_operator" => "the problem was closed by an operator".to_string(),
         other => clean(other),
     }
 }
@@ -273,6 +274,10 @@ mod tests {
             (
                 "trigger_removed",
                 "the trigger was removed from the configuration",
+            ),
+            (
+                "closed_by_operator",
+                "the problem was closed by an operator",
             ),
             ("other\nthing", "other thing"),
         ] {

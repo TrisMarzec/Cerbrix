@@ -27,7 +27,7 @@ pub enum AdminCommand {
     /// Show the Git sync state.
     #[command(subcommand)]
     Sync(SyncCommand),
-    /// List, inspect and acknowledge problems.
+    /// List, inspect, acknowledge and close problems.
     #[command(subcommand)]
     Problem(ProblemCommand),
     /// Check the e-mail setup and the notification queue.
@@ -83,6 +83,20 @@ pub enum ProblemCommand {
         #[arg(long)]
         comment: String,
         /// Who acknowledges the problem.
+        #[arg(long, default_value = "admin")]
+        by: String,
+    },
+    /// Close an open problem by hand, for example one of a disk that was unmounted or a
+    /// network interface that was removed: no value will ever arrive to end it. The end is
+    /// mailed to those who were told about the start. If the condition still holds, the next
+    /// value opens a new problem.
+    Close {
+        /// The id or at least its first 4 hexadecimal characters.
+        id: String,
+        /// Why the problem is being closed.
+        #[arg(long)]
+        comment: String,
+        /// Who closes the problem.
         #[arg(long, default_value = "admin")]
         by: String,
     },
@@ -282,15 +296,24 @@ pub async fn run(
             let p = find_problem(store, &id).await?;
             Ok(problem_details(&p))
         }
+        AdminCommand::Problem(ProblemCommand::Close { id, comment, by }) => {
+            let (comment, by) = comment_and_name(&comment, &by)?;
+            let p = find_problem(store, &id).await?;
+            if p.resolved_at.is_some() {
+                bail!("problem {} is already resolved", p.id);
+            }
+            match store
+                .close_problem(p.id, &by, &comment, now, config.smtp.enabled())
+                .await
+            {
+                Ok(p) => Ok(format!("problem {} closed", p.id)),
+                Err(StateError::NotFound) => bail!("no problem with id {}", p.id),
+                Err(StateError::Conflict(_)) => bail!("problem {} is already resolved", p.id),
+                Err(e) => Err(e.into()),
+            }
+        }
         AdminCommand::Problem(ProblemCommand::Ack { id, comment, by }) => {
-            let comment = replace_control_by_space(&comment).trim().to_owned();
-            if comment.is_empty() {
-                bail!("--comment must not be empty");
-            }
-            let by = replace_control_by_space(&by).trim().to_owned();
-            if by.is_empty() {
-                bail!("--by must not be empty");
-            }
+            let (comment, by) = comment_and_name(&comment, &by)?;
             let p = find_problem(store, &id).await?;
             match store.acknowledge_problem(p.id, &by, &comment, now).await {
                 Ok(p) => Ok(format!("problem {} acknowledged", p.id)),
@@ -347,6 +370,19 @@ fn replace_control_by_space(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
+}
+
+/// `--comment` and `--by` with control characters replaced and trimmed; neither may be empty.
+fn comment_and_name(comment: &str, by: &str) -> anyhow::Result<(String, String)> {
+    let comment = replace_control_by_space(comment).trim().to_owned();
+    if comment.is_empty() {
+        bail!("--comment must not be empty");
+    }
+    let by = replace_control_by_space(by).trim().to_owned();
+    if by.is_empty() {
+        bail!("--by must not be empty");
+    }
+    Ok((comment, by))
 }
 
 /// Resolves an id or id prefix (at least 4 hexadecimal characters, dashes optional) to
@@ -952,6 +988,88 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.to_string(), "--comment must not be empty");
+    }
+
+    fn close(id: &str, comment: &str, by: Option<&str>) -> AdminCommand {
+        AdminCommand::Problem(ProblemCommand::Close {
+            id: id.to_owned(),
+            comment: comment.to_owned(),
+            by: by.unwrap_or("admin").to_owned(),
+        })
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problem_close_prints_closed_and_refuses_a_resolved_problem(pool: PgPool) {
+        let (store, host) = alerting_store(pool.clone()).await;
+        let mut c = cfg(false);
+        let ids = open_problems(
+            &store,
+            host,
+            true,
+            vec![
+                open("Disk", "mount=/media/usb", Severity::High, T0_MS),
+                open("Net", "interface=veth1", Severity::High, T0_MS + 1000),
+            ],
+        )
+        .await;
+        let id = ids[0];
+        let out = run(
+            &store,
+            close(&id.to_string()[..8], " unmounted\n", Some("anna")),
+            at(T0_MS + 60_000),
+            &c,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, format!("problem {id} closed"));
+        let p = run(&store, show(&id.to_string()), now(), &c).await.unwrap();
+        assert!(
+            p.contains("Reason: the problem was closed by an operator\n"),
+            "{p}"
+        );
+        assert!(p.contains("by anna\nComment: unmounted"), "{p}");
+        let all = run(&store, list(true), now(), &c).await.unwrap();
+        assert!(
+            all.contains("resolved 2027-01-15T08:01:00Z (the problem was closed by an operator)"),
+            "{all}"
+        );
+        // Without SMTP settings no end e-mail is queued.
+        let ends = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM notification_outbox WHERE event = 'resolved'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(ends(pool.clone()).await, 0);
+
+        let err = run(&store, close(&id.to_string(), "again", None), now(), &c)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), format!("problem {id} is already resolved"));
+        let err = run(&store, close("ffffffff", "x", None), now(), &c)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "no problem with id ffffffff");
+        let err = run(&store, close(&id.to_string(), " ", None), now(), &c)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "--comment must not be empty");
+
+        // With SMTP settings the end is mailed to those who were told about the start.
+        c.smtp.host = Some("mail.example.com".to_owned());
+        c.smtp.from = Some("cerbrix@example.com".to_owned());
+        assert!(c.smtp.enabled());
+        run(
+            &store,
+            close(&ids[1].to_string(), "removed", None),
+            now(),
+            &c,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ends(pool).await, 1);
     }
 
     #[sqlx::test(migrations = "./migrations")]
