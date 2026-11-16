@@ -881,6 +881,54 @@ mod tests {
         }
     }
 
+    /// `docs/api.md` documents every route of `ROUTES`, and only those.
+    ///
+    /// The format is fixed: every route has a level-3 heading of exactly this form, on one
+    /// line:
+    ///
+    /// ```text
+    /// ### `METHOD /api/v1/path/{param}` (access)
+    /// ```
+    ///
+    /// `METHOD` and the path are written as in `ROUTES`; `access` is the lower-case name of
+    /// its `Access`: `public`, `viewer`, `operator`, `admin` or `display`. No other heading
+    /// of the file starts with `` ### ` ``.
+    #[test]
+    fn every_route_is_documented() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let mut documented: Vec<(String, String)> = Vec::new();
+        for line in text.lines().filter(|l| l.starts_with("### `")) {
+            let rest = &line["### `".len()..];
+            let (route, access) = rest
+                .split_once("` (")
+                .and_then(|(route, tail)| Some((route, tail.strip_suffix(')')?)))
+                .unwrap_or_else(|| panic!("malformed route heading: {line}"));
+            documented.push((route.to_owned(), access.to_owned()));
+        }
+        for (method, pattern, access) in ROUTES {
+            let route = format!("{method} {pattern}");
+            let found: Vec<_> = documented.iter().filter(|(r, _)| *r == route).collect();
+            assert_eq!(
+                found.len(),
+                1,
+                "docs/api.md needs exactly one heading for {route}"
+            );
+            assert_eq!(
+                found[0].1,
+                format!("{access:?}").to_lowercase(),
+                "docs/api.md states the wrong access for {route}"
+            );
+        }
+        for (route, _) in &documented {
+            assert!(
+                ROUTES.iter().any(|(m, p, _)| format!("{m} {p}") == *route),
+                "docs/api.md documents {route}, which is not a route"
+            );
+        }
+    }
+
     /// Nothing is served under `/api/v1` except what `ROUTES` lists: a made-up sibling of
     /// every listed path and every unlisted method on a listed path is refused.
     #[sqlx::test(migrations = "./migrations")]

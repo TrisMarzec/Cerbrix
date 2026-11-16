@@ -14,6 +14,14 @@
 # problem opens and is mailed. No message may arrive twice. TLS and authentication of a real
 # SMTP server are not covered; use `admin notify test` for that.
 #
+# At the end the JSON API of the web UI is walked through with curl: an admin is created with
+# the admin command and logs in, the status, the hosts, a series, the problems (one is
+# acknowledged through the API), a dashboard and a wall display with its token are read, and
+# the access rules are checked (no cookie is 401, a viewer cannot create users, a display
+# token opens only its own display). The JSON is checked with grep on the compact answers
+# (no jq). On a failure the last HTTP status and body are printed with tokens masked; the
+# admin password and the display token are never printed.
+#
 # Environment variables (defaults in parentheses):
 #   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e)
 #   CERBRIX_SERVER_PORT       host port of the server (18443)
@@ -135,6 +143,13 @@ stop_agent() {
     AGENT_PID=""
 }
 
+# The last API request, for the failure output; see the API walk-through at the end.
+LAST_REQUEST=""
+LAST_STATUS=""
+LAST_BODY=""
+# Masks session and display tokens in the text on standard input.
+mask_tokens() { sed -E 's/cbx_(se|dt|ek|ac)_[A-Za-z0-9_-]+/cbx_\1_<masked>/g'; }
+
 cleanup() {
     status=$?
     set +e
@@ -144,6 +159,10 @@ cleanup() {
         tail -n 20 "$WORK/agent.log" >&2
     fi
     # Printed whether or not the stack is kept, so a failed run always shows the state.
+    if [ "$status" -ne 0 ] && [ -n "$LAST_REQUEST" ]; then
+        echo "e2e: last API request: $LAST_REQUEST -> HTTP $LAST_STATUS" >&2
+        echo "e2e: last API response body: $(mask_tokens <<<"$LAST_BODY")" >&2
+    fi
     if [ "$status" -ne 0 ]; then
         echo "e2e: admin sync status:" >&2
         compose exec -T server cerbrix-server admin sync status >&2 2>&1
@@ -212,6 +231,30 @@ cat > "$CLONE/notifications/e2e.json" <<JSON
   "name": "e2e",
   "email": ["ops@example.com"],
   "min_severity": "warning"
+}
+JSON
+# For the API walk-through: a dashboard that shows only this host (the standard problems and
+# host-states panels and a graph of its cpu.usage), and a wall display that shows it and
+# switches to it on an alarm of warning or above. The display lists the dashboard, so the
+# example repository's dashboards cannot take the alarm away from it.
+cat > "$CLONE/dashboards/e2e.json" <<JSON
+{
+  "name": "E2E",
+  "hosts": { "names": ["$HOST_NAME"] },
+  "panels": [
+    { "type": "problems", "x": 0, "y": 0, "w": 8, "h": 6 },
+    { "type": "host-states", "x": 8, "y": 0, "w": 4, "h": 3 },
+    { "type": "graph", "host": "$HOST_NAME", "item": "cpu.usage", "range": "1h",
+      "x": 8, "y": 3, "w": 4, "h": 3 }
+  ]
+}
+JSON
+cat > "$CLONE/displays/e2e-wall.json" <<JSON
+{
+  "name": "E2E wall",
+  "show": { "dashboard": "e2e" },
+  "switch_on_alarm": { "min_severity": "warning" },
+  "dashboards": ["e2e"]
 }
 JSON
 g -C "$CLONE" remote add origin "$(native_path "$REPO")"
@@ -417,4 +460,179 @@ for subject in "$ALWAYS_START" "$ALWAYS_END" "$SILENT_START"; do
         || fail "expected exactly one message with the subject \"$subject\""
 done
 
-echo "e2e: OK: configuration from Git, values kept arriving, problems opened and resolved with their e-mails, acknowledgement, no-data problem after the agent stopped, no duplicate message"
+echo "e2e: configuration from Git, values kept arriving, problems opened and resolved with their e-mails, acknowledgement, no-data problem after the agent stopped, no duplicate message"
+
+# --- The API of the web UI --------------------------------------------------------------
+# The stack is still running; the agent is stopped, so one problem ("Agent silent") is open
+# and unacknowledged and "E2E second" is acknowledged by the admin command. The answers of
+# the server are compact JSON, so grep for a fixed text is enough to look into them.
+API_URL="http://127.0.0.1:$CERBRIX_SERVER_PORT/api/v1"
+ADMIN_JAR="$WORK/admin.cookies"
+VIEWER_JAR="$WORK/viewer.cookies"
+DISPLAY_ID=e2e-wall
+DASHBOARD_ID=e2e
+JSON_TYPE='Content-Type: application/json'
+
+# Sends one request and keeps what is needed to judge it in LAST_REQUEST, LAST_STATUS and
+# LAST_BODY (the cleanup prints them when the script fails). $1 is a cookie jar file, or
+# empty for a request without cookies. The other arguments after the path go to curl.
+# Request bodies and secrets are passed in files under $WORK, never on the command line.
+api() {
+    local jar=$1 method=$2 path=$3
+    shift 3
+    local cookies=()
+    [ -z "$jar" ] || cookies=(-b "$jar" -c "$jar")
+    LAST_REQUEST="$method /api/v1$path"
+    LAST_STATUS=$(curl -sS -o "$WORK/api.body" -w '%{http_code}' -X "$method" \
+        ${cookies[@]+"${cookies[@]}"} "$@" "$API_URL$path") \
+        || fail "curl could not complete: $LAST_REQUEST"
+    LAST_BODY=$(tr -d '\r' <"$WORK/api.body")
+}
+# Like api, with the JSON text $4 as the request body.
+api_json() {
+    local jar=$1 method=$2 path=$3 body=$4
+    (umask 077 && printf '%s' "$body" >"$WORK/api.request")
+    api "$jar" "$method" "$path" -H "$JSON_TYPE" --data-binary "@$WORK/api.request"
+    rm -f "$WORK/api.request"
+}
+expect_status() {
+    [ "$LAST_STATUS" = "$1" ] || fail "$LAST_REQUEST answered HTTP $LAST_STATUS, expected $1"
+}
+expect_body() {
+    grep -qF -- "$1" <<<"$LAST_BODY" || fail "the answer to $LAST_REQUEST does not contain: $1"
+}
+# Prints the sum of the numbers that follow "$1": in the text on standard input.
+sum_of() { grep -oE "\"$1\":[0-9]+" | awk -F: '{ total += $2 } END { print total + 0 }'; }
+# Logs in as user $2 with password $3 and the cookie jar $1.
+login() {
+    local jar=$1
+    (umask 077 && printf '{"name":"%s","password":"%s"}' "$2" "$3" >"$WORK/login.json")
+    api "$jar" POST /session -H "$JSON_TYPE" --data-binary "@$WORK/login.json"
+    rm -f "$WORK/login.json"
+}
+
+echo "e2e: API: creating an admin and logging in"
+ADMIN_OUTPUT=$(compose exec -T server cerbrix-server admin user create e2e-admin --role admin \
+    2>/dev/null) || fail "admin user create failed"
+ADMIN_PASSWORD=$(printf '%s\n' "$ADMIN_OUTPUT" | tr -d '\r' | sed -n 's/^password: //p')
+unset ADMIN_OUTPUT
+[ -n "$ADMIN_PASSWORD" ] || fail "no password found in the output of admin user create"
+login "$ADMIN_JAR" e2e-admin "$ADMIN_PASSWORD"
+unset ADMIN_PASSWORD
+expect_status 200
+expect_body '"name":"e2e-admin","role":"admin"'
+api "$ADMIN_JAR" GET /session
+expect_status 200
+expect_body '"name":"e2e-admin","role":"admin"'
+
+echo "e2e: API: the status matches the problems of the admin command"
+api "$ADMIN_JAR" GET /status
+expect_status 200
+expect_body '"status":"in_sync"'
+expect_body '"gitops":true'
+STATUS_PROBLEMS=${LAST_BODY#*\"problems\":}
+CLI_PROBLEMS=$(problems)
+CLI_OPEN=$(grep -vcx 'no open problems' <<<"$CLI_PROBLEMS" || true)
+CLI_UNACKED=$(grep -cE '  open  [0-9a-f]{8}$' <<<"$CLI_PROBLEMS" || true)
+API_OPEN=$(sum_of open <<<"$STATUS_PROBLEMS")
+API_UNACKED=$(sum_of unacknowledged <<<"$STATUS_PROBLEMS")
+[ "$CLI_OPEN" -ge 1 ] || fail "the admin command lists no open problem"
+[ "$API_OPEN" = "$CLI_OPEN" ] \
+    || fail "the status counts $API_OPEN open problems, the admin command lists $CLI_OPEN"
+[ "$API_UNACKED" = "$CLI_UNACKED" ] \
+    || fail "the status counts $API_UNACKED unacknowledged problems, the admin command lists $CLI_UNACKED"
+
+echo "e2e: API: the host with its state, and a series with points"
+api "$ADMIN_JAR" GET "/hosts?search=$HOST_NAME"
+expect_status 200
+expect_body "\"name\":\"$HOST_NAME\""
+expect_body '"state":{"severity":'
+api "$ADMIN_JAR" GET "/hosts/$HOST_NAME/series?item=cpu.usage&range=1h"
+expect_status 200
+expect_body '"points":[['
+
+echo "e2e: API: acknowledging a problem"
+api "$ADMIN_JAR" GET "/problems?host=$HOST_NAME"
+expect_status 200
+expect_body '"trigger":"Agent silent"'
+expect_body '"trigger":"E2E second"'
+SECOND_UUID=$(sed -n 's/.*{"id":"\([0-9a-f-]\{36\}\)","host":"[^"]*","trigger":"E2E second".*/\1/p' <<<"$LAST_BODY")
+[ -n "$SECOND_UUID" ] || fail "no id found for the problem \"E2E second\" in the answer to $LAST_REQUEST"
+api_json "$ADMIN_JAR" POST "/problems/$SECOND_UUID/ack" '{"comment":"e2e api check"}'
+expect_status 200
+expect_body '"acknowledged_by":"e2e-admin"'
+expect_body '"ack_comment":"e2e api check"'
+api "$ADMIN_JAR" GET "/problems/$SECOND_UUID"
+expect_status 200
+expect_body '"acknowledged_by":"e2e-admin"'
+
+echo "e2e: API: the dashboard shows the open problem and its graph has points"
+api "$ADMIN_JAR" GET /dashboards
+expect_status 200
+expect_body "\"id\":\"$DASHBOARD_ID\""
+api "$ADMIN_JAR" GET "/dashboards/$DASHBOARD_ID"
+expect_status 200
+expect_body '"type":"problems"'
+expect_body '"trigger":"Agent silent"'
+expect_body '"type":"graph"'
+expect_body '"points":[['
+expect_body '"metrics_available":true'
+
+echo "e2e: API: a display token opens its own display and nothing else"
+api "$ADMIN_JAR" POST "/displays/$DISPLAY_ID/token"
+expect_status 201
+DISPLAY_TOKEN=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' <<<"$LAST_BODY")
+[ -n "$DISPLAY_TOKEN" ] || fail "no token in the answer to $LAST_REQUEST"
+(umask 077 && printf 'Authorization: Bearer %s\n' "$DISPLAY_TOKEN" >"$WORK/display.header")
+unset DISPLAY_TOKEN
+api "" GET "/display/$DISPLAY_ID" -H "@$WORK/display.header"
+expect_status 200
+expect_body "\"id\":\"$DISPLAY_ID\""
+expect_body "\"target\":\"$DASHBOARD_ID\""
+expect_body '"status":"in_sync"'
+api "" GET "/display/$DISPLAY_ID/dashboards/$DASHBOARD_ID" -H "@$WORK/display.header"
+expect_status 200
+expect_body '"name":"E2E"'
+api "" GET /hosts -H "@$WORK/display.header"
+expect_status 401
+api "" GET /display/another-display -H "@$WORK/display.header"
+expect_status 401
+
+echo "e2e: API: a request without a session and a viewer"
+api "" GET /hosts
+expect_status 401
+expect_body '"error":"unauthorized"'
+VIEWER_PASSWORD=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+api_json "$ADMIN_JAR" POST /users \
+    "{\"name\":\"e2e-viewer\",\"role\":\"viewer\",\"password\":\"$VIEWER_PASSWORD\"}"
+expect_status 201
+VIEWER_UUID=$(sed -n 's/.*"id":"\([0-9a-f-]\{36\}\)".*/\1/p' <<<"$LAST_BODY")
+[ -n "$VIEWER_UUID" ] || fail "no id in the answer to $LAST_REQUEST"
+login "$VIEWER_JAR" e2e-viewer "$VIEWER_PASSWORD"
+unset VIEWER_PASSWORD
+expect_status 200
+expect_body '"role":"viewer"'
+api "$VIEWER_JAR" GET /hosts
+expect_status 200
+api_json "$VIEWER_JAR" POST /users '{"name":"e2e-other","role":"viewer"}'
+expect_status 403
+expect_body '"error":"forbidden"'
+
+echo "e2e: API: cleaning up the viewer, the token and the session"
+api "$ADMIN_JAR" DELETE "/users/$VIEWER_UUID"
+expect_status 204
+api "$VIEWER_JAR" GET /session
+expect_status 401
+api "$ADMIN_JAR" DELETE "/displays/$DISPLAY_ID/token"
+expect_status 204
+api "" GET "/display/$DISPLAY_ID" -H "@$WORK/display.header"
+expect_status 401
+cp "$ADMIN_JAR" "$WORK/admin.cookies.old"
+api "$ADMIN_JAR" DELETE /session
+expect_status 204
+api "$WORK/admin.cookies.old" GET /session
+expect_status 401
+rm -f "$ADMIN_JAR" "$VIEWER_JAR" "$WORK/admin.cookies.old" "$WORK/display.header" "$WORK/api.body"
+LAST_REQUEST=""
+
+echo "e2e: OK: configuration from Git, values kept arriving, problems opened and resolved with their e-mails, acknowledgement, no-data problem after the agent stopped, no duplicate message, API walk-through (login, status, hosts, series, problems, dashboard, display token, access rules)"
