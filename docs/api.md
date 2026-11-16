@@ -1,7 +1,7 @@
 # The Cerbrix API
 
 The server has a JSON API under `/api/v1`. The web interface uses it, and so can scripts. This
-page describes every route. For how to set up logins see [Installing the server](install.md#first-login).
+page describes every route. For how to set up logins see [Installing the server](install.md#3-first-login).
 
 The examples were taken from a real run of the end-to-end check (`scripts/e2e.sh`) against a
 server whose configuration comes from Git. Long lists are shortened to one or two entries,
@@ -28,8 +28,11 @@ every field is optional: `POST /problems/{id}/ack`, `POST /problems/{id}/close`,
 without the content type, is `400 invalid`. (`POST /displays/{id}/token`, `POST /hosts/{name}/release`
 and the `DELETE` routes take no body.) Bodies with an unknown field are refused with `400 invalid`
 on `ack`, `close`, `POST /enrollment-keys`, `POST /users`, `PATCH /users/{id}` and
-`POST /users/{id}/password`; the login and the password change ignore unknown fields. Every answer carries `Cache-Control: no-store`.
-Everything else under `/api/v1` is `404`, in the same error format.
+`POST /users/{id}/password`; the login and the password change ignore unknown fields. Every answer carries `Cache-Control: no-store`
+and `X-Content-Type-Options: nosniff`.
+A path under `/api/v1` that is not listed below is `404`, in the same error format. A method that
+is not listed for a path that is (for example `PUT /api/v1/hosts`) is `405 Method Not Allowed`
+with an empty body.
 
 **Times.** Times in answers are RFC 3339 in UTC, for example `2026-11-16T21:54:05.114Z`. The
 points of a series are the exception: each is `[timestamp, value]` with the timestamp in
@@ -53,6 +56,7 @@ for people. Test the code, not the message.
 | `forbidden` | 403 | The role is too low, the request comes from another origin, a display may not show a dashboard, or the current password given on a password change is wrong. |
 | `not_found` | 404 | The thing does not exist, or its identifier cannot be one. Also an unknown path. |
 | `conflict` | 409 | The change clashes with the state: a user name is taken, a problem is already resolved, or the last enabled admin would be lost. |
+| `too_many_attempts` | 429 | The server is busy checking passwords: too many logins, password changes or user creations at once. Nothing was checked or changed, and it does not count as a failed login. Try again shortly. See *Busy server* under [Login and sessions](#login-and-sessions). |
 | `metrics_unavailable` | 503 | The metrics store did not answer. Only the [series of a host](#get-apiv1hostsnameseries-viewer) uses it. |
 | `internal` | 500 | A fault of the server; the cause is in the server log, not in the answer. |
 
@@ -87,7 +91,9 @@ PostgreSQL, so sessions survive a restart of the server. A session ends when:
 - it was not used for `auth.session_idle_secs` (default 12 hours),
 - `auth.session_max_secs` have passed since the login (default 7 days),
 - the user is disabled or deleted, or an admin changes the user's role or resets the password,
-- the user changes the own password: all other sessions of the user end, the current one stays.
+- the user changes the own password: all sessions of the user end, the current one included; the
+  answer to the change sets the cookie of a new session (with the limits of a fresh login), so the
+  browser that made the change stays logged in and a copy of the old cookie does not.
 
 A request with an unknown or ended session is answered `401` and removes the cookie.
 
@@ -96,6 +102,15 @@ the same `401` with the same message. After five wrong passwords in a row a user
 five minutes; the lock ends by itself, a right password after that resets the count, and so does
 a password reset by an admin. A wrong current password on a password change counts like a wrong
 password at the login.
+
+**Busy server.** Checking and storing a password (Argon2id) takes a lot of memory and CPU, so the
+server runs only a few of these at once (one per processor core, at least 2 and at most 8). A
+request that has to check or store a password waits for its turn at most 5 seconds; then it is
+answered `429 too_many_attempts` with the message
+`the server is busy checking passwords, try again shortly`. The answer is the same whatever the
+user name, an existing, unknown or locked one; nothing was checked, so it does not count as a
+failed login. This concerns the login, the password change, creating a user and resetting a
+password.
 
 **Same-origin rule.** Requests that change something (every method except `GET` and `HEAD`) are
 checked against cross-site requests. If the request has an `Origin` header, its host and port must
@@ -118,7 +133,7 @@ rm login.json
 ```
 
 The first user is created on the server with `cerbrix-server admin user create`, see
-[First login](install.md#first-login).
+[First login](install.md#3-first-login).
 
 ## Roles
 
@@ -154,6 +169,10 @@ creates for that one display.
   stored. If it is lost, create a new one.
 - Creating a token replaces the old one, which stops working at once. An admin can also revoke
   it with `DELETE /api/v1/displays/{id}/token`. A display has at most one token.
+- What a token can read: the display's setting and alarm target, the dashboards it may show,
+  and the sync state of the configuration as `/api/v1/status` shows it. That includes the issues
+  of a failed synchronisation, with the file names, positions and reasons, because the wall shows
+  "out of sync" with them. Whoever holds the token of a display can read these.
 - When a display leaves the configuration (its file is removed from the repository and the
   change is applied), its token is removed with it.
 - A token can only be created for a display that is in the active configuration. If an
@@ -186,12 +205,15 @@ HTTP/1.1 200 OK
 content-type: application/json
 set-cookie: cerbrix_session=<token>; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800
 cache-control: no-store
+x-content-type-options: nosniff
 
 {"name":"docs-admin","role":"admin"}
 ```
 
 A wrong password, an unknown name, a disabled user and a locked user are all
 `401 unauthorized` with the message `wrong user name or password, or the account is temporarily locked`.
+A server that is too busy checking passwords answers `429 too_many_attempts`, the same for every
+name, see *Busy server* under [Login and sessions](#login-and-sessions).
 
 ### `GET /api/v1/session` (viewer)
 
@@ -210,9 +232,12 @@ stay.
 
 Changes the own password. Body: `current` and `new`. The new password has 12 to 256 characters and
 no NUL; one that does not is `400 invalid`, checked before the current password and without
-counting as a failed attempt. On success the answer is `204` and the other sessions of the user end. A wrong `current`
+counting as a failed attempt. On success the answer is `204`, every session of the user ends, the
+current one included, and the answer sets the cookie of a new session (`Set-Cookie`, as at the
+login): keep using the new cookie, the old one is `401`. A wrong `current`
 is `403 forbidden` and counts as a failed attempt for the lock; a locked user gets the same
-answer.
+answer. A busy server answers `429 too_many_attempts` and changes nothing, see
+*Busy server* under [Login and sessions](#login-and-sessions).
 
 ```sh
 curl -sS -b cookies.txt -X PUT -H 'Content-Type: application/json' \
@@ -488,14 +513,14 @@ this display in `Authorization: Bearer <token>`.
 | `target` | The dashboard to show because of an alarm, or `null` to follow `show`. An alarm is an open problem nobody has acknowledged, at or above `min_severity`, on a host of the dashboard. The dashboard with the highest `priority` wins, then the most urgent alarm. |
 | `causes` | The ids of the alarms of `target`, most urgent first. |
 | `waiting` | The other dashboards that have an alarm, in the order the display would take them. |
-| `sync` | `status` (`never`, `in_sync` or `out_of_sync`), `active_commit` and `issues`, the number of problems the last synchronisation found. It is a count; the texts are for admins. |
+| `sync` | The sync state of the configuration, the same object as `sync` of [`/api/v1/status`](#get-apiv1status-viewer): `status` (`never`, `in_sync` or `out_of_sync`), `active_commit` (the commit whose configuration is in use), `last_success_at`, `last_attempt_at` and `issues`, the list of what the last synchronisation found wrong (`file`, `line`, `column`, `reason`). The wall shows "out of sync since ..., showing the configuration from commit ..." with them. |
 
 ```sh
 curl -sS -H @display.header http://127.0.0.1:18443/api/v1/display/e2e-wall
 ```
 
 ```json
-{"id":"e2e-wall","name":"E2E wall","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"allowed":["e2e"],"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"sync":{"status":"in_sync","active_commit":"253a2994b13aca387e272ff08db9eb858b436b66","issues":0}}
+{"id":"e2e-wall","name":"E2E wall","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"allowed":["e2e"],"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"sync":{"status":"in_sync","active_commit":"253a2994b13aca387e272ff08db9eb858b436b66","last_success_at":"2026-11-16T21:54:32.810398Z","last_attempt_at":"2026-11-16T21:54:50.503921Z","issues":[]}}
 ```
 
 (`display.header` is a file with the one line `Authorization: Bearer <token>`.) Poll every 5 to
@@ -556,7 +581,7 @@ The enrolment keys, newest first: `id`, `description`, `created_at`, `expires_at
 
 ### `POST /api/v1/enrollment-keys` (admin)
 
-Creates a key and answers `201`. Body: `description` (1 to 200 characters, no control character) and
+Creates a key and answers `201`. Body: `description` (1 to 200 characters, not only spaces, no control character) and
 `expires_in` (`1h` to `365d`, for example `90m`, `12h` or `30d`). The key is in the `key` field of
 this answer only.
 
@@ -596,7 +621,8 @@ Creates a user and answers `201`. Body: `name` (1 to 63 characters from `a-z`, `
 `-`, starting with a letter or digit), `role` (`viewer`, `operator` or `admin`) and `password`
 (optional, 12 to 256 characters, no NUL). Without `password` the server generates one of 20
 characters and returns it in the field `password` of this answer, once. `409 conflict` if the
-name is taken.
+name is taken. A busy server answers `429 too_many_attempts` and creates nothing, see
+*Busy server* under [Login and sessions](#login-and-sessions).
 
 ```sh
 curl -sS -b cookies.txt -X POST -H 'Content-Type: application/json' \
@@ -627,7 +653,8 @@ curl -sS -b cookies.txt -X PATCH -H 'Content-Type: application/json' \
 Sets a new password for a user and ends all of the user's sessions, those of the caller included
 when the caller resets the own password. It also lifts a lock. Body: `password`, optional, like at
 creation. Without it the answer has a generated password, once; with it the answer is `{}`.
-`404` for an unknown id.
+`404` for an unknown id. A busy server answers `429 too_many_attempts` and changes nothing, see
+*Busy server* under [Login and sessions](#login-and-sessions).
 
 ```sh
 curl -sS -b cookies.txt -X POST -H 'Content-Type: application/json' -d '{}' \

@@ -45,7 +45,7 @@ VictoriaMetrics on `127.0.0.1:8428` only; PostgreSQL is not published at all. Ch
 curl http://127.0.0.1:8443/healthz
 ```
 
-## First login
+## 3. First login
 
 The web UI needs a user. Create the first one as an admin:
 
@@ -99,7 +99,7 @@ without the setting it sends the cookie without `Secure`. Do not publish the pla
 of the server to a network; the session cookie and the passwords of a login would cross it
 unencrypted.
 
-## 3. Create a host and an enrolment key
+## 4. Create a host and an enrolment key
 
 A host must be registered before its agent can enrol, and enrolment needs a key. The
 key is printed once and stored only as a hash. With [GitOps](#configuration-from-git) on, you
@@ -338,7 +338,7 @@ The agent runs on every monitored Linux host (x86_64 or aarch64, with systemd) a
 systemd service under its own `cerbrix` user. The install script downloads the release
 binary, verifies its SHA-256 checksum, creates the user and the configuration and starts
 the service. You need the host name and the enrolment key from
-[step 3](#3-create-a-host-and-an-enrolment-key), and the server must be reachable over
+[step 4](#4-create-a-host-and-an-enrolment-key), and the server must be reachable over
 `https` ([Making the server reachable for agents](#making-the-server-reachable-for-agents)).
 
 Download the script, read it, then run it as root. Pass the key through the environment
