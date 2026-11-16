@@ -8,7 +8,7 @@ use cerbrix_common::validate_host_name;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{ApiError, Entry, Listed, Page, invalid};
+use super::{ApiError, Entry, Listed, Page, invalid, query_text};
 use crate::api::AppState;
 use crate::auth::Viewer;
 use crate::gitops::{EffectiveHost, EffectiveItem, EffectiveTrigger};
@@ -25,6 +25,9 @@ pub(super) fn entries() -> Vec<Entry> {
 
 /// The longest search text taken.
 const MAX_SEARCH_CHARS: usize = 200;
+
+/// The longest group name (the length of a valid one).
+const MAX_GROUP_CHARS: usize = 63;
 
 fn store_failed(what: &str, e: &StateError) -> ApiError {
     tracing::error!(error = %e, "{what}");
@@ -57,12 +60,21 @@ async fn list(
     params: Result<Query<HostsParams>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<Listed<HostOut>>, ApiError> {
     let Query(params) = params.map_err(|_| invalid("the query parameters are malformed"))?;
-    if params
-        .search
-        .as_deref()
-        .is_some_and(|s| s.chars().count() > MAX_SEARCH_CHARS)
-    {
-        return Err(invalid("the search text must have at most 200 characters"));
+    for (value, max, message) in [
+        (
+            &params.search,
+            MAX_SEARCH_CHARS,
+            "search must have at most 200 characters and no control character",
+        ),
+        (
+            &params.group,
+            MAX_GROUP_CHARS,
+            "group must have at most 63 characters and no control character",
+        ),
+    ] {
+        if let Some(text) = value {
+            query_text(text, max, message)?;
+        }
     }
     let state = params
         .state
@@ -517,6 +529,11 @@ mod tests {
             "/api/v1/hosts?limit=0".to_owned(),
             "/api/v1/hosts?offset=-1".to_owned(),
             format!("/api/v1/hosts?search={long}"),
+            "/api/v1/hosts?search=%00".to_owned(),
+            "/api/v1/hosts?search=a%0Ab".to_owned(),
+            "/api/v1/hosts?group=%00".to_owned(),
+            "/api/v1/hosts?group=a%0Ab".to_owned(),
+            format!("/api/v1/hosts?group={}", "g".repeat(64)),
         ] {
             let reply = get(&fx, &uri).await;
             assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri}");

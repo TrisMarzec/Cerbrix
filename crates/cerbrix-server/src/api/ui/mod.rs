@@ -230,6 +230,21 @@ fn forbidden(message: &'static str) -> ApiError {
     ApiError::new(StatusCode::FORBIDDEN, "forbidden", message)
 }
 
+/// Checks a free-text query parameter before it reaches the store: at most `max_chars`
+/// characters and no control character (PostgreSQL rejects NUL in text, and the others
+/// have no place in a search or a name). `message` is the 400 `invalid` answer, naming the
+/// field.
+pub(crate) fn query_text<'a>(
+    value: &'a str,
+    max_chars: usize,
+    message: &'static str,
+) -> Result<&'a str, ApiError> {
+    if value.chars().count() > max_chars || value.chars().any(char::is_control) {
+        return Err(invalid(message));
+    }
+    Ok(value)
+}
+
 /// The checks every request goes through before routing to a handler: the same-origin rule
 /// for requests that change something, and the content type of a body.
 async fn request_checks(req: Request, next: Next) -> Response {
@@ -1079,6 +1094,18 @@ mod tests {
             ("https://a.example", "a b", false),
         ] {
             assert_eq!(origin_matches_host(origin, host), ok, "{origin} vs {host}");
+        }
+    }
+
+    #[test]
+    fn query_text_rules() {
+        assert_eq!(query_text("web 01", 6, "m").unwrap(), "web 01");
+        assert_eq!(query_text("", 6, "m").unwrap(), "");
+        assert_eq!(query_text("äöü", 3, "m").unwrap(), "äöü");
+        for bad in ["a\0b", "\0", "a\nb", "a\tb", "\u{7f}", "toolong"] {
+            let e = query_text(bad, 6, "the field is bad").unwrap_err();
+            assert_eq!(e.code, "invalid", "{bad:?}");
+            assert_eq!(e.status, StatusCode::BAD_REQUEST);
         }
     }
 

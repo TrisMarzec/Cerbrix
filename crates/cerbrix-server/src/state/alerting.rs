@@ -1117,6 +1117,52 @@ mod tests {
         }
     }
 
+    #[sqlx::test(migrations = false)]
+    async fn migration_backfills_no_data_kind(pool: PgPool) {
+        let migrator = sqlx::migrate!("./migrations");
+        migrator.run_to(3, &pool).await.unwrap();
+        let host = Uuid::new_v4();
+        sqlx::query("INSERT INTO hosts (id, name) VALUES ($1, 'h')")
+            .bind(host)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (trigger, summary) in [
+            ("host", "no data for 3m"),
+            ("item", "disk.used_percent: no data for 5m on mount=/"),
+            (
+                "cmp",
+                "disk.used_percent > 90 for 10m: value 96.5 on mount=/",
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO problems (id, host_id, trigger_name, instance, severity, summary, \
+                 started_at) VALUES ($1, $2, $3, '', 'high', $4, now())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(host)
+            .bind(trigger)
+            .bind(summary)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        migrator.run(&pool).await.unwrap();
+        let kinds: Vec<(String, String)> =
+            sqlx::query_as("SELECT trigger_name, kind FROM problems ORDER BY trigger_name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            kinds,
+            [
+                ("cmp".to_owned(), "compare".to_owned()),
+                ("host".to_owned(), "no_data".to_owned()),
+                ("item".to_owned(), "no_data".to_owned()),
+            ]
+        );
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn problems_record_their_kind(pool: PgPool) {
         use crate::alerting::nodata::{Seen, evaluate_nodata};
