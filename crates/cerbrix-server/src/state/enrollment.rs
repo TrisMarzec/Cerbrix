@@ -50,19 +50,34 @@ impl StateStore {
         description: &str,
         expires_at: OffsetDateTime,
     ) -> Result<(Uuid, String), StateError> {
+        let (key, plain) = self
+            .create_enrollment_key_full(description, expires_at)
+            .await?;
+        Ok((key.id, plain))
+    }
+
+    /// Like `create_enrollment_key`, but returns the whole key as stored, read by the one
+    /// statement that creates it: once it exists, nothing can fail before the plain key is
+    /// handed out.
+    pub async fn create_enrollment_key_full(
+        &self,
+        description: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<(EnrollmentKey, String), StateError> {
         let id = Uuid::new_v4();
         let plain = tokens::generate(tokens::ENROLLMENT_KEY_PREFIX);
-        sqlx::query(
+        let row: KeyRow = sqlx::query_as(
             "INSERT INTO enrollment_keys (id, key_hash, description, expires_at) \
-             VALUES ($1, $2, $3, $4)",
+             VALUES ($1, $2, $3, $4) \
+             RETURNING id, description, created_at, expires_at, revoked_at",
         )
         .bind(id)
         .bind(tokens::hash(&plain).as_slice())
         .bind(description)
         .bind(expires_at)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        Ok((id, plain))
+        Ok((key_from(row), plain))
     }
 
     /// Revokes a key; revoking an already revoked key keeps its first revocation time.
@@ -118,29 +133,20 @@ impl StateStore {
     /// Every enrolment key, newest first. Never the key or its hash.
     pub async fn enrollment_keys(&self) -> Result<Vec<EnrollmentKey>, StateError> {
         let rows: Vec<KeyRow> = sqlx::query_as(
-            "SELECT id, description, created_at, expires_at, revoked_at FROM enrollment_keys \n             ORDER BY created_at DESC, id",
+            "SELECT id, description, created_at, expires_at, revoked_at FROM enrollment_keys \
+             ORDER BY created_at DESC, id",
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(key_from).collect())
     }
 
-    /// One enrolment key, or `None`.
-    pub async fn enrollment_key(&self, id: Uuid) -> Result<Option<EnrollmentKey>, StateError> {
-        let row: Option<KeyRow> = sqlx::query_as(
-            "SELECT id, description, created_at, expires_at, revoked_at FROM enrollment_keys \n             WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(key_from))
-    }
-
     /// The agents that tried to enrol under an unknown name, most recent first, at most
     /// `limit`.
     pub async fn unknown_agents_recent(&self, limit: i64) -> Result<Vec<UnknownAgent>, StateError> {
         let rows: Vec<(String, OffsetDateTime, OffsetDateTime, i64)> = sqlx::query_as(
-            "SELECT host_name, first_seen, last_seen, attempts FROM unknown_agents \n             ORDER BY last_seen DESC, host_name LIMIT $1",
+            "SELECT host_name, first_seen, last_seen, attempts FROM unknown_agents \
+             ORDER BY last_seen DESC, host_name LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)

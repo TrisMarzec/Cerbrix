@@ -597,7 +597,9 @@ api "" GET "/display/$DISPLAY_ID" -H "@$WORK/display.header"
 expect_status 200
 expect_body "\"id\":\"$DISPLAY_ID\""
 expect_body "\"target\":\"$DASHBOARD_ID\""
-expect_body '"status":"in_sync"'
+# The sync state of /status, the list of issues included (empty while in sync).
+expect_body '"sync":{"status":"in_sync"'
+expect_body '"issues":[]'
 api "" GET "/display/$DISPLAY_ID/dashboards/$DASHBOARD_ID" -H "@$WORK/display.header"
 expect_status 200
 expect_body '"name":"E2E"'

@@ -15,7 +15,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::alerting::ProblemKind;
-use crate::state::Problem;
+use crate::gitops::SyncIssue;
+use crate::state::{Problem, SyncState};
 
 /// The state of a host with open problems: the problem that decides it, and how many are
 /// open.
@@ -64,6 +65,32 @@ pub fn rfc3339(t: OffsetDateTime) -> String {
     t.to_offset(time::UtcOffset::UTC)
         .format(&Rfc3339)
         .unwrap_or_default()
+}
+
+/// The state of the configuration sync as the API shows it, defined once: the `sync` part of
+/// `GET /api/v1/status` and of `GET /api/v1/display/{id}`.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct SyncView {
+    pub status: &'static str,
+    pub active_commit: Option<String>,
+    #[serde(serialize_with = "serialize_time_opt")]
+    pub last_success_at: Option<OffsetDateTime>,
+    #[serde(serialize_with = "serialize_time_opt")]
+    pub last_attempt_at: Option<OffsetDateTime>,
+    /// As stored: file, position and reason of every issue; data, never HTML.
+    pub issues: Vec<SyncIssue>,
+}
+
+impl From<SyncState> for SyncView {
+    fn from(sync: SyncState) -> Self {
+        Self {
+            status: sync.status.as_str(),
+            active_commit: sync.active_commit,
+            last_success_at: sync.last_success_at,
+            last_attempt_at: sync.last_attempt_at,
+            issues: sync.issues,
+        }
+    }
 }
 
 /// `Option<OffsetDateTime>` as an RFC 3339 string or `null`.

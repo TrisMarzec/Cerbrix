@@ -12,13 +12,13 @@ use axum::response::{IntoResponse, Response};
 use cerbrix_common::{DisplayFile, Show, SwitchOnAlarm, validate_name};
 use serde::Serialize;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use super::{ApiError, Entry, dashboards, forbidden};
 use crate::api::AppState;
 use crate::auth::{Admin, DisplayAccess, Viewer};
 use crate::state::StateError;
 use crate::view::display::{DisplayTarget, alarm_target, allowed_dashboards};
+use crate::view::{SyncView, rfc3339};
 
 pub(super) fn entries() -> Vec<Entry> {
     vec![
@@ -41,12 +41,6 @@ fn store_failed(what: &str, e: &StateError) -> ApiError {
 
 fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such display")
-}
-
-fn rfc3339(t: OffsetDateTime) -> String {
-    t.to_offset(time::UtcOffset::UTC)
-        .format(&Rfc3339)
-        .unwrap_or_default()
 }
 
 #[derive(Serialize)]
@@ -141,14 +135,6 @@ async fn revoke_token(
 }
 
 #[derive(Serialize)]
-struct SyncOut {
-    status: &'static str,
-    active_commit: Option<String>,
-    /// How many issues the last sync found; their text stays on the desk.
-    issues: usize,
-}
-
-#[derive(Serialize)]
 struct StateOut<'a> {
     id: &'a str,
     name: &'a str,
@@ -157,7 +143,9 @@ struct StateOut<'a> {
     allowed: Vec<String>,
     #[serde(flatten)]
     alarm: DisplayTarget,
-    sync: SyncOut,
+    /// The sync part of `/api/v1/status`, issues included: the wall shows "out of sync"
+    /// with the file, the position and the reason.
+    sync: SyncView,
 }
 
 /// The display `id` of the active configuration; 404 for an unknown one.
@@ -199,11 +187,7 @@ async fn state(State(app): State<AppState>, access: DisplayAccess) -> Result<Res
         switch_on_alarm: &display.switch_on_alarm,
         allowed: allowed_dashboards(&display, &all),
         alarm: alarm_target(&display, &inputs),
-        sync: SyncOut {
-            status: sync.status.as_str(),
-            active_commit: sync.active_commit,
-            issues: sync.issues.len(),
-        },
+        sync: SyncView::from(sync),
     };
     Ok(Json(out).into_response())
 }
@@ -501,32 +485,74 @@ mod tests {
         assert_eq!(v["target"], Value::Null);
         assert_eq!(
             v["sync"],
-            json!({"status": "never", "active_commit": null, "issues": 0})
+            json!({"status": "never", "active_commit": null, "last_success_at": null,
+                   "last_attempt_at": null, "issues": []})
         );
 
         // The fixture dashboard selects every host, so the alarm is on both dashboards and the
-        // higher priority wins. The sync issues are counted; their text stays off the wall.
+        // higher priority wins.
         host_in(&fx, "host-o", "go").await;
         let cause = alarm(&fx, "host-o", "critical", false).await;
-        let issues = [crate::gitops::SyncIssue {
-            file: Some("hosts/web-01.json".into()),
-            line: None,
-            column: None,
-            reason: "secret detail".into(),
-        }];
-        fx.store
-            .record_sync_failure(Some("abc"), &issues, OffsetDateTime::now_utc())
-            .await
-            .unwrap();
         let reply = fx.call_with_token(&uri, &token).await;
-        let text = String::from_utf8(reply.body.clone()).unwrap();
-        assert!(!text.contains("secret detail") && !text.contains("web-01"));
         let v = reply.json();
         assert_eq!(v["target"], "other");
         assert_eq!(v["causes"], json!([cause]));
         assert_eq!(v["waiting"], json!(["fixture-board"]));
-        assert_eq!(v["sync"]["status"], "out_of_sync");
-        assert_eq!(v["sync"]["issues"], 1);
+    }
+
+    /// The wall shows what the desk shows about the sync: the `sync` object of the display
+    /// route is that of `/api/v1/status`, issues with file, position and reason included.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn display_sync_is_the_status_sync(pool: PgPool) {
+        let fx = Fixture::new(pool.clone()).await;
+        fx.ensure_dashboard().await;
+        fx.ensure_display().await;
+        let token = fx.display_token().await;
+        let uri = format!("/api/v1/display/{}", fx.display);
+        /// The `sync` of the wall, after checking that the desk's is the same.
+        async fn wall_sync(fx: &Fixture, uri: &str, token: &str, label: &str) -> Value {
+            let wall = fx.call_with_token(uri, token).await.json()["sync"].clone();
+            let desk = get(fx, "/api/v1/status").await.json()["sync"].clone();
+            assert_eq!(wall, desk, "{label}");
+            wall
+        }
+        let same = |label: &'static str| wall_sync(&fx, &uri, &token, label);
+        assert_eq!(same("never synced").await["status"], "never");
+
+        let now = OffsetDateTime::now_utc();
+        sqlx::query(
+            "UPDATE sync_state SET status = 'in_sync', active_commit = 'abc123', \
+             last_success_at = $1, last_attempt_at = $1",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(same("in sync").await["active_commit"], "abc123");
+
+        let issues = [crate::gitops::SyncIssue {
+            file: Some("hosts/web-01.json".into()),
+            line: Some(3),
+            column: Some(7),
+            reason: "unknown template \"linux\"".into(),
+        }];
+        fx.store
+            .record_sync_failure(Some("def456"), &issues, now)
+            .await
+            .unwrap();
+        let wall = same("out of sync").await;
+        assert_eq!(wall["status"], "out_of_sync");
+        assert_eq!(wall["active_commit"], "abc123");
+        assert!(
+            wall["last_success_at"]
+                .as_str()
+                .is_some_and(|t| t.ends_with('Z'))
+        );
+        assert_eq!(
+            wall["issues"],
+            json!([{"file": "hosts/web-01.json", "line": 3, "column": 7,
+                    "reason": "unknown template \"linux\""}])
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]

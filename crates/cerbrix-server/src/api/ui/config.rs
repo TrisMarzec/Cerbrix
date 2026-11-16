@@ -6,7 +6,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use cerbrix_common::validate_host_name;
 use serde::{Deserialize, Serialize};
-use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -14,11 +13,11 @@ use super::{ApiError, ApiJson, Entry, Listed, Page, invalid, query_text};
 use crate::admin::parse_duration;
 use crate::api::AppState;
 use crate::auth::{Admin, Operator, Viewer};
-use crate::gitops::SyncIssue;
 use crate::state::{
     EnrollmentKey, HostCounts, ProblemCounts, StateError, SyncChanges, SyncHistoryEntry,
     UnknownAgent,
 };
+use crate::view::{SyncView, rfc3339};
 
 /// Most unknown agents the list shows.
 const MAX_UNKNOWN_AGENTS: i64 = 500;
@@ -35,25 +34,9 @@ pub(super) fn entries() -> Vec<Entry> {
     ]
 }
 
-fn rfc3339(t: OffsetDateTime) -> String {
-    t.to_offset(time::UtcOffset::UTC)
-        .format(&Rfc3339)
-        .unwrap_or_default()
-}
-
 fn store_failed(what: &str, e: &StateError) -> ApiError {
     tracing::error!(error = %e, "{what}");
     ApiError::internal()
-}
-
-#[derive(Serialize)]
-struct SyncOut {
-    status: &'static str,
-    active_commit: Option<String>,
-    last_success_at: Option<String>,
-    last_attempt_at: Option<String>,
-    /// As stored; data, never HTML.
-    issues: Vec<SyncIssue>,
 }
 
 #[derive(Serialize)]
@@ -61,7 +44,7 @@ struct StatusOut {
     version: &'static str,
     gitops: bool,
     mail: bool,
-    sync: SyncOut,
+    sync: SyncView,
     hosts: HostCounts,
     problems: ProblemCounts,
 }
@@ -81,13 +64,7 @@ async fn status(
         version: env!("CARGO_PKG_VERSION"),
         gitops: app.config.gitops.enabled,
         mail: app.queue_mail,
-        sync: SyncOut {
-            status: sync.status.as_str(),
-            active_commit: sync.active_commit,
-            last_success_at: sync.last_success_at.map(rfc3339),
-            last_attempt_at: sync.last_attempt_at.map(rfc3339),
-            issues: sync.issues,
-        },
+        sync: SyncView::from(sync),
         hosts,
         problems,
     }))
@@ -229,7 +206,8 @@ async fn create_key(
         200,
         "the description must have at most 200 characters and no control character",
     )?;
-    if description.is_empty() {
+    // Like `admin key create`: blank is empty.
+    if description.trim().is_empty() {
         return Err(invalid("the description must not be empty"));
     }
     const BAD_EXPIRY: &str = "expires_in must be between 1h and 365d, e.g. 30d, 12h or 90m";
@@ -238,18 +216,14 @@ async fn create_key(
         return Err(invalid(BAD_EXPIRY));
     }
     let now = OffsetDateTime::now_utc();
-    let (id, plain) = app
+    // The answer is made from what the creating statement returned: no second read can lose
+    // the plain key.
+    let (key, plain) = app
         .store
-        .create_enrollment_key(description, now + lifetime)
+        .create_enrollment_key_full(description, now + lifetime)
         .await
         .map_err(|e| store_failed("creating an enrolment key failed", &e))?;
-    let key = app
-        .store
-        .enrollment_key(id)
-        .await
-        .map_err(|e| store_failed("reading an enrolment key failed", &e))?
-        .ok_or_else(ApiError::internal)?;
-    tracing::info!(admin = %admin.name, key_id = %id, description, "enrolment key created");
+    tracing::info!(admin = %admin.name, key_id = %key.id, description, "enrolment key created");
     Ok((
         StatusCode::CREATED,
         Json(KeyOut::new(&key, now, Some(plain))),
@@ -631,6 +605,8 @@ mod tests {
             (json!({"description": "d"}), false),
             (json!({"expires_in": "1d"}), false),
             (json!({"description": "", "expires_in": "1d"}), false),
+            (json!({"description": "   ", "expires_in": "1d"}), false),
+            (json!({"description": " d ", "expires_in": "1d"}), true),
             (json!({"description": long, "expires_in": "1d"}), false),
             (json!({"description": "a\nb", "expires_in": "1d"}), false),
             (json!({"description": "a\u{0}b", "expires_in": "1d"}), false),
