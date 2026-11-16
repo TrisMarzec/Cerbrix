@@ -538,7 +538,7 @@ impl StateStore {
         }
         // A counter left from before an expired lock starts again at one. While a lock is
         // running (a concurrent attempt set it) it is neither extended nor counted.
-        let after: Option<(String, Option<OffsetDateTime>)> = sqlx::query_as(
+        let after: Option<(String, bool)> = sqlx::query_as(
             "UPDATE users SET \
                failed_logins = CASE WHEN locked_until > $2 THEN failed_logins \
                                     WHEN locked_until <= $2 THEN 1 \
@@ -547,7 +547,7 @@ impl StateStore {
                                    WHEN (CASE WHEN locked_until <= $2 THEN 1 \
                                               ELSE failed_logins + 1 END) >= $3 THEN $4 \
                                    ELSE NULL END \
-             WHERE id = $1 RETURNING name, locked_until",
+             WHERE id = $1 RETURNING name, COALESCE(locked_until = $4, false)",
         )
         .bind(id)
         .bind(now)
@@ -555,11 +555,10 @@ impl StateStore {
         .bind(now + LOCK_DURATION)
         .fetch_optional(&self.pool)
         .await?;
-        // The lock this very statement set (not one that was already running) is logged,
+        // The lock this very statement set (decided in SQL, so both sides of the comparison
+        // are stored microsecond values) is logged,
         // once; attempts while it runs are refused above and log nothing.
-        if let Some((name, Some(until))) = after
-            && until == now + LOCK_DURATION
-        {
+        if let Some((name, true)) = after {
             tracing::warn!(user = %name, "user locked for 5 minutes after repeated failed logins");
         }
         Ok(PasswordCheck::Wrong)
@@ -1296,15 +1295,17 @@ mod login_tests {
         let user = "lock-log-user";
         logged_lines_about(user); // installs the subscriber before anything is logged
         let store = StateStore::from_pool(pool.clone());
+        // Not a whole microsecond, like the clock in production: PostgreSQL stores less.
+        let at = t0() + Duration::nanoseconds(123_456_789);
         add(&store, user, Role::Viewer).await;
         for _ in 0..4 {
-            try_login(&store, user, "wrong", t0()).await;
+            try_login(&store, user, "wrong", at).await;
         }
         assert!(logged_lines_about(user).is_empty());
-        try_login(&store, user, "wrong", t0()).await; // the fifth sets the lock
+        try_login(&store, user, "wrong", at).await; // the fifth sets the lock
         // Attempts while locked do not log again.
         for _ in 0..3 {
-            try_login(&store, user, "wrong", t0() + Duration::minutes(1)).await;
+            try_login(&store, user, "wrong", at + Duration::minutes(1)).await;
         }
         let lines = logged_lines_about(user);
         assert_eq!(lines.len(), 1, "{lines:?}");
