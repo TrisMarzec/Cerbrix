@@ -93,6 +93,8 @@ impl Serialize for Problem {
             acknowledged_at: Option<OffsetDateTime>,
             acknowledged_by: &'a Option<String>,
             ack_comment: &'a Option<String>,
+            closed_by: &'a Option<String>,
+            close_comment: &'a Option<String>,
         }
         Out {
             id: self.id.to_string(),
@@ -108,6 +110,8 @@ impl Serialize for Problem {
             acknowledged_at: self.acknowledged_at,
             acknowledged_by: &self.acknowledged_by,
             ack_comment: &self.ack_comment,
+            closed_by: &self.closed_by,
+            close_comment: &self.close_comment,
         }
         .serialize(serializer)
     }
@@ -140,6 +144,8 @@ mod tests {
             acknowledged_at: acked.then_some(started),
             acknowledged_by: acked.then(|| "anna".to_owned()),
             ack_comment: None,
+            closed_by: None,
+            close_comment: None,
         }
     }
 
@@ -228,6 +234,7 @@ mod tests {
         assert_eq!(v["ack_comment"], "looking");
         assert!(v["resolved_at"].is_null());
         assert!(v["resolve_reason"].is_null());
-        assert_eq!(v.as_object().unwrap().len(), 13);
+        assert!(v["closed_by"].is_null() && v["close_comment"].is_null());
+        assert_eq!(v.as_object().unwrap().len(), 15);
     }
 }

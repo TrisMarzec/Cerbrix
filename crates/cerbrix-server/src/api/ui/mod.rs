@@ -72,7 +72,8 @@ pub(crate) const ROUTES: &[(&str, &str, Access)] = &[
     ("GET", "/api/v1/problems", Access::Viewer),
     ("GET", "/api/v1/problems/{id}", Access::Viewer),
     ("POST", "/api/v1/problems/{id}/ack", Access::Operator),
-    // Closing comes after acknowledging: the matrix resolves the fixture problem here.
+    // The matrix posts `{}`: an acknowledgement with no comment succeeds, closing needs a
+    // comment and answers 400, so the fixture problem is still there for every later row.
     ("POST", "/api/v1/problems/{id}/close", Access::Operator),
     ("GET", "/api/v1/users", Access::Admin),
     ("POST", "/api/v1/users", Access::Admin),

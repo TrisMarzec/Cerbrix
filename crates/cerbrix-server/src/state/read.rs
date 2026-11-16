@@ -320,7 +320,7 @@ pub struct ProblemQuery {
     pub host: Option<String>,
     /// An exact group name.
     pub group: Option<String>,
-    /// The name of a dashboard. The store does not look it up: the caller passes the hosts
+    /// The id of a dashboard (its file stem). The store does not look it up: the caller passes the hosts
     /// it selects to `problems_page`.
     pub dashboard: Option<String>,
     /// Case-insensitive substring of the host name, the trigger name or the summary; taken

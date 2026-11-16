@@ -30,7 +30,7 @@ const MAX_SEARCH_CHARS: usize = 200;
 /// The longest group name (the length of a valid one).
 const MAX_GROUP_CHARS: usize = 63;
 
-/// The longest dashboard name taken.
+/// The longest dashboard id taken.
 const MAX_DASHBOARD_CHARS: usize = 200;
 
 fn store_failed(what: &str, e: &StateError) -> ApiError {
@@ -120,7 +120,7 @@ async fn list(
                 .dashboard_host_ids(name)
                 .await
                 .map_err(|e| store_failed("looking up a dashboard failed", &e))?
-                .ok_or_else(|| invalid("there is no dashboard with this name"))?,
+                .ok_or_else(|| invalid("no dashboard with this id"))?,
         ),
         None => None,
     };
@@ -187,18 +187,9 @@ async fn acknowledge(
     ApiJson(body): ApiJson<CommentBody>,
 ) -> Result<Json<Problem>, ApiError> {
     let id = parse_id(&id)?;
-    let current = app
-        .store
-        .problem(id)
-        .await
-        .map_err(|e| store_failed("reading a problem failed", &e))?
-        .ok_or_else(not_found)?;
-    if current.resolved_at.is_some() {
-        return Err(conflict());
-    }
     let problem = app
         .store
-        .acknowledge_problem(
+        .acknowledge_open_problem(
             id,
             &user.name,
             &clean_comment(&body.comment),
@@ -207,6 +198,7 @@ async fn acknowledge(
         .await
         .map_err(|e| match e {
             StateError::NotFound => not_found(),
+            StateError::Conflict(_) => conflict(),
             e => store_failed("acknowledging a problem failed", &e),
         })?;
     tracing::info!(user = %user.name, problem = %id, "problem acknowledged");
@@ -445,6 +437,7 @@ mod tests {
         let reply = get(&fx, Role::Viewer, "/api/v1/problems?dashboard=nope").await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST);
         assert_eq!(reply.error_code(), "invalid");
+        assert_eq!(reply.json()["message"], "no dashboard with this id");
         let reply = get(&fx, Role::Viewer, "/api/v1/problems?dashboard=web-only").await;
         assert_eq!(reply.status, StatusCode::OK);
         assert_eq!(reply.json()["total"], 1);
@@ -575,9 +568,40 @@ mod tests {
         assert_eq!(reply.status, StatusCode::OK);
         let p = reply.json();
         assert_eq!(p["resolve_reason"], "closed_by_operator");
-        assert_eq!(p["acknowledged_by"], "operator");
-        assert_eq!(p["ack_comment"], "unmounted");
+        assert_eq!(p["closed_by"], "operator");
+        assert_eq!(p["close_comment"], "unmounted");
+        assert!(p["acknowledged_at"].is_null() && p["acknowledged_by"].is_null());
         assert!(p["resolved_at"].is_string());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn closing_an_acknowledged_problem_records_the_closer(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        let id = open(&fx, "web", "Cpu", Severity::High, T0_MS, false).await;
+        let reply = post(
+            &fx,
+            Role::Admin,
+            &format!("/api/v1/problems/{id}/ack"),
+            r#"{"comment": "a"}"#,
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let reply = post(
+            &fx,
+            Role::Operator,
+            &format!("/api/v1/problems/{id}/close"),
+            r#"{"comment": "b"}"#,
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let p = reply.json();
+        assert_eq!(p["acknowledged_by"], "admin");
+        assert_eq!(p["ack_comment"], "a");
+        assert_eq!(p["closed_by"], "operator");
+        assert_eq!(p["close_comment"], "b");
+        // The stored problem shows the same.
+        let shown = get(&fx, Role::Viewer, &format!("/api/v1/problems/{id}")).await;
+        assert_eq!(shown.json(), p);
     }
 
     /// Closes a problem whose start was mailed; whether the end is queued follows

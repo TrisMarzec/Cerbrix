@@ -487,8 +487,8 @@ problem d33ac168-0f8b-4278-8b1c-f094dbaced14 acknowledged
 `admin problem close <id> --comment "..." [--by <name>]` closes an open problem by hand. Use it
 for a problem that can never end by itself because its instance is gone: a file system that was
 unmounted, a network interface that was removed. The problem is resolved with the reason "the
-problem was closed by an operator", the comment and the name are recorded as its
-acknowledgement (unless it was acknowledged already), the server forgets the state of that
+problem was closed by an operator", the comment and the name are recorded as who closed it and
+why (an acknowledgement stays as it was), the server forgets the state of that
 trigger and instance, and the e-mail about the end goes to everyone who was mailed about the
 start (when SMTP is configured). If the condition still holds, for example the disk is still
 mounted and still full, the next value opens a new problem. Closing a problem that is already

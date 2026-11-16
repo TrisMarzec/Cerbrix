@@ -28,3 +28,4 @@ CREATE TABLE display_tokens (
 ALTER TABLE problems ADD COLUMN kind text NOT NULL DEFAULT 'compare' CHECK (kind IN ('compare', 'no_data'));
 CREATE INDEX problems_open_host ON problems (host_id) WHERE resolved_at IS NULL;
 UPDATE problems SET kind = 'no_data' WHERE summary LIKE 'no data for %' OR summary LIKE '%: no data for %';
+ALTER TABLE problems ADD COLUMN closed_by text, ADD COLUMN close_comment text;

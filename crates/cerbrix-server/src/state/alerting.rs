@@ -40,6 +40,9 @@ pub struct Problem {
     pub acknowledged_at: Option<OffsetDateTime>,
     pub acknowledged_by: Option<String>,
     pub ack_comment: Option<String>,
+    /// Who closed the problem by hand, and why (the required comment).
+    pub closed_by: Option<String>,
+    pub close_comment: Option<String>,
 }
 
 /// Counts of the notification outbox.
@@ -170,6 +173,8 @@ pub(super) type ProblemRow = (
     Option<String>,
     Option<String>,
     String,
+    Option<String>,
+    Option<String>,
 );
 
 /// The problem query with a WHERE/ORDER BY tail appended; a macro so the result stays a
@@ -179,7 +184,8 @@ macro_rules! problem_query {
         concat!(
             "SELECT p.id, p.host_id, h.name, p.trigger_name, p.instance, \
              p.severity, p.summary, p.started_at, p.resolved_at, p.resolve_reason, \
-             p.acknowledged_at, p.acknowledged_by, p.ack_comment, p.kind \
+             p.acknowledged_at, p.acknowledged_by, p.ack_comment, p.kind, \
+             p.closed_by, p.close_comment \
              FROM problems p JOIN hosts h ON h.id = p.host_id ",
             $tail
         )
@@ -203,6 +209,8 @@ pub(super) fn problem_from(r: ProblemRow) -> Result<Problem, StateError> {
         acknowledged_at: r.10,
         acknowledged_by: r.11,
         ack_comment: r.12,
+        closed_by: r.14,
+        close_comment: r.15,
         kind: r
             .13
             .parse::<ProblemKind>()
@@ -792,9 +800,43 @@ impl StateStore {
         problem_from(row.ok_or(StateError::NotFound)?)
     }
 
+    /// Like [`StateStore::acknowledge_problem`], but only for a problem that is open, decided
+    /// by the update itself: a problem that resolves or is closed at the same moment is not
+    /// changed. `NotFound` for an unknown id, `Conflict` for a resolved problem.
+    pub async fn acknowledge_open_problem(
+        &self,
+        id: Uuid,
+        by: &str,
+        comment: &str,
+        now: OffsetDateTime,
+    ) -> Result<Problem, StateError> {
+        let done = sqlx::query(
+            "UPDATE problems SET acknowledged_at = $2, acknowledged_by = $3, ack_comment = $4 \
+             WHERE id = $1 AND resolved_at IS NULL",
+        )
+        .bind(id)
+        .bind(now)
+        .bind(cut(by, MAX_ACK_BY_CHARS))
+        .bind(cut(comment, MAX_ACK_COMMENT_CHARS))
+        .execute(&self.pool)
+        .await?;
+        let row: Option<ProblemRow> = sqlx::query_as(problem_query!("WHERE p.id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        match (done.rows_affected(), row) {
+            (_, None) => Err(StateError::NotFound),
+            (0, Some(_)) => Err(StateError::Conflict(format!(
+                "problem {id} is already resolved"
+            ))),
+            (_, Some(row)) => problem_from(row),
+        }
+    }
+
     /// Closes an open problem by hand, for an instance that no longer exists (an unmounted
     /// disk, a removed interface): resolves it at `now` with the reason `closed_by_operator`,
-    /// records `by` and `comment` as the acknowledgement unless it was acknowledged already,
+    /// records `by` and `comment` as who closed it and why (`closed_by`, `close_comment`; the
+    /// acknowledgement is left as it is),
     /// deletes the trigger state of its (trigger, instance) and the arrival of the series it
     /// watched, and with `queue_mail` queues the end e-mail for those who were mailed the
     /// start. One transaction under the host row lock. If the condition still holds, the next
@@ -825,10 +867,7 @@ impl StateStore {
         let closed: Option<(String, String)> = sqlx::query_as(
             "UPDATE problems SET resolved_at = GREATEST($2, started_at), \
                  resolve_reason = 'closed_by_operator', \
-                 acknowledged_at = COALESCE(acknowledged_at, $2), \
-                 acknowledged_by = CASE WHEN acknowledged_at IS NULL THEN $3 \
-                                        ELSE acknowledged_by END, \
-                 ack_comment = CASE WHEN acknowledged_at IS NULL THEN $4 ELSE ack_comment END \
+                 closed_by = $3, close_comment = $4 \
              WHERE id = $1 AND resolved_at IS NULL RETURNING trigger_name, instance",
         )
         .bind(id)
@@ -1995,9 +2034,12 @@ mod tests {
         assert_eq!(p.id, usb);
         assert_eq!(p.resolved_at, Some(closed_at));
         assert_eq!(p.resolve_reason.as_deref(), Some("closed_by_operator"));
-        assert_eq!(p.acknowledged_at, Some(closed_at));
-        assert_eq!(p.acknowledged_by.as_deref(), Some("bob"));
-        assert_eq!(p.ack_comment.as_deref(), Some("disk unmounted"));
+        // Closing has its own record and leaves the acknowledgement alone.
+        assert_eq!(p.closed_by.as_deref(), Some("bob"));
+        assert_eq!(p.close_comment.as_deref(), Some("disk unmounted"));
+        assert_eq!(p.acknowledged_at, None);
+        assert_eq!(p.acknowledged_by, None);
+        assert_eq!(p.ack_comment, None);
         assert_eq!(
             state_rows(&pool).await,
             [("Disk silent".to_owned(), "mount=/".to_owned())]
@@ -2027,6 +2069,8 @@ mod tests {
         assert_eq!(p.acknowledged_by.as_deref(), Some("anna"));
         assert_eq!(p.ack_comment.as_deref(), Some("looking"));
         assert_eq!(p.acknowledged_at, Some(at(T0_MS + 1000)));
+        assert_eq!(p.closed_by.as_deref(), Some("bob"));
+        assert_eq!(p.close_comment.as_deref(), Some("gone too"));
         assert_eq!(outbox(&pool, "resolved").await.len(), 1);
         assert!(state_rows(&pool).await.is_empty());
         assert_eq!(series_rows(&pool).await.len(), 1);
@@ -2090,6 +2134,65 @@ mod tests {
                 .await,
             Err(StateError::NotFound)
         ));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn ack_after_close_is_conflict_and_changes_nothing(pool: PgPool) {
+        let (store, host) = setup(pool).await;
+        let events = store
+            .evaluate_host(host, false, |_| opening("Disk", Severity::High, T0_MS))
+            .await
+            .unwrap();
+        let id = events[0].problem_id;
+        // An open problem is acknowledged, and again (overwriting).
+        let p = store
+            .acknowledge_open_problem(id, "anna", "looking", at(T0_MS + 5))
+            .await
+            .unwrap();
+        assert_eq!(p.acknowledged_by.as_deref(), Some("anna"));
+        store
+            .acknowledge_open_problem(id, "carl", "me too", at(T0_MS + 6))
+            .await
+            .unwrap();
+        let closed = store
+            .close_problem(id, "bob", "gone", at(T0_MS + 10), false)
+            .await
+            .unwrap();
+        let err = store
+            .acknowledge_open_problem(id, "dora", "late", at(T0_MS + 20))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StateError::Conflict(_)), "{err:?}");
+        assert_eq!(store.problem(id).await.unwrap().unwrap(), closed);
+        assert!(matches!(
+            store
+                .acknowledge_open_problem(Uuid::new_v4(), "x", "y", at(T0_MS))
+                .await,
+            Err(StateError::NotFound)
+        ));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn closing_an_acknowledged_problem_records_the_closer(pool: PgPool) {
+        let (store, host) = setup(pool).await;
+        let events = store
+            .evaluate_host(host, false, |_| opening("Disk", Severity::High, T0_MS))
+            .await
+            .unwrap();
+        let id = events[0].problem_id;
+        store
+            .acknowledge_problem(id, "anna", "looking", at(T0_MS + 5))
+            .await
+            .unwrap();
+        let p = store
+            .close_problem(id, "bob", "unmounted", at(T0_MS + 10), false)
+            .await
+            .unwrap();
+        assert_eq!(p.acknowledged_by.as_deref(), Some("anna"));
+        assert_eq!(p.ack_comment.as_deref(), Some("looking"));
+        assert_eq!(p.acknowledged_at, Some(at(T0_MS + 5)));
+        assert_eq!(p.closed_by.as_deref(), Some("bob"));
+        assert_eq!(p.close_comment.as_deref(), Some("unmounted"));
     }
 
     #[sqlx::test(migrations = "./migrations")]

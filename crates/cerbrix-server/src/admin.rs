@@ -622,6 +622,12 @@ fn problem_details(p: &Problem) -> String {
         if let Some(reason) = &p.resolve_reason {
             lines.push(format!("Reason: {}", replace_control(&reason_text(reason))));
         }
+        if let Some(who) = &p.closed_by {
+            lines.push(format!("Closed by: {}", replace_control(who)));
+        }
+        if let Some(comment) = &p.close_comment {
+            lines.push(format!("Close comment: {}", replace_control(comment)));
+        }
     }
     if let Some(at) = p.acknowledged_at {
         lines.push(format!(
@@ -1197,7 +1203,10 @@ mod tests {
             p.contains("Reason: the problem was closed by an operator\n"),
             "{p}"
         );
-        assert!(p.contains("by anna\nComment: unmounted"), "{p}");
+        assert!(
+            p.contains("\nClosed by: anna\nClose comment: unmounted"),
+            "{p}"
+        );
         let all = run(&store, list(true), now(), &c).await.unwrap();
         assert!(
             all.contains("resolved 2027-01-15T08:01:00Z (the problem was closed by an operator)"),
@@ -1354,6 +1363,8 @@ mod tests {
             acknowledged_at: Some(at(T0_MS)),
             acknowledged_by: Some("w\rho".into()),
             ack_comment: None,
+            closed_by: None,
+            close_comment: None,
             kind: crate::alerting::ProblemKind::Compare,
         };
         let line = problem_line(&p);

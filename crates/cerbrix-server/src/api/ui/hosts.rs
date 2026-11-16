@@ -874,6 +874,8 @@ mod tests {
                 "ack_comment",
                 "acknowledged_at",
                 "acknowledged_by",
+                "close_comment",
+                "closed_by",
                 "host",
                 "id",
                 "instance",
