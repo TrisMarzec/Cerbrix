@@ -22,8 +22,13 @@ had already deleted its repository when they were taken).
 
 **Base path and format.** All routes start with `/api/v1`. Requests with a body send JSON with
 `Content-Type: application/json`, at most 64 KiB; answers are JSON. A request with a body and
-another content type is answered `400`, a body over the limit `413`. A body with an unknown
-field is refused where a route says so. Every answer carries `Cache-Control: no-store`.
+another content type is answered `400`, a body over the limit `413`. The body of a `POST`, `PUT` or `PATCH` must be a JSON object, and it must be there even when
+every field is optional: `POST /problems/{id}/ack`, `POST /problems/{id}/close`,
+`POST /users/{id}/password` and `PATCH /users/{id}` need at least `{}`; a request without a body, or
+without the content type, is `400 invalid`. (`POST /displays/{id}/token`, `POST /hosts/{name}/release`
+and the `DELETE` routes take no body.) Bodies with an unknown field are refused with `400 invalid`
+on `ack`, `close`, `POST /enrollment-keys`, `POST /users`, `PATCH /users/{id}` and
+`POST /users/{id}/password`; the login and the password change ignore unknown fields. Every answer carries `Cache-Control: no-store`.
 Everything else under `/api/v1` is `404`, in the same error format.
 
 **Times.** Times in answers are RFC 3339 in UTC, for example `2026-11-16T21:54:05.114Z`. The
@@ -204,7 +209,8 @@ stay.
 ### `PUT /api/v1/session/password` (viewer)
 
 Changes the own password. Body: `current` and `new`. The new password has 12 to 256 characters and
-no NUL. On success the answer is `204` and the other sessions of the user end. A wrong `current`
+no NUL; one that does not is `400 invalid`, checked before the current password and without
+counting as a failed attempt. On success the answer is `204` and the other sessions of the user end. A wrong `current`
 is `403 forbidden` and counts as a failed attempt for the lock; a locked user gets the same
 answer.
 
@@ -289,7 +295,8 @@ The history of one series, for a graph. Parameters, each given once:
 
 An item with a parameter needs it: without `p_mount` a `disk.used_percent` request would match
 the points of several disks, so it is refused with `400 invalid`. An item without a parameter takes
-none. `thresholds` are the limits of the host's comparison triggers on that item, to draw into the
+none. An unknown host is `404`; an unknown query parameter, or one given twice, is `400 invalid`.
+`thresholds` are the limits of the host's comparison triggers on that item, to draw into the
 graph. The newest point can be about 30 seconds old, see [Conventions](#conventions). If the
 metrics store cannot be read the answer is `503 metrics_unavailable`.
 
@@ -497,8 +504,11 @@ curl -sS -H @display.header http://127.0.0.1:18443/api/v1/display/e2e-wall
 ### `GET /api/v1/display/{id}/dashboards/{dashboard}` (display)
 
 The answer of `GET /api/v1/dashboards/{id}`, for a dashboard in the display's `allowed` list. The
-same access as the route above. `403 forbidden` for another dashboard, `404` for an unknown display
-or dashboard.
+same access as the route above. The route first looks the display up: an unknown display is `404`
+for a logged-in user (a token of a display that does not exist is `401`). Then it checks the
+dashboard against `allowed`: any dashboard that is not in `allowed`, one that does not exist
+included, is `403 forbidden`. `404` comes only when `allowed` names a dashboard that no longer
+exists (for example a display that shows a dashboard whose file was removed).
 
 ```json
 {"error":"forbidden","message":"this display may not show that dashboard"}

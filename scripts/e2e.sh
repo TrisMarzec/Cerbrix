@@ -19,8 +19,9 @@
 # acknowledged through the API), a dashboard and a wall display with its token are read, and
 # the access rules are checked (no cookie is 401, a viewer cannot create users, a display
 # token opens only its own display). The JSON is checked with grep on the compact answers
-# (no jq). On a failure the last HTTP status and body are printed with tokens masked; the
-# admin password and the display token are never printed.
+# (no jq). It needs awk and curl 7.55 or newer (`-H @file`). On a failure the last HTTP status
+# and body are printed with tokens masked; the admin password and the display token are never
+# printed.
 #
 # Environment variables (defaults in parentheses):
 #   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e)
@@ -573,7 +574,14 @@ expect_body "\"id\":\"$DASHBOARD_ID\""
 api "$ADMIN_JAR" GET "/dashboards/$DASHBOARD_ID"
 expect_status 200
 expect_body '"type":"problems"'
-expect_body '"trigger":"Agent silent"'
+# The problems panel on its own: the text between its `"type":"problems"` and its `"more":N}`,
+# a key no other panel has. `hosts` (before it) and the host-states panel (after it) are not in
+# it, and both name the trigger in their host states.
+PROBLEMS_PANEL=$(sed -n 's/.*{"type":"problems"\(.*\),"more":[0-9]*}.*/\1/p' <<<"$LAST_BODY")
+grep -qF '"problems":[{' <<<"$PROBLEMS_PANEL" \
+    || fail "the problems panel of $LAST_REQUEST lists no problem"
+grep -qF '"trigger":"Agent silent"' <<<"$PROBLEMS_PANEL" \
+    || fail "the problems panel of $LAST_REQUEST does not list the problem \"Agent silent\""
 expect_body '"type":"graph"'
 expect_body '"points":[['
 expect_body '"metrics_available":true'

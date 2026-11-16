@@ -407,7 +407,7 @@ Then release the host on the server (`admin host release <name>`) if it will enr
 Git repository, enrols a locally built agent and checks that its values arrive in
 VictoriaMetrics. It then pushes a broken host file, checks that the installation reports
 `out of sync` while values keep arriving, and that reverting the commit makes it `in sync`
-again. It also checks alerting against a real mail server (Mailpit): a problem opens and is mailed, resolves and is mailed, an acknowledgement shows in the problem list, and a stopped agent is reported. Finally it walks through the [API](api.md) with `curl`: login, status, hosts, a series, problems with an acknowledgement, a dashboard, a wall display with its token, and the access rules. It does not test TLS or a login at the mail server; use `admin notify test` for that. It needs Docker, curl, git and a Rust toolchain; CI runs it on every push.
+again. It also checks alerting against a real mail server (Mailpit): a problem opens and is mailed, resolves and is mailed, an acknowledgement shows in the problem list, and a stopped agent is reported. Finally it walks through the [API](api.md) with `curl`: login, status, hosts, a series, problems with an acknowledgement, a dashboard, a wall display with its token, and the access rules. It does not test TLS or a login at the mail server; use `admin notify test` for that. It needs Docker, curl 7.55 or newer, awk, git and a Rust toolchain; CI runs it on every push.
 
 ## Troubleshooting
 
