@@ -25,6 +25,8 @@ fn config(listen: SocketAddr, cert: Option<&Path>, key: Option<&Path>, insecure:
         },
         ingest: IngestConfig::default(),
         gitops: Default::default(),
+        alerting: Default::default(),
+        smtp: Default::default(),
     }
 }
 
@@ -190,4 +192,55 @@ async fn half_configured_tls_pair_fails_at_start() {
         .expect_err("start must fail");
     let message = format!("{err:#}");
     assert!(message.contains("server.tls_key"), "{message}");
+}
+
+fn smtp_config(host: &str, from: &str) -> cerbrix_server::config::SmtpConfig {
+    cerbrix_server::config::SmtpConfig {
+        host: Some(host.to_owned()),
+        from: Some(from.to_owned()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn unresolvable_smtp_host_does_not_stop_the_start() {
+    // The channel connects lazily: a mail server that is down must not keep the server down.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut cfg = config(addr, None, None, true);
+    cfg.smtp = smtp_config(
+        "smtp.does-not-resolve.invalid",
+        "Cerbrix <cerbrix@example.com>",
+    );
+    let (stop, rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(serve(cfg, listener, async move {
+        let _ = rx.await;
+    }));
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{}/healthz", addr.port());
+    assert_eq!(wait_for_get(&client, &url).await.status(), 200);
+
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .expect("graceful shutdown did not return in time")
+        .expect("server task panicked")
+        .expect("serve returned an error");
+}
+
+#[tokio::test]
+async fn unusable_smtp_settings_stop_the_start_without_leaking_the_password() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut cfg = config(listener.local_addr().unwrap(), None, None, true);
+    cfg.smtp = smtp_config("smtp.example.com", "this is not an address");
+    cfg.smtp.username = Some("mailer".to_owned());
+    cfg.smtp.password = Some("hunter2-secret".to_owned());
+
+    let err = serve(cfg, listener, std::future::pending())
+        .await
+        .expect_err("start must fail");
+    let message = format!("{err:#}");
+    assert!(message.contains("smtp"), "{message}");
+    assert!(!message.contains("hunter2-secret"), "{message}");
 }

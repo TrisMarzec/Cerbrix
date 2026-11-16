@@ -26,6 +26,10 @@ pub struct Config {
     pub ingest: IngestConfig,
     #[serde(default)]
     pub gitops: GitopsConfig,
+    #[serde(default)]
+    pub alerting: AlertingConfig,
+    #[serde(default)]
+    pub smtp: SmtpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,6 +67,147 @@ impl Default for IngestConfig {
             max_future_skew_secs: default_max_future_skew_secs(),
             max_body_bytes: default_max_body_bytes(),
         }
+    }
+}
+
+/// Settings for trigger evaluation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AlertingConfig {
+    /// Values older than this are stored but never open or close a problem.
+    pub max_value_age_secs: u64,
+    /// How often the no-data check runs.
+    pub nodata_check_secs: u64,
+}
+
+impl Default for AlertingConfig {
+    fn default() -> Self {
+        Self {
+            max_value_age_secs: 300,
+            nodata_check_secs: 15,
+        }
+    }
+}
+
+impl AlertingConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let bad = |msg: &str| Err(ConfigError::Invalid(msg.to_owned()));
+        if !(10..=86_400).contains(&self.max_value_age_secs) {
+            return bad("alerting.max_value_age_secs must be between 10 and 86400");
+        }
+        if !(5..=300).contains(&self.nodata_check_secs) {
+            return bad("alerting.nodata_check_secs must be between 5 and 300");
+        }
+        Ok(())
+    }
+}
+
+/// How the connection to the mail server is protected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpEncryption {
+    /// Plain connection upgraded with STARTTLS; no fallback to plain text.
+    #[default]
+    Starttls,
+    /// TLS from the first byte (SMTPS).
+    Tls,
+    /// Plain text. Never combined with credentials.
+    None,
+}
+
+/// Largest allowed `smtp.timeout_secs`; the dispatcher sizes its batch budget from it.
+pub const MAX_SMTP_TIMEOUT_SECS: u64 = 120;
+
+/// Settings for sending notifications by e-mail. Disabled while `host` is unset.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct SmtpConfig {
+    pub host: Option<String>,
+    pub port: u16,
+    pub encryption: SmtpEncryption,
+    pub username: Option<String>,
+    /// Never printed or logged.
+    pub password: Option<String>,
+    /// The sender, e.g. `Cerbrix <cerbrix@example.com>`.
+    pub from: Option<String>,
+    /// Total time allowed for one message, in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for SmtpConfig {
+    fn default() -> Self {
+        Self {
+            host: None,
+            port: 587,
+            encryption: SmtpEncryption::Starttls,
+            username: None,
+            password: None,
+            from: None,
+            timeout_secs: 15,
+        }
+    }
+}
+
+impl fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("encryption", &self.encryption)
+            .field("username", &self.username)
+            .field("password", &Redacted(self.password.is_some()))
+            .field("from", &self.from)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+impl SmtpConfig {
+    /// E-mail notifications are sent when a host is configured.
+    pub fn enabled(&self) -> bool {
+        self.host.is_some()
+    }
+
+    /// Messages never contain the password or the user name.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let bad = |msg: &str| Err(ConfigError::Invalid(msg.to_owned()));
+        if self.port == 0 {
+            return bad("smtp.port must not be 0");
+        }
+        if !(1..=MAX_SMTP_TIMEOUT_SECS).contains(&self.timeout_secs) {
+            return bad(&format!(
+                "smtp.timeout_secs must be between 1 and {MAX_SMTP_TIMEOUT_SECS}"
+            ));
+        }
+        let Some(host) = &self.host else {
+            return Ok(());
+        };
+        if host.is_empty() || host.contains(|c: char| c.is_control() || c.is_whitespace()) {
+            return bad("smtp.host is not a valid host name");
+        }
+        match &self.from {
+            None => return bad("smtp.from is required when smtp.host is set"),
+            Some(from) if from.parse::<lettre::message::Mailbox>().is_err() => {
+                return bad("smtp.from is not a valid e-mail address");
+            }
+            Some(_) => {}
+        }
+        if self.username.as_deref() == Some("") {
+            return bad("smtp.username must not be empty");
+        }
+        if self.password.as_deref() == Some("") {
+            return bad("smtp.password must not be empty");
+        }
+        if self.password.is_some() && self.username.is_none() {
+            return bad("smtp.password requires smtp.username");
+        }
+        if self.username.is_some() && self.password.is_none() {
+            return bad("smtp.username requires smtp.password");
+        }
+        if self.encryption == SmtpEncryption::None && self.username.is_some() {
+            return bad("smtp.encryption = \"none\" would send the password unencrypted");
+        }
+        Ok(())
     }
 }
 
@@ -364,6 +509,8 @@ impl Config {
         check_url("database.url", &self.database.url)?;
         check_url("metrics.url", &self.metrics.url)?;
         self.gitops.validate()?;
+        self.alerting.validate()?;
+        self.smtp.validate()?;
         Ok(())
     }
 }
@@ -758,6 +905,32 @@ mod tests {
     }
 
     #[test]
+    fn alerting_config_defaults_and_bounds() {
+        Jail::expect_with(|_| {
+            let cfg = load_gitops(&base_toml(DB, VM)).unwrap();
+            assert_eq!(cfg.alerting.max_value_age_secs, 300);
+            assert_eq!(cfg.alerting.nodata_check_secs, 15);
+            let with =
+                |extra: &str| load_gitops(&format!("{}[alerting]\n{extra}", base_toml(DB, VM)));
+            for (value, ok) in [(9, false), (10, true), (86_400, true), (86_401, false)] {
+                let result = with(&format!("max_value_age_secs = {value}\n"));
+                assert_eq!(result.is_ok(), ok, "max_value_age_secs {value}");
+                if !ok {
+                    assert!(invalid(result).contains("alerting.max_value_age_secs"));
+                }
+            }
+            for (value, ok) in [(4, false), (5, true), (300, true), (301, false)] {
+                let result = with(&format!("nodata_check_secs = {value}\n"));
+                assert_eq!(result.is_ok(), ok, "nodata_check_secs {value}");
+                if !ok {
+                    assert!(invalid(result).contains("alerting.nodata_check_secs"));
+                }
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
     fn interval_bounds() {
         Jail::expect_with(|_| {
             for (value, ok) in [(4, false), (5, true), (3600, true), (3601, false)] {
@@ -835,6 +1008,150 @@ mod tests {
             jail.set_env("CERBRIX_GITOPS__INTERVAL_SECS", "1");
             let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
             assert!(!msg.contains("ghp_ENVTOKEN"), "{msg}");
+            Ok(())
+        });
+    }
+
+    fn smtp_toml(extra: &str) -> String {
+        format!(
+            "{}[smtp]\nhost = \"mail.example.com\"\nfrom = \"cerbrix@example.com\"\n{extra}",
+            base_toml(DB, VM)
+        )
+    }
+
+    #[test]
+    fn smtp_disabled_by_default() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert!(!cfg.smtp.enabled());
+            assert_eq!(cfg.smtp.port, 587);
+            assert_eq!(cfg.smtp.encryption, SmtpEncryption::Starttls);
+            assert_eq!(cfg.smtp.timeout_secs, 15);
+            let cfg = load_gitops(&smtp_toml("")).unwrap();
+            assert!(cfg.smtp.enabled());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_requires_from() {
+        Jail::expect_with(|_| {
+            let toml = format!("{}[smtp]\nhost = \"mail.example.com\"\n", base_toml(DB, VM));
+            let msg = invalid(load_gitops(&toml));
+            assert!(msg.contains("smtp.from"), "{msg}");
+            let toml = format!(
+                "{}[smtp]\nhost = \"mail.example.com\"\nfrom = \"not an address\"\n",
+                base_toml(DB, VM)
+            );
+            let msg = invalid(load_gitops(&toml));
+            assert!(msg.contains("smtp.from"), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_password_requires_username() {
+        Jail::expect_with(|_| {
+            let msg = invalid(load_gitops(&smtp_toml("password = \"pw-SECRET\"\n")));
+            assert!(
+                msg.contains("smtp.password requires smtp.username"),
+                "{msg}"
+            );
+            assert!(!msg.contains("pw-SECRET"), "{msg}");
+            let msg = invalid(load_gitops(&smtp_toml("username = \"bob\"\n")));
+            assert!(
+                msg.contains("smtp.username requires smtp.password"),
+                "{msg}"
+            );
+            let msg = invalid(load_gitops(&smtp_toml(
+                "username = \"bob\"\npassword = \"\"\n",
+            )));
+            assert!(msg.contains("smtp.password must not be empty"), "{msg}");
+            let ok = smtp_toml("username = \"bob\"\npassword = \"pw\"\n");
+            assert!(load_gitops(&ok).is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_none_with_credentials_rejected() {
+        Jail::expect_with(|_| {
+            let toml =
+                smtp_toml("encryption = \"none\"\nusername = \"bob\"\npassword = \"pw-SECRET\"\n");
+            let msg = invalid(load_gitops(&toml));
+            assert!(
+                msg.contains("smtp.encryption = \"none\" would send the password unencrypted"),
+                "{msg}"
+            );
+            assert!(!msg.contains("pw-SECRET"), "{msg}");
+            assert!(load_gitops(&smtp_toml("encryption = \"none\"\n")).is_ok());
+            assert!(load_gitops(&smtp_toml("encryption = \"tls\"\n")).is_ok());
+            let msg = invalid(load_gitops(&smtp_toml("encryption = \"ssl\"\n")));
+            assert!(msg.contains("encryption"), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_debug_redacts_password() {
+        Jail::expect_with(|_| {
+            let toml = smtp_toml("username = \"bob\"\npassword = \"pw-SECRET\"\n");
+            let cfg = load_gitops(&toml).unwrap();
+            let shown = format!("{cfg:?} {:?}", cfg.smtp);
+            assert!(!shown.contains("pw-SECRET"), "{shown}");
+            assert!(shown.contains("password: <redacted>"), "{shown}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_password_is_not_echoed_in_errors() {
+        Jail::expect_with(|jail| {
+            // Wrong type.
+            let msg = invalid(load_gitops(&smtp_toml("password = 8675309\n")));
+            assert!(!msg.contains("8675309"), "{msg}");
+            assert!(msg.contains("smtp.password"), "{msg}");
+            // Syntax error on the password line.
+            let msg = invalid(load_gitops(&smtp_toml("password = \"pw-SECRET\n")));
+            assert!(!msg.contains("pw-SECRET"), "{msg}");
+            // Wrong type elsewhere while the password comes from the environment.
+            jail.create_file("cerbrix.toml", &smtp_toml("username = \"bob\"\n"))?;
+            jail.set_env("CERBRIX_SMTP__PASSWORD", "pw-ENVSECRET");
+            jail.set_env("CERBRIX_SMTP__PORT", "ENVSECRET");
+            let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
+            assert!(
+                !msg.contains("ENVSECRET") && !msg.contains("pw-ENVSECRET"),
+                "{msg}"
+            );
+            // A validation failure while the password is set.
+            jail.set_env("CERBRIX_SMTP__PORT", "0");
+            let msg = invalid(Config::load(Some(Path::new("cerbrix.toml"))));
+            assert!(msg.contains("smtp.port"), "{msg}");
+            assert!(!msg.contains("pw-ENVSECRET"), "{msg}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_password_from_environment() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &smtp_toml("username = \"bob\"\n"))?;
+            jail.set_env("CERBRIX_SMTP__PASSWORD", "pw-ENVSECRET");
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert_eq!(cfg.smtp.password.as_deref(), Some("pw-ENVSECRET"));
+            assert!(!format!("{cfg:?}").contains("pw-ENVSECRET"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_timeout_bounds() {
+        Jail::expect_with(|_| {
+            for (value, ok) in [(0, false), (1, true), (120, true), (121, false)] {
+                let toml = smtp_toml(&format!("timeout_secs = {value}\n"));
+                assert_eq!(load_gitops(&toml).is_ok(), ok, "timeout {value}");
+            }
             Ok(())
         });
     }

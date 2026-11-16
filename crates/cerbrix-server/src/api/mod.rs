@@ -1,12 +1,15 @@
 //! HTTP API. `agent` holds the routes the agents call.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use cerbrix_common::ErrorBody;
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::metrics::MetricsStore;
@@ -15,12 +18,53 @@ use crate::state::StateStore;
 mod agent;
 
 /// Shared handles of the API. Everything in it is a connection handle or read-only
-/// configuration; no request data is kept here.
+/// configuration; no request data is kept here. The one exception is `warnings`, which
+/// only limits how often a log line is written; no decision depends on it.
 #[derive(Clone)]
 pub struct AppState {
     pub store: StateStore,
     pub metrics: Arc<dyn MetricsStore>,
     pub config: Arc<Config>,
+    pub warnings: Arc<WarnLimiter>,
+    /// Whether problems queue e-mail: true when an SMTP server is configured.
+    pub queue_mail: bool,
+}
+
+/// Lets a warning through at most once per hour per host. Process-local and bounded: it
+/// is forgotten on restart and cleared when it holds more than `MAX_ENTRIES` hosts, which
+/// at worst repeats a log line.
+#[derive(Debug, Default)]
+pub struct WarnLimiter {
+    last: Mutex<HashMap<Uuid, Instant>>,
+}
+
+impl WarnLimiter {
+    const INTERVAL: Duration = Duration::from_secs(3600);
+    const MAX_ENTRIES: usize = 10_000;
+
+    /// True when the warning for `host` may be logged at `now`; records it if so.
+    pub fn should_warn(&self, host: Uuid, now: Instant) -> bool {
+        // The lock is never held across an await: this function is synchronous.
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(&at) = last.get(&host)
+            && now.saturating_duration_since(at) < Self::INTERVAL
+        {
+            return false;
+        }
+        if last.len() >= Self::MAX_ENTRIES {
+            last.clear();
+        }
+        last.insert(host, now);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
 }
 
 /// Builds the router for the agent-facing API.

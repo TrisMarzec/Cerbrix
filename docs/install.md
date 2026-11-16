@@ -207,6 +207,41 @@ configuration; an M1 server does not have that endpoint, so a new agent without 
 configuration measures nothing until its server is upgraded. An M1 agent keeps working against a
 new server with its local intervals until it is upgraded.
 
+## E-mail notifications
+
+The server sends an e-mail when a problem starts and another when it ends (see
+[Alerting](alerting.md)). E-mail is off until you set the address of a mail server in
+`deploy/server.env`; the example file has the settings, commented out:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CERBRIX_SMTP__HOST` | none (e-mail off) | Name of the mail server. |
+| `CERBRIX_SMTP__PORT` | `587` | 587 for `starttls`, 465 for `tls`. |
+| `CERBRIX_SMTP__ENCRYPTION` | `starttls` | `starttls`, `tls` or `none` (plain text, for a trusted local relay only; not allowed together with a user name and password). |
+| `CERBRIX_SMTP__FROM` | none | The sender, for example `Cerbrix <cerbrix@example.com>`. Required when a host is set. |
+| `CERBRIX_SMTP__USERNAME`, `CERBRIX_SMTP__PASSWORD` | none | Login; set both or neither. |
+| `CERBRIX_SMTP__TIMEOUT_SECS` | `15` | Seconds allowed for one message, 1 to 120. |
+
+Apply the settings with `docker compose up -d` and send a test message:
+
+```sh
+docker compose exec server cerbrix-server admin notify test you@example.com
+```
+
+Only the public certificate authorities are trusted for `starttls` and `tls`; a mail relay with a
+certificate from an internal CA cannot be used with them yet. Who receives which problem is set by
+the notification files in the configuration repository, see
+[Who is told](alerting.md#who-is-told-notification-rules). Two further settings, the age limit
+for values and the interval of the no-data check, are in
+[Settings for alerting](alerting.md#settings-for-alerting).
+
+**Upgrading from M2** (configuration from Git, no alerting): nothing to do. The server applies its
+database migration (new tables for problems and the e-mail queue) when it starts. Without SMTP
+settings it records problems but sends no e-mail; hosts with no-data triggers count silence from
+the start of the server, so the upgrade does not report any host as silent. If a host has an
+item-level no-data trigger without a host-level one, the configuration is now refused (Out Of
+Sync) until you add the host-level trigger; see [Alerting](alerting.md#when-data-stops-arriving).
+
 ## Making the server reachable for agents
 
 Agents require `https` by default, so before agents on other machines can connect you need
@@ -316,7 +351,7 @@ Then release the host on the server (`admin host release <name>`) if it will enr
 Git repository, enrols a locally built agent and checks that its values arrive in
 VictoriaMetrics. It then pushes a broken host file, checks that the installation reports
 `out of sync` while values keep arriving, and that reverting the commit makes it `in sync`
-again. It needs Docker, curl, git and a Rust toolchain; CI runs it on every push.
+again. It also checks alerting against a real mail server (Mailpit): a problem opens and is mailed, resolves and is mailed, an acknowledgement shows in the problem list, and a stopped agent is reported. It does not test TLS or a login at the mail server; use `admin notify test` for that. It needs Docker, curl, git and a Rust toolchain; CI runs it on every push.
 
 ## Troubleshooting
 

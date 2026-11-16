@@ -515,6 +515,27 @@ fn check_host(file: &str, host: &HostFile, effective: Option<&EffectiveHost>, is
             });
         }
     }
+
+    // A5: while a host is silent as a whole only a host-level no-data trigger can fire, so
+    // an item-level one without it would leave an agent outage without any problem.
+    let nodata: Vec<(&EffectiveTrigger, bool)> = effective
+        .triggers
+        .iter()
+        .filter_map(|t| match parse_trigger(&t.expression) {
+            Ok(TriggerExpr::NoData { selector, .. }) => Some((t, selector.is_some())),
+            _ => None,
+        })
+        .collect();
+    if !nodata.iter().any(|(_, item_level)| !item_level) {
+        for (trigger, _) in nodata.iter().filter(|(_, item_level)| *item_level) {
+            issues.add(Some(file), || {
+                format!(
+                    "trigger {:?} watches one item for missing data; add a host-level trigger such as \"no data for 5m\" so that an agent outage is one problem",
+                    trigger.name
+                )
+            });
+        }
+    }
 }
 
 fn check_notification(file: &str, n: &NotificationFile, issues: &mut Issues) {

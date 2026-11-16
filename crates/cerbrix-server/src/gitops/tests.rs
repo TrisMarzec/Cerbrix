@@ -682,3 +682,45 @@ fn agent_config_version_changes_with_items() {
     );
     assert_eq!(a.items.len(), 1);
 }
+
+fn nodata_host(triggers: &str) -> String {
+    host_json(&format!(
+        r#","items":[{{"key":"cpu.usage","interval":"1m"}}],"triggers":[{triggers}]"#
+    ))
+}
+
+const ITEM_NODATA: &str =
+    r#"{"name":"Cpu silent","expression":"cpu.usage no data for 5m","severity":"high"}"#;
+const HOST_NODATA: &str =
+    r#"{"name":"Agent silent","expression":"no data for 3m","severity":"critical"}"#;
+
+#[test]
+fn item_nodata_without_host_nodata_is_an_issue() {
+    let h = nodata_host(ITEM_NODATA);
+    let issues = issues_of(&[("hosts/web-01.json", &h)]);
+    assert_eq!(issues.len(), 1, "{issues:?}");
+    assert!(has_issue(
+        &issues,
+        "hosts/web-01.json",
+        "trigger \"Cpu silent\" watches one item for missing data; add a host-level trigger such as \"no data for 5m\" so that an agent outage is one problem"
+    ));
+}
+
+#[test]
+fn item_nodata_with_host_nodata_is_valid() {
+    let h = nodata_host(&format!("{ITEM_NODATA},{HOST_NODATA}"));
+    compile(&snap(&[("hosts/web-01.json", &h)])).unwrap_or_else(|i| panic!("{i:#?}"));
+}
+
+#[test]
+fn host_nodata_from_a_template_satisfies_the_rule() {
+    let tpl = format!(r#"{{"template":"a","triggers":[{HOST_NODATA}]}}"#);
+    let h = host_json(&format!(
+        r#","templates":["a"],"items":[{{"key":"cpu.usage","interval":"1m"}}],"triggers":[{ITEM_NODATA}]"#
+    ));
+    compile(&snap(&[
+        ("templates/a.json", &tpl),
+        ("hosts/web-01.json", &h),
+    ]))
+    .unwrap_or_else(|i| panic!("{i:#?}"));
+}

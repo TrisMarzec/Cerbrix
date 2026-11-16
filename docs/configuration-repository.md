@@ -85,7 +85,7 @@ A parameter value must not be empty and at most 256 bytes long. A host collects 
 that its files list, directly or through templates; there are no hidden defaults.
 
 A trigger entry has a `name`, an `expression` and a `severity`, one of `info`, `warning`,
-`high`, `critical`. See [Trigger expressions](#trigger-expressions).
+`high`, `critical`. See [Trigger expressions](#trigger-expressions). What the server does with a trigger (problems, e-mails, no-data detection) is described in [Alerting](alerting.md).
 
 ## Template files (`templates/`)
 
@@ -152,6 +152,8 @@ the result of the merge, with the origin (`host` or `template:<name>`) of every 
 | `email` | yes | At least one address, each with exactly one `@` and text on both sides. |
 | `min_severity` | yes | Problems of this severity or higher are sent. |
 | `groups` | no | Group names; the rule applies to hosts in these groups. |
+
+A rule applies to a problem when its severity is at least `min_severity` and the host is in all the listed groups (no `groups`: every host). How the e-mails look and what happens when the mail server is down is described in [Alerting](alerting.md#who-is-told-notification-rules); the SMTP server itself is set up in [E-mail notifications](install.md#e-mail-notifications).
 
 ## Dashboard files (`dashboards/`)
 
@@ -245,6 +247,8 @@ digits, `_` or `-`, starting with a letter or digit. Host names follow the rule 
 
 An expression is a condition on one item, or a check that data stopped arriving.
 
+A trigger opens a problem and sends an e-mail when the condition holds; see [Alerting](alerting.md) for how holding, instances and no-data detection work.
+
 ```
 expression  = comparison | no-data
 comparison  = selector operator number [ "for" duration ]
@@ -291,6 +295,12 @@ checks are:
 - Every template a host lists exists and is listed once; a host lists at most 32 templates.
 - No key or string value contains a control character.
 - Every trigger watches an item its host collects.
+- A host with an item-level no-data trigger (`cpu.usage no data for 5m`) also has a host-level one
+  (`no data for 3m`). An item-level trigger fires only for an item that stopped while the rest
+  of the host went on reporting; when the whole host is silent only the host-level trigger
+  fires, at its own window, so that an agent outage is one problem. Without it the outage would
+  give no problem at all. After a server start, no-data detection begins counting from that
+  start, so a restart never makes hosts look silent.
 - Notifications have at least one valid address.
 - Dashboards: at most 72 panels, panels inside the grid, no overlap (the first overlapping pair
   is reported), graph and value panels refer to existing hosts
