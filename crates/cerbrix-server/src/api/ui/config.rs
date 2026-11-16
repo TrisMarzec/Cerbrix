@@ -17,7 +17,7 @@ use crate::auth::{Admin, Operator, Viewer};
 use crate::gitops::SyncIssue;
 use crate::state::{
     EnrollmentKey, HostCounts, ProblemCounts, StateError, SyncChanges, SyncHistoryEntry,
-    SyncStatus, UnknownAgent,
+    UnknownAgent,
 };
 
 /// Most unknown agents the list shows.
@@ -82,11 +82,7 @@ async fn status(
         gitops: app.config.gitops.enabled,
         mail: app.queue_mail,
         sync: SyncOut {
-            status: match sync.status {
-                SyncStatus::Never => "never",
-                SyncStatus::InSync => "in_sync",
-                SyncStatus::OutOfSync => "out_of_sync",
-            },
+            status: sync.status.as_str(),
             active_commit: sync.active_commit,
             last_success_at: sync.last_success_at.map(rfc3339),
             last_attempt_at: sync.last_attempt_at.map(rfc3339),

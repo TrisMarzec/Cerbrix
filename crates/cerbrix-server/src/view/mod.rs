@@ -4,6 +4,7 @@
 //! displays all show [`host_state`].
 
 pub mod dashboard;
+pub mod display;
 pub mod series;
 
 use std::cmp::Reverse;

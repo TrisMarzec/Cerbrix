@@ -30,6 +30,15 @@ pub enum SyncStatus {
 }
 
 impl SyncStatus {
+    /// The name the API uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncStatus::Never => "never",
+            SyncStatus::InSync => "in_sync",
+            SyncStatus::OutOfSync => "out_of_sync",
+        }
+    }
+
     fn parse(s: &str) -> Result<Self, StateError> {
         match s {
             "never" => Ok(SyncStatus::Never),
@@ -423,6 +432,18 @@ impl StateStore {
             .execute(&mut *tx)
             .await?;
         }
+
+        // A display that is no longer in the revision loses its token.
+        let displays: Vec<&str> = compiled
+            .documents
+            .iter()
+            .filter(|d| d.kind.as_str() == "display")
+            .map(|d| d.id.as_str())
+            .collect();
+        sqlx::query("DELETE FROM display_tokens WHERE display_id <> ALL($1)")
+            .bind(&displays)
+            .execute(&mut *tx)
+            .await?;
 
         for set in [
             &mut changes.hosts,

@@ -3,6 +3,7 @@
 //! Enrolment keys and agent credentials are stored only as SHA-256 hashes.
 
 mod alerting;
+mod displays;
 mod enrollment;
 mod hosts;
 mod read;

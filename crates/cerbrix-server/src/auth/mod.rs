@@ -298,6 +298,87 @@ role_extractor!(
     Role::Admin
 );
 
+/// Who may read a display: a logged-in user of any role, or the display token of exactly
+/// that display. Only the guard of a `Access::Display` route creates it, so a display token
+/// is never accepted by `Viewer`, `Operator` or `Admin` or by any route that is not a
+/// display route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayAccess {
+    /// The display id of the request path.
+    pub display_id: String,
+    /// True when a display token let the request in, false for a logged-in user.
+    pub by_token: bool,
+}
+
+impl FromRequestParts<AppState> for DisplayAccess {
+    type Rejection = AuthError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _app: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<DisplayAccess>()
+            .cloned()
+            .ok_or(AuthError::Unauthorized {
+                clear_cookie: false,
+            })
+    }
+}
+
+/// The token of an `Authorization: Bearer <token>` header.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+}
+
+/// Resolves who calls a display route for the display `display_id`: a logged-in user (who
+/// wins when the request carries a session and a token), or else the display token of that
+/// display. An unknown or revoked token and the token of another display are the same 401.
+pub(crate) async fn authenticate_display(
+    app: &AppState,
+    headers: &HeaderMap,
+    display_id: &str,
+) -> Result<(Option<User>, DisplayAccess), AuthError> {
+    let mut clear = false;
+    if session_token(headers).is_some() {
+        match authenticate(app, headers).await {
+            Ok(user) => {
+                let access = DisplayAccess {
+                    display_id: display_id.to_owned(),
+                    by_token: false,
+                };
+                return Ok((Some(user), access));
+            }
+            Err(AuthError::Unauthorized { clear_cookie }) => clear = clear_cookie,
+            Err(e) => return Err(e),
+        }
+    }
+    let unauthorized = AuthError::Unauthorized {
+        clear_cookie: clear,
+    };
+    let Some(token) = bearer_token(headers) else {
+        return Err(unauthorized);
+    };
+    match app.store.display_for_token(token).await {
+        Ok(Some(owner)) if owner == display_id => Ok((
+            None,
+            DisplayAccess {
+                display_id: owner,
+                by_token: true,
+            },
+        )),
+        Ok(_) => Err(unauthorized),
+        Err(e) => {
+            tracing::error!(error = %e, "display token lookup failed");
+            Err(AuthError::Internal)
+        }
+    }
+}
+
 /// Deletes expired sessions immediately and then every `every` until `shutdown` is
 /// cancelled. A failed run is logged and tried again at the next tick.
 pub async fn run_session_cleanup_loop(

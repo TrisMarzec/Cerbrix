@@ -9,7 +9,9 @@
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Query, Request, State};
+use axum::extract::{
+    DefaultBodyLimit, FromRequest, FromRequestParts, Query, RawPathParams, Request, State,
+};
 use axum::handler::Handler;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -20,10 +22,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, AppState};
-use crate::auth::{AuthError, AuthedUser, Role, authenticate, require};
+use crate::auth::{AuthError, AuthedUser, Role, authenticate, authenticate_display, require};
 
 mod config;
 mod dashboards;
+mod displays;
 mod hosts;
 mod problems;
 mod session;
@@ -32,9 +35,7 @@ mod users;
 /// Largest request body of a UI route.
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// Who may call a route. `Operator`, `Admin` and `Display` are used by the routes of later
-/// tasks.
-#[allow(dead_code)]
+/// Who may call a route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Access {
     /// Anyone; only the login.
@@ -42,8 +43,8 @@ pub(crate) enum Access {
     Viewer,
     Operator,
     Admin,
-    /// A display token (arrives with the display endpoints). Until then the guard refuses
-    /// every request to such a route.
+    /// A logged-in user of any role, or the token of the display named by `{id}` in the
+    /// path. The only access that takes a display token; the guard decides, not the handler.
     Display,
 }
 
@@ -79,6 +80,15 @@ pub(crate) const ROUTES: &[(&str, &str, Access)] = &[
     ("POST", "/api/v1/problems/{id}/close", Access::Operator),
     ("GET", "/api/v1/dashboards", Access::Viewer),
     ("GET", "/api/v1/dashboards/{id}", Access::Viewer),
+    ("GET", "/api/v1/displays", Access::Viewer),
+    ("POST", "/api/v1/displays/{id}/token", Access::Admin),
+    ("DELETE", "/api/v1/displays/{id}/token", Access::Admin),
+    ("GET", "/api/v1/display/{id}", Access::Display),
+    (
+        "GET",
+        "/api/v1/display/{id}/dashboards/{dashboard}",
+        Access::Display,
+    ),
     ("GET", "/api/v1/status", Access::Viewer),
     ("GET", "/api/v1/sync/history", Access::Viewer),
     ("GET", "/api/v1/unknown-agents", Access::Operator),
@@ -132,6 +142,7 @@ fn entries() -> Vec<Entry> {
     all.extend(hosts::entries());
     all.extend(problems::entries());
     all.extend(dashboards::entries());
+    all.extend(displays::entries());
     all.extend(config::entries());
     all.extend(users::entries());
     all
@@ -167,12 +178,35 @@ struct Guard {
 async fn guard(State(guard): State<Guard>, mut req: Request, next: Next) -> Response {
     let user = match guard.access {
         Access::Public => return next.run(req).await,
-        // No display endpoint exists yet: fail closed.
+        // The only access that looks at a display token, and only for the display id in the
+        // path: every other access never reads the `Authorization` header.
         Access::Display => {
-            return AuthError::Unauthorized {
-                clear_cookie: false,
+            let (mut parts, body) = req.into_parts();
+            let id = RawPathParams::from_request_parts(&mut parts, &())
+                .await
+                .ok()
+                .and_then(|params| {
+                    params
+                        .iter()
+                        .find(|(name, _)| *name == "id")
+                        .map(|(_, value)| value.to_owned())
+                });
+            let Some(id) = id else {
+                return AuthError::Unauthorized {
+                    clear_cookie: false,
+                }
+                .into_response();
+            };
+            match authenticate_display(&guard.app, &parts.headers, &id).await {
+                Ok((user, access)) => {
+                    parts.extensions.insert(access);
+                    if let Some(user) = user {
+                        parts.extensions.insert(AuthedUser(user));
+                    }
+                    return next.run(Request::from_parts(parts, body)).await;
+                }
+                Err(e) => return e.into_response(),
             }
-            .into_response();
         }
         Access::Viewer | Access::Operator | Access::Admin => {
             let min = guard.access.role().unwrap_or(Role::Admin);
@@ -452,6 +486,9 @@ pub(crate) mod testing {
     /// The id of the dashboard `ensure_dashboard` stores.
     pub const FIXTURE_DASHBOARD: &str = "fixture-board";
 
+    /// The id of the display `ensure_display` stores.
+    pub const FIXTURE_DISPLAY: &str = "fixture-wall";
+
     pub fn config(insecure_http: bool, secure_cookie: Option<bool>) -> Arc<Config> {
         Arc::new(Config {
             server: ServerConfig {
@@ -548,6 +585,9 @@ pub(crate) mod testing {
         /// The id `fill` puts into `{id}` of the dashboard route. The dashboard exists only
         /// after `ensure_dashboard`.
         pub dashboard: &'static str,
+        /// The id `fill` puts into `{id}` of the display routes. The display exists only after
+        /// `ensure_display`; it shows the fixture dashboard.
+        pub display: &'static str,
     }
 
     impl Fixture {
@@ -599,6 +639,7 @@ pub(crate) mod testing {
                 problem: Uuid::new_v4(),
                 key: Uuid::new_v4(),
                 dashboard: FIXTURE_DASHBOARD,
+                display: FIXTURE_DISPLAY,
             }
         }
 
@@ -673,6 +714,42 @@ pub(crate) mod testing {
             .unwrap();
         }
 
+        /// Stores the display `fill` puts into `{id}` of the display routes: it shows the
+        /// fixture dashboard and switches to a dashboard on a critical alarm.
+        pub async fn ensure_display(&self) {
+            sqlx::query(
+                "INSERT INTO config_documents (kind, id, source_file, body) \
+                 VALUES ('display', $1, 'displays/fixture-wall.json', \
+                 '{\"name\": \"Fixture wall\", \"show\": {\"dashboard\": \"fixture-board\"}, \
+                 \"switch_on_alarm\": {\"min_severity\": \"critical\"}}'::jsonb)",
+            )
+            .bind(self.display)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
+        /// A new token of the fixture display (an older one stops working).
+        pub async fn display_token(&self) -> String {
+            self.store
+                .create_display_token(self.display, OffsetDateTime::now_utc())
+                .await
+                .unwrap()
+        }
+
+        /// Sends a GET with a display token in the `Authorization` header, no session.
+        pub async fn call_with_token(&self, uri: &str, token: &str) -> Reply {
+            let bearer = format!("Bearer {token}");
+            self.call(
+                "GET",
+                uri,
+                None,
+                &[("authorization", bearer.as_str())],
+                None,
+            )
+            .await
+        }
+
         /// Applies the example configuration repository (`web-01`, `db-01`, the dashboard
         /// `production`).
         pub async fn apply_example(&self) {
@@ -706,7 +783,13 @@ pub(crate) mod testing {
         /// Fills the path parameters of a route pattern with ids that exist in the fixture.
         /// A later task that adds a route with a parameter adds the parameter here.
         pub fn fill(&self, pattern: &str) -> String {
-            let id = if pattern.starts_with("/api/v1/problems/") {
+            let id = if pattern.starts_with("/api/v1/display/")
+                || pattern.starts_with("/api/v1/displays/")
+            {
+                return pattern
+                    .replace("{id}", self.display)
+                    .replace("{dashboard}", self.dashboard);
+            } else if pattern.starts_with("/api/v1/problems/") {
                 self.problem
             } else if pattern.starts_with("/api/v1/enrollment-keys/") {
                 self.key
@@ -909,13 +992,16 @@ mod tests {
     enum Caller {
         Nobody,
         Role(Role),
+        /// The token of the fixture display, in the `Authorization` header.
+        DisplayToken,
     }
 
     fn allowed(access: Access, caller: Caller) -> bool {
         match (access, caller) {
             (Access::Public, _) => true,
-            (Access::Display, _) => false,
-            (_, Caller::Nobody) => false,
+            (Access::Display, Caller::Nobody) => false,
+            (Access::Display, _) => true,
+            (_, Caller::Nobody | Caller::DisplayToken) => false,
             (access, Caller::Role(role)) => access.role().is_some_and(|min| role >= min),
         }
     }
@@ -930,6 +1016,7 @@ mod tests {
         fx.ensure_problem().await;
         fx.ensure_key().await;
         fx.ensure_dashboard().await;
+        fx.ensure_display().await;
         for (method, pattern, access) in ROUTES {
             let path = fx.fill(pattern);
             for caller in [
@@ -937,14 +1024,27 @@ mod tests {
                 Caller::Role(Role::Viewer),
                 Caller::Role(Role::Operator),
                 Caller::Role(Role::Admin),
+                Caller::DisplayToken,
             ] {
                 // A fresh session per request: some routes (logout) end the one they use.
                 let token = match caller {
-                    Caller::Nobody => None,
+                    Caller::Nobody | Caller::DisplayToken => None,
                     Caller::Role(role) => Some(fx.session(role).await),
                 };
+                // A display token is created again for every request too: the route that
+                // creates one replaces it.
+                let bearer = match caller {
+                    Caller::DisplayToken => Some(format!("Bearer {}", fx.display_token().await)),
+                    _ => None,
+                };
+                let headers: Vec<(&str, &str)> = bearer
+                    .iter()
+                    .map(|b| ("authorization", b.as_str()))
+                    .collect();
                 let body = matches!(*method, "POST" | "PUT" | "PATCH").then_some("{}");
-                let reply = fx.call(method, &path, token.as_deref(), &[], body).await;
+                let reply = fx
+                    .call(method, &path, token.as_deref(), &headers, body)
+                    .await;
                 let what = format!("{method} {pattern} as {caller:?}: {}", reply.status);
                 if allowed(*access, caller) {
                     assert_ne!(reply.status, StatusCode::UNAUTHORIZED, "{what}");
@@ -952,7 +1052,7 @@ mod tests {
                     // 404 and 405 would mean the table lists a route that is not served.
                     assert_ne!(reply.status, StatusCode::NOT_FOUND, "{what}");
                     assert_ne!(reply.status, StatusCode::METHOD_NOT_ALLOWED, "{what}");
-                } else if caller == Caller::Nobody || *access == Access::Display {
+                } else if matches!(caller, Caller::Nobody | Caller::DisplayToken) {
                     assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{what}");
                     assert_eq!(reply.error_code(), "unauthorized", "{what}");
                 } else {

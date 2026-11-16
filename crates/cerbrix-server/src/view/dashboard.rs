@@ -95,6 +95,15 @@ fn class_of(host: &HostRow) -> Class {
 /// and start.
 type Urgent = Option<(Severity, OffsetDateTime)>;
 
+/// How urgent a problem is, for sorting: the smaller, the more urgent. More severe first,
+/// then the older. The start page and the alarm target of a wall display both order by this.
+pub fn urgency(
+    severity: Severity,
+    started_at: OffsetDateTime,
+) -> (Reverse<Severity>, OffsetDateTime) {
+    (Reverse(severity), started_at)
+}
+
 /// The counts of the selected hosts and their most urgent unacknowledged problem.
 fn count(
     hosts: &[&HostRow],
@@ -118,7 +127,7 @@ fn count(
             if p.acknowledged_at.is_none() {
                 unacknowledged.add(p.severity);
                 let worse = urgent.is_none_or(|(severity, started)| {
-                    (Reverse(p.severity), p.started_at) < (Reverse(severity), started)
+                    urgency(p.severity, p.started_at) < urgency(severity, started)
                 });
                 if worse {
                     urgent = Some((p.severity, p.started_at));
@@ -159,7 +168,7 @@ pub fn summaries(inputs: &BoardInputs) -> Vec<DashboardSummary> {
         (
             urgent.is_none(),
             Reverse(s.priority),
-            urgent.map(|(severity, started)| (Reverse(severity), started)),
+            urgent.map(|(severity, started)| urgency(severity, started)),
             s.name.clone(),
             s.id.clone(),
         )

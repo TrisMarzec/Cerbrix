@@ -304,19 +304,24 @@ async fn latest_value(
     }
 }
 
-/// Everything one dashboard shows. An unknown id, or one that cannot be a dashboard id, is a
-/// 404.
+/// Everything one dashboard shows.
 async fn detail(
     State(app): State<AppState>,
     Viewer(_): Viewer,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    if validate_name(&id).is_err() {
+    answer(&app, &id).await
+}
+
+/// The answer of the dashboard route, also given to a wall display through its own route.
+/// An unknown id, or one that cannot be a dashboard id, is a 404.
+pub(super) async fn answer(app: &AppState, id: &str) -> Result<Response, ApiError> {
+    if validate_name(id).is_err() {
         return Err(not_found());
     }
     let board = app
         .store
-        .dashboard_hosts(&id)
+        .dashboard_hosts(id)
         .await
         .map_err(|e| store_failed("reading a dashboard failed", &e))?
         .ok_or_else(not_found)?;
@@ -359,7 +364,7 @@ async fn detail(
     let rendered = join_all(panels.iter().map(|panel| render(&ctx, panel))).await;
     let metrics_available = rendered.iter().all(|(_, ok)| *ok);
     Ok(Json(DetailOut {
-        id: &id,
+        id,
         name: &board.dashboard.name,
         file: &board.file,
         priority: board.dashboard.priority,
