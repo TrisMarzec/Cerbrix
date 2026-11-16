@@ -526,6 +526,33 @@ impl StateStore {
             .collect())
     }
 
+    /// One page of the applied revisions, newest first, and the number of all of them.
+    pub async fn sync_history_page(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<SyncHistoryEntry>, i64), StateError> {
+        let rows: Vec<(String, OffsetDateTime, Json<SyncChanges>)> = sqlx::query_as(
+            "SELECT commit, applied_at, changes FROM sync_history \n             ORDER BY id DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM sync_history")
+            .fetch_one(&self.pool)
+            .await?;
+        let items = rows
+            .into_iter()
+            .map(|(commit, applied_at, changes)| SyncHistoryEntry {
+                commit,
+                applied_at,
+                changes: changes.0,
+            })
+            .collect();
+        Ok((items, total))
+    }
+
     /// The effective configuration of an active host synced from Git.
     pub async fn host_config(&self, host_id: Uuid) -> Result<Option<EffectiveHost>, StateError> {
         let row: Option<Option<Json<EffectiveHost>>> =

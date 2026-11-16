@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use super::{ApiError, AppState};
 use crate::auth::{AuthError, AuthedUser, Role, authenticate, require};
 
+mod config;
 mod hosts;
 mod problems;
 mod session;
@@ -75,6 +76,14 @@ pub(crate) const ROUTES: &[(&str, &str, Access)] = &[
     // The matrix posts `{}`: an acknowledgement with no comment succeeds, closing needs a
     // comment and answers 400, so the fixture problem is still there for every later row.
     ("POST", "/api/v1/problems/{id}/close", Access::Operator),
+    ("GET", "/api/v1/status", Access::Viewer),
+    ("GET", "/api/v1/sync/history", Access::Viewer),
+    ("GET", "/api/v1/unknown-agents", Access::Operator),
+    ("GET", "/api/v1/enrollment-keys", Access::Admin),
+    ("POST", "/api/v1/enrollment-keys", Access::Admin),
+    // The matrix deletes (revokes) the fixture's key here; a second revocation is a 204 too.
+    ("DELETE", "/api/v1/enrollment-keys/{id}", Access::Admin),
+    ("POST", "/api/v1/hosts/{name}/release", Access::Admin),
     ("GET", "/api/v1/users", Access::Admin),
     ("POST", "/api/v1/users", Access::Admin),
     ("PATCH", "/api/v1/users/{id}", Access::Admin),
@@ -119,6 +128,7 @@ fn entries() -> Vec<Entry> {
     all.extend(session::entries());
     all.extend(hosts::entries());
     all.extend(problems::entries());
+    all.extend(config::entries());
     all.extend(users::entries());
     all
 }
@@ -499,6 +509,9 @@ pub(crate) mod testing {
         /// The id `fill` puts into `{id}` of the problems routes. The problem exists only after
         /// `ensure_problem`: hosts lists and the like see no problem unless a test asks.
         pub problem: Uuid,
+        /// The id `fill` puts into `{id}` of the enrolment key route. The key exists only
+        /// after `ensure_key`.
+        pub key: Uuid,
     }
 
     impl Fixture {
@@ -548,6 +561,7 @@ pub(crate) mod testing {
                 subject: ids[3],
                 host: FIXTURE_HOST,
                 problem: Uuid::new_v4(),
+                key: Uuid::new_v4(),
             }
         }
 
@@ -596,11 +610,27 @@ pub(crate) mod testing {
             .unwrap();
         }
 
+        /// Creates the enrolment key `fill` puts into `{id}` of the enrolment key route.
+        pub async fn ensure_key(&self) {
+            sqlx::query(
+                "INSERT INTO enrollment_keys (id, key_hash, description, expires_at) \
+                 VALUES ($1, $2, 'fixture key', $3)",
+            )
+            .bind(self.key)
+            .bind(&tokens::hash(&tokens::generate("cbx_ek_"))[..])
+            .bind(OffsetDateTime::now_utc() + Duration::hours(1))
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
         /// Fills the path parameters of a route pattern with ids that exist in the fixture.
         /// A later task that adds a route with a parameter adds the parameter here.
         pub fn fill(&self, pattern: &str) -> String {
             let id = if pattern.starts_with("/api/v1/problems/") {
                 self.problem
+            } else if pattern.starts_with("/api/v1/enrollment-keys/") {
+                self.key
             } else {
                 self.subject
             };
@@ -817,6 +847,7 @@ mod tests {
     async fn access_matrix(pool: PgPool) {
         let fx = Fixture::new(pool).await;
         fx.ensure_problem().await;
+        fx.ensure_key().await;
         for (method, pattern, access) in ROUTES {
             let path = fx.fill(pattern);
             for caller in [

@@ -346,6 +346,16 @@ pub struct ProblemCounts {
     pub info: SeverityCount,
 }
 
+/// The active hosts by their open problems.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct HostCounts {
+    pub total: i64,
+    pub with_problems: i64,
+    pub without_problems: i64,
+    /// Active hosts that never sent a value.
+    pub never_seen: i64,
+}
+
 /// The rank of a severity in SQL: critical 3, high 2, warning 1, info 0.
 fn severity_rank(s: Severity) -> i32 {
     match s {
@@ -447,6 +457,22 @@ impl StateStore {
             .fetch_optional(&self.pool)
             .await?;
         row.map(problem_from).transpose()
+    }
+
+    /// The active hosts, those with an open problem and those that never sent a value: one
+    /// query.
+    pub async fn host_counts(&self) -> Result<HostCounts, StateError> {
+        let (total, with_problems, never_seen): (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*), \n             count(*) FILTER (WHERE EXISTS (SELECT 1 FROM problems p \n                              WHERE p.host_id = h.id AND p.resolved_at IS NULL)), \n             count(*) FILTER (WHERE h.last_seen_at IS NULL) \n             FROM hosts h WHERE h.active",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(HostCounts {
+            total,
+            with_problems,
+            without_problems: total - with_problems,
+            never_seen,
+        })
     }
 
     /// The open problems per severity: how many, and how many of them are unacknowledged.

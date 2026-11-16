@@ -13,9 +13,9 @@ pub use alerting::{
     AlertContext, LEASE_SECS, OldestPending, OutboxItem, OutboxSummary, Problem, ProblemEvent,
     ProblemFilter,
 };
-pub use enrollment::UnknownAgent;
+pub use enrollment::{EnrollmentKey, UnknownAgent};
 pub use read::{
-    HostDetail, HostQuery, HostRow, HostStateFilter, ProblemCounts, ProblemQuery,
+    HostCounts, HostDetail, HostQuery, HostRow, HostStateFilter, ProblemCounts, ProblemQuery,
     ProblemStateFilter, SeverityCount,
 };
 pub use sync::{
