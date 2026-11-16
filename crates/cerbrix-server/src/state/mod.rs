@@ -6,6 +6,7 @@ mod alerting;
 mod enrollment;
 mod hosts;
 mod sync;
+mod users;
 
 pub use alerting::{
     AlertContext, LEASE_SECS, OldestPending, OutboxItem, OutboxSummary, Problem, ProblemEvent,
@@ -16,6 +17,7 @@ pub use sync::{
     Applied, ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock,
     SyncState, SyncStatus,
 };
+pub use users::User;
 
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;

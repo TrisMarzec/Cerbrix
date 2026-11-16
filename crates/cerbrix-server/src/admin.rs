@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::alerting::channel::{Channel, SmtpChannel};
 use crate::alerting::message::{reason_text, rfc3339, severity_word};
 use crate::alerting::{EventKind, Notification};
+use crate::auth::{Role, generate_password, hash_password, validate_password, validate_user_name};
 use crate::config::{Config, SmtpConfig};
 use crate::gitops::{format_issue, replace_control};
 use crate::state::{Problem, ProblemFilter, StateError, StateStore, SyncChanges, SyncStatus};
@@ -35,6 +36,57 @@ pub enum AdminCommand {
     Notify(NotifyCommand),
     /// List agents that tried to enrol under an unknown name.
     UnknownAgents,
+    /// Manage the users of the web UI.
+    #[command(subcommand)]
+    User(UserCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UserCommand {
+    /// Create a user. Without --password-stdin a password is generated and printed once.
+    Create {
+        /// Lower case letters, digits, '.', '_' and '-'.
+        name: String,
+        #[arg(long)]
+        role: Role,
+        /// Read the password from the first line of standard input.
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// List the users.
+    List,
+    /// Change the role of a user; ends the user's sessions.
+    SetRole { name: String, role: Role },
+    /// Disable a user; ends the user's sessions.
+    Disable { name: String },
+    /// Enable a disabled user.
+    Enable { name: String },
+    /// Set a new password; ends the user's sessions. Without --password-stdin a password is
+    /// generated and printed once.
+    ResetPassword {
+        name: String,
+        /// Read the password from the first line of standard input.
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Delete a user.
+    Delete { name: String },
+}
+
+impl UserCommand {
+    /// True when the command takes the password from standard input.
+    pub fn reads_password_stdin(&self) -> bool {
+        matches!(
+            self,
+            UserCommand::Create {
+                password_stdin: true,
+                ..
+            } | UserCommand::ResetPassword {
+                password_stdin: true,
+                ..
+            }
+        )
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -361,6 +413,129 @@ pub async fn run(
                 )?;
             }
             Ok(out)
+        }
+        // Without the password text of standard input; `main` supplies it through `run_user`.
+        AdminCommand::User(command) => run_user(store, command, None, now).await,
+    }
+}
+
+/// Strips one trailing `\n` or `\r\n` from a line read from standard input and nothing else.
+pub fn password_from_line(line: &str) -> &str {
+    line.strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(line)
+}
+
+/// Runs a `user` command. `stdin_password` is the first line of standard input (as read by
+/// the binary) and is used when the command has `--password-stdin`. The generated password
+/// is part of the returned text only for `create` and `reset-password` without the flag;
+/// it is never logged.
+pub async fn run_user(
+    store: &StateStore,
+    command: UserCommand,
+    stdin_password: Option<String>,
+    now: OffsetDateTime,
+) -> anyhow::Result<String> {
+    let find = async |name: &str| {
+        store
+            .user_by_name(name)
+            .await?
+            .ok_or_else(|| anyhow!("user {name:?} not found"))
+    };
+    // The chosen password, validated, or a generated one; the flag says which.
+    let choose = |from_stdin: bool| -> anyhow::Result<(String, bool)> {
+        if from_stdin {
+            let password = stdin_password
+                .clone()
+                .ok_or_else(|| anyhow!("no password was read from standard input"))?;
+            validate_password(&password).map_err(|e| anyhow!("{e}"))?;
+            Ok((password, false))
+        } else {
+            Ok((generate_password(), true))
+        }
+    };
+    match command {
+        UserCommand::Create {
+            name,
+            role,
+            password_stdin,
+        } => {
+            validate_user_name(&name).map_err(|e| anyhow!("{e}"))?;
+            let (password, generated) = choose(password_stdin)?;
+            let hash = hash_password(password.clone()).await?;
+            let user = store
+                .create_user(&name, role, &hash, now)
+                .await
+                .with_context(|| format!("cannot create user {name:?}"))?;
+            let mut out = format!("user {} created with role {}", user.name, user.role);
+            if generated {
+                write!(out, "\npassword: {password}")?;
+            }
+            Ok(out)
+        }
+        UserCommand::List => {
+            let users = store.users().await?;
+            if users.is_empty() {
+                return Ok("no users".to_owned());
+            }
+            let lines = users
+                .iter()
+                .map(|u| {
+                    Ok(format!(
+                        "{} {} {} {}",
+                        u.name,
+                        u.role,
+                        if u.disabled { "disabled" } else { "enabled" },
+                        u.created_at
+                            .to_offset(time::UtcOffset::UTC)
+                            .format(&Rfc3339)?
+                    ))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(lines.join("\n"))
+        }
+        UserCommand::SetRole { name, role } => {
+            let user = find(&name).await?;
+            store
+                .set_user_role(user.id, role)
+                .await
+                .with_context(|| format!("cannot change the role of user {name:?}"))?;
+            Ok(format!("user {name} now has role {role}"))
+        }
+        UserCommand::Disable { name } => {
+            let user = find(&name).await?;
+            store
+                .set_user_disabled(user.id, true)
+                .await
+                .with_context(|| format!("cannot disable user {name:?}"))?;
+            Ok(format!("user {name} disabled"))
+        }
+        UserCommand::Enable { name } => {
+            let user = find(&name).await?;
+            store.set_user_disabled(user.id, false).await?;
+            Ok(format!("user {name} enabled"))
+        }
+        UserCommand::ResetPassword {
+            name,
+            password_stdin,
+        } => {
+            let user = find(&name).await?;
+            let (password, generated) = choose(password_stdin)?;
+            let hash = hash_password(password.clone()).await?;
+            store.set_user_password(user.id, &hash, now).await?;
+            let mut out = format!("password of user {name} changed");
+            if generated {
+                write!(out, "\npassword: {password}")?;
+            }
+            Ok(out)
+        }
+        UserCommand::Delete { name } => {
+            let user = find(&name).await?;
+            store
+                .delete_user(user.id)
+                .await
+                .with_context(|| format!("cannot delete user {name:?}"))?;
+            Ok(format!("user {name} deleted"))
         }
     }
 }
@@ -1251,5 +1426,216 @@ mod tests {
              oldest pending: 2027-01-15T08:00:02Z to ops@example.com, 1 attempts, \
              last error: connection refused"
         );
+    }
+
+    fn user_cmd(args: &[&str]) -> UserCommand {
+        use clap::Parser as _;
+        #[derive(Debug, clap::Parser)]
+        struct Wrapper {
+            #[command(subcommand)]
+            command: UserCommand,
+        }
+        Wrapper::try_parse_from(std::iter::once("user").chain(args.iter().copied()))
+            .unwrap()
+            .command
+    }
+
+    async fn run_user_cmd(
+        store: &StateStore,
+        args: &[&str],
+        password: Option<&str>,
+    ) -> anyhow::Result<String> {
+        run_user(store, user_cmd(args), password.map(str::to_owned), now()).await
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn user_create_prints_password_once(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        let out = run_user_cmd(&store, &["create", "t.marzec", "--role", "admin"], None)
+            .await
+            .unwrap();
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some("user t.marzec created with role admin"));
+        let password = lines
+            .next()
+            .unwrap()
+            .strip_prefix("password: ")
+            .unwrap()
+            .to_owned();
+        assert_eq!(lines.next(), None);
+        assert_eq!(password.chars().count(), 20);
+        let user = store.user_by_name("t.marzec").await.unwrap().unwrap();
+        let stored = store.user_password_hash(user.id).await.unwrap().unwrap();
+        assert_ne!(stored, password);
+        assert!(!stored.contains(&password));
+        assert!(crate::auth::verify_password(password.clone(), stored).await);
+        // The listing never shows it.
+        let list = run_user_cmd(&store, &["list"], None).await.unwrap();
+        assert!(!list.contains(&password));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn user_create_with_stdin_password_prints_no_password(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        let secret = "an-entered-passphrase";
+        let out = run_user_cmd(
+            &store,
+            &["create", "amy", "--role", "viewer", "--password-stdin"],
+            Some(secret),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "user amy created with role viewer");
+        let user = store.user_by_name("amy").await.unwrap().unwrap();
+        let stored = store.user_password_hash(user.id).await.unwrap().unwrap();
+        assert!(crate::auth::verify_password(secret.to_owned(), stored).await);
+
+        // A too short password is refused without echoing it, and creates nothing.
+        let err = run_user_cmd(
+            &store,
+            &["create", "bob", "--role", "viewer", "--password-stdin"],
+            Some("short"),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("at least 12"), "{err:#}");
+        assert!(!format!("{err:#}").contains("short"), "{err:#}");
+        assert!(store.user_by_name("bob").await.unwrap().is_none());
+
+        // The flag without a password text (the binary supplies it) is an error.
+        assert!(
+            run_user_cmd(
+                &store,
+                &["create", "bob", "--role", "viewer", "--password-stdin"],
+                None
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn password_line_from_stdin_text() {
+        assert_eq!(password_from_line("secret\n"), "secret");
+        assert_eq!(password_from_line("secret\r\n"), "secret");
+        assert_eq!(password_from_line("secret"), "secret");
+        // Only one line ending is removed; spaces and further line ends are part of it.
+        assert_eq!(password_from_line(" secret \n"), " secret ");
+        assert_eq!(password_from_line("secret\n\n"), "secret\n");
+        assert_eq!(password_from_line("secret\r\r\n"), "secret\r");
+        assert_eq!(password_from_line(""), "");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn user_create_rejects_a_bad_name_and_a_taken_name(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        let err = run_user_cmd(&store, &["create", "Admin", "--role", "admin"], None)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("invalid user name"), "{err:#}");
+        assert!(store.users().await.unwrap().is_empty());
+        run_user_cmd(&store, &["create", "amy", "--role", "viewer"], None)
+            .await
+            .unwrap();
+        let err = run_user_cmd(&store, &["create", "amy", "--role", "admin"], None)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("amy"), "{err:#}");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn user_list_format(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        assert_eq!(
+            run_user_cmd(&store, &["list"], None).await.unwrap(),
+            "no users"
+        );
+        let t = time::macros::datetime!(2027-01-15 08:00:00 UTC);
+        store.create_user("zed", Role::Admin, "h", t).await.unwrap();
+        let amy = store
+            .create_user("amy", Role::Viewer, "h", t + Duration::hours(1))
+            .await
+            .unwrap();
+        store.set_user_disabled(amy.id, true).await.unwrap();
+        assert_eq!(
+            run_user_cmd(&store, &["list"], None).await.unwrap(),
+            "amy viewer disabled 2027-01-15T09:00:00Z\nzed admin enabled 2027-01-15T08:00:00Z"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn set_role_disable_delete_messages(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        run_user_cmd(&store, &["create", "root", "--role", "admin"], None)
+            .await
+            .unwrap();
+        run_user_cmd(&store, &["create", "amy", "--role", "viewer"], None)
+            .await
+            .unwrap();
+        let out = |args: &'static [&'static str]| run_user_cmd(&store, args, None);
+        assert_eq!(
+            out(&["set-role", "amy", "operator"]).await.unwrap(),
+            "user amy now has role operator"
+        );
+        assert_eq!(out(&["disable", "amy"]).await.unwrap(), "user amy disabled");
+        assert_eq!(out(&["enable", "amy"]).await.unwrap(), "user amy enabled");
+        let reset = out(&["reset-password", "amy"]).await.unwrap();
+        assert!(
+            reset.starts_with("password of user amy changed\npassword: "),
+            "{reset}"
+        );
+        assert_eq!(reset.lines().count(), 2);
+        assert_eq!(out(&["delete", "amy"]).await.unwrap(), "user amy deleted");
+
+        // The last enabled admin is protected, with a message that says why.
+        for args in [
+            &["set-role", "root", "viewer"][..],
+            &["disable", "root"],
+            &["delete", "root"],
+        ] {
+            let err = run_user_cmd(&store, args, None).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("the last enabled admin cannot be changed"),
+                "{err:#}"
+            );
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reset_password_with_stdin_replaces_the_hash(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        run_user_cmd(&store, &["create", "amy", "--role", "viewer"], None)
+            .await
+            .unwrap();
+        let secret = "a-brand-new-passphrase";
+        let out = run_user_cmd(
+            &store,
+            &["reset-password", "amy", "--password-stdin"],
+            Some(secret),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "password of user amy changed");
+        let user = store.user_by_name("amy").await.unwrap().unwrap();
+        let stored = store.user_password_hash(user.id).await.unwrap().unwrap();
+        assert!(crate::auth::verify_password(secret.to_owned(), stored).await);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn unknown_user_is_an_error(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        for args in [
+            &["set-role", "ghost", "viewer"][..],
+            &["disable", "ghost"],
+            &["enable", "ghost"],
+            &["reset-password", "ghost"],
+            &["delete", "ghost"],
+        ] {
+            let err = run_user_cmd(&store, args, None).await.unwrap_err();
+            assert!(
+                format!("{err:#}").contains("user \"ghost\" not found"),
+                "{err:#}"
+            );
+        }
     }
 }

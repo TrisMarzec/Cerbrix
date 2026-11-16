@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod alerting;
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod enroll;
 pub mod gitops;

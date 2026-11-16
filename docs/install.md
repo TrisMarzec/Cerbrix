@@ -45,6 +45,29 @@ VictoriaMetrics on `127.0.0.1:8428` only; PostgreSQL is not published at all. Ch
 curl http://127.0.0.1:8443/healthz
 ```
 
+## First login
+
+The web UI needs a user. Create the first one as an admin:
+
+```sh
+docker compose exec server cerbrix-server admin user create t.marzec --role admin
+```
+
+The command prints `user t.marzec created with role admin` and a generated password on a
+second line. The password is shown only once; store it now. Names use lower case letters,
+digits, `.`, `_` and `-`. To choose the password yourself, read it from standard input
+(at least 12 characters, the first line is used):
+
+```sh
+printf '%s\n' "$PASSWORD" | docker compose exec -T server cerbrix-server admin user create t.marzec --role admin --password-stdin
+```
+
+Other commands: `admin user list`, `admin user set-role <name> <viewer|operator|admin>`,
+`admin user disable <name>`, `admin user enable <name>`, `admin user reset-password <name>`
+(also with `--password-stdin`) and `admin user delete <name>`. Changing a role or password,
+disabling or deleting a user ends the user's sessions. The last enabled admin cannot be
+demoted, disabled or deleted.
+
 ## 3. Create a host and an enrolment key
 
 A host must be registered before its agent can enrol, and enrolment needs a key. The
