@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use super::{ApiError, AppState};
 use crate::auth::{AuthError, AuthedUser, Role, authenticate, require};
 
+mod hosts;
 mod session;
 mod users;
 
@@ -62,6 +63,9 @@ pub(crate) const ROUTES: &[(&str, &str, Access)] = &[
     ("GET", "/api/v1/session", Access::Viewer),
     ("DELETE", "/api/v1/session", Access::Viewer),
     ("PUT", "/api/v1/session/password", Access::Viewer),
+    ("GET", "/api/v1/hosts", Access::Viewer),
+    ("GET", "/api/v1/host-groups", Access::Viewer),
+    ("GET", "/api/v1/hosts/{name}", Access::Viewer),
     ("GET", "/api/v1/users", Access::Admin),
     ("POST", "/api/v1/users", Access::Admin),
     ("PATCH", "/api/v1/users/{id}", Access::Admin),
@@ -104,6 +108,7 @@ impl Entry {
 fn entries() -> Vec<Entry> {
     let mut all = Vec::new();
     all.extend(session::entries());
+    all.extend(hosts::entries());
     all.extend(users::entries());
     all
 }
@@ -402,6 +407,9 @@ pub(crate) mod testing {
     /// The password of every fixture user.
     pub const PASSWORD: &str = "correct horse battery";
 
+    /// The host every fixture has.
+    pub const FIXTURE_HOST: &str = "fixture-host";
+
     pub fn config(insecure_http: bool, secure_cookie: Option<bool>) -> Arc<Config> {
         Arc::new(Config {
             server: ServerConfig {
@@ -459,6 +467,8 @@ pub(crate) mod testing {
         /// A fifth user (a viewer) that `fill` puts into `{id}` of the users routes, so a
         /// route that changes or deletes it does not touch the users that hold sessions.
         pub subject: Uuid,
+        /// An active host without configuration that `fill` puts into `{name}`.
+        pub host: &'static str,
     }
 
     impl Fixture {
@@ -479,6 +489,11 @@ pub(crate) mod testing {
             ] {
                 ids.push(store.create_user(name, role, &hash, now).await.unwrap().id);
             }
+            // A second fixture on the same pool finds it there.
+            match store.create_host(FIXTURE_HOST).await {
+                Ok(_) | Err(crate::state::StateError::Conflict(_)) => {}
+                Err(e) => panic!("creating the fixture host failed: {e}"),
+            }
             let router = crate::api::router(crate::api::AppState {
                 store: store.clone(),
                 metrics: Arc::new(MemoryMetrics::new()),
@@ -494,6 +509,7 @@ pub(crate) mod testing {
                 operator: ids[1],
                 admin: ids[2],
                 subject: ids[3],
+                host: FIXTURE_HOST,
             }
         }
 
@@ -523,7 +539,9 @@ pub(crate) mod testing {
         /// Fills the path parameters of a route pattern with ids that exist in the fixture.
         /// A later task that adds a route with a parameter adds the parameter here.
         pub fn fill(&self, pattern: &str) -> String {
-            pattern.replace("{id}", &self.subject.to_string())
+            pattern
+                .replace("{id}", &self.subject.to_string())
+                .replace("{name}", self.host)
         }
 
         /// Sends a request. `cookie` is a session token, `headers` extra request headers,

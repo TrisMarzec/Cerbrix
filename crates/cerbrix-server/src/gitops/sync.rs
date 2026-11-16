@@ -410,6 +410,7 @@ mod tests {
                     severity: Severity::High,
                     at_ms: 1_800_000_000_000,
                     summary: "disk".to_owned(),
+                    kind: crate::alerting::ProblemKind::Compare,
                 }],
                 ..Evaluation::default()
             })

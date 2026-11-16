@@ -14,8 +14,8 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ActiveTrigger, Evaluation, OpenProblem, Params, ResolveProblem, TriggerState, active_triggers,
-    instance_key,
+    ActiveTrigger, Evaluation, OpenProblem, Params, ProblemKind, ResolveProblem, TriggerState,
+    active_triggers, instance_key,
 };
 use crate::gitops::EffectiveHost;
 use crate::state::{StateError, StateStore};
@@ -189,6 +189,7 @@ fn apply(
             severity: t.severity,
             at_ms: now_ms,
             summary: summary.to_owned(),
+            kind: ProblemKind::NoData,
         });
     } else if resolves && firing && !fires {
         out.states.push(state(&t.name, instance, false));

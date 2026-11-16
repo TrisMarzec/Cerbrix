@@ -11,3 +11,4 @@ pub mod metrics;
 pub mod state;
 pub mod tls;
 pub mod tokens;
+pub mod view;

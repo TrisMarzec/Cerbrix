@@ -5,6 +5,7 @@
 mod alerting;
 mod enrollment;
 mod hosts;
+mod read;
 mod sync;
 mod users;
 
@@ -13,6 +14,7 @@ pub use alerting::{
     ProblemFilter,
 };
 pub use enrollment::UnknownAgent;
+pub use read::{HostDetail, HostQuery, HostRow, HostStateFilter};
 pub use sync::{
     Applied, ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock,
     SyncState, SyncStatus,

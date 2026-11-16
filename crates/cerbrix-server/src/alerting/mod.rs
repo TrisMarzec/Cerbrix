@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use cerbrix_common::config::Severity;
 use cerbrix_common::{TriggerExpr, parse_trigger};
+use serde::Serialize;
 
 use crate::gitops::EffectiveHost;
 
@@ -74,6 +75,37 @@ pub struct TriggerState {
     pub last_value: Option<f64>,
 }
 
+/// What opened a problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemKind {
+    /// A comparison trigger (`cpu.usage > 90`).
+    Compare,
+    /// A `no data for` trigger.
+    NoData,
+}
+
+impl ProblemKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProblemKind::Compare => "compare",
+            ProblemKind::NoData => "no_data",
+        }
+    }
+}
+
+impl std::str::FromStr for ProblemKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "compare" => Ok(ProblemKind::Compare),
+            "no_data" => Ok(ProblemKind::NoData),
+            other => Err(format!("unknown problem kind {other:?}")),
+        }
+    }
+}
+
 /// A problem that opens.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenProblem {
@@ -82,6 +114,7 @@ pub struct OpenProblem {
     pub severity: Severity,
     pub at_ms: i64,
     pub summary: String,
+    pub kind: ProblemKind,
 }
 
 /// A problem that resolves.

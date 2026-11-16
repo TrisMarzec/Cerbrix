@@ -11,8 +11,8 @@ use uuid::Uuid;
 use super::{StateError, StateStore};
 use crate::alerting::nodata::{Seen, item_nodata_selectors, selector_matches};
 use crate::alerting::{
-    Evaluation, EventKind, Notification, OpenProblem, Params, ResolveProblem, TriggerState,
-    instance_key, recipients,
+    Evaluation, EventKind, Notification, OpenProblem, Params, ProblemKind, ResolveProblem,
+    TriggerState, instance_key, recipients,
 };
 use crate::gitops::EffectiveHost;
 
@@ -32,6 +32,7 @@ pub struct Problem {
     pub trigger: String,
     pub instance: String,
     pub severity: Severity,
+    pub kind: ProblemKind,
     pub summary: String,
     pub started_at: OffsetDateTime,
     pub resolved_at: Option<OffsetDateTime>,
@@ -154,7 +155,7 @@ fn cut(s: &str, max: usize) -> String {
     s.chars().filter(|c| *c != '\0').take(max).collect()
 }
 
-type ProblemRow = (
+pub(super) type ProblemRow = (
     Uuid,
     Uuid,
     String,
@@ -168,6 +169,7 @@ type ProblemRow = (
     Option<OffsetDateTime>,
     Option<String>,
     Option<String>,
+    String,
 );
 
 /// The problem query with a WHERE/ORDER BY tail appended; a macro so the result stays a
@@ -177,14 +179,16 @@ macro_rules! problem_query {
         concat!(
             "SELECT p.id, p.host_id, h.name, p.trigger_name, p.instance, \
              p.severity, p.summary, p.started_at, p.resolved_at, p.resolve_reason, \
-             p.acknowledged_at, p.acknowledged_by, p.ack_comment \
+             p.acknowledged_at, p.acknowledged_by, p.ack_comment, p.kind \
              FROM problems p JOIN hosts h ON h.id = p.host_id ",
             $tail
         )
     };
 }
 
-fn problem_from(r: ProblemRow) -> Result<Problem, StateError> {
+pub(super) use problem_query;
+
+pub(super) fn problem_from(r: ProblemRow) -> Result<Problem, StateError> {
     Ok(Problem {
         id: r.0,
         host_id: r.1,
@@ -199,6 +203,10 @@ fn problem_from(r: ProblemRow) -> Result<Problem, StateError> {
         acknowledged_at: r.10,
         acknowledged_by: r.11,
         ack_comment: r.12,
+        kind: r
+            .13
+            .parse::<ProblemKind>()
+            .map_err(|e| StateError::Db(sqlx::Error::Decode(e.into())))?,
     })
 }
 
@@ -437,8 +445,9 @@ impl StateStore {
                     let started = from_ms(o.at_ms)?;
                     let inserted: Option<Uuid> = sqlx::query_scalar(
                         "INSERT INTO problems \
-                         (id, host_id, trigger_name, instance, severity, summary, started_at) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                         (id, host_id, trigger_name, instance, severity, summary, started_at, \
+                          kind) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
                          ON CONFLICT (host_id, trigger_name, instance) \
                          WHERE resolved_at IS NULL DO NOTHING RETURNING id",
                     )
@@ -449,6 +458,7 @@ impl StateStore {
                     .bind(severity_str(o.severity))
                     .bind(&o.summary)
                     .bind(started)
+                    .bind(o.kind.as_str())
                     .fetch_optional(&mut *tx)
                     .await?;
                     let Some(problem_id) = inserted else {
@@ -1081,6 +1091,7 @@ mod tests {
             severity,
             at_ms,
             summary: format!("{trigger} is bad"),
+            kind: crate::alerting::ProblemKind::Compare,
         }
     }
 
@@ -1104,6 +1115,78 @@ mod tests {
             resolve: vec![resolve(trigger, at_ms)],
             ..Evaluation::default()
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problems_record_their_kind(pool: PgPool) {
+        use crate::alerting::nodata::{Seen, evaluate_nodata};
+        use crate::alerting::{ActiveTrigger, ProblemKind};
+        use cerbrix_common::{MetricValue, parse_trigger};
+
+        let trigger = |name: &str, expr: &str| ActiveTrigger {
+            name: name.into(),
+            severity: Severity::High,
+            expression: expr.into(),
+            expr: parse_trigger(expr).unwrap(),
+        };
+        let (store, host) = setup(pool).await;
+        let compare = trigger("Hot", "cpu.usage > 90");
+        let silent = trigger("Silent", "no data for 3m");
+
+        store
+            .evaluate_host(host, false, |ctx| {
+                crate::alerting::eval::evaluate(
+                    std::slice::from_ref(&compare),
+                    &ctx.states,
+                    &[MetricValue {
+                        key: "cpu.usage".into(),
+                        params: Default::default(),
+                        ts_ms: T0_MS,
+                        value: 99.0,
+                    }],
+                    T0_MS,
+                    60_000,
+                )
+            })
+            .await
+            .unwrap();
+        store
+            .evaluate_host(host, false, |ctx| {
+                evaluate_nodata(
+                    std::slice::from_ref(&silent),
+                    &ctx.states,
+                    &Seen {
+                        last_seen_ms: Some(T0_MS - 600_000),
+                        series: Vec::new(),
+                    },
+                    None,
+                    T0_MS,
+                )
+            })
+            .await
+            .unwrap();
+
+        let mut kinds: Vec<_> = store
+            .problems(ProblemFilter::Open, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| (p.trigger, p.kind))
+            .collect();
+        kinds.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            kinds,
+            [
+                ("Hot".to_owned(), ProblemKind::Compare),
+                ("Silent".to_owned(), ProblemKind::NoData)
+            ]
+        );
+        let stored: Vec<String> =
+            sqlx::query_scalar("SELECT kind FROM problems ORDER BY trigger_name")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, ["compare", "no_data"]);
     }
 
     async fn outbox(pool: &PgPool, event: &str) -> Vec<String> {
@@ -1829,6 +1912,7 @@ mod tests {
             severity: Severity::High,
             at_ms: T0_MS,
             summary: "disk.used_percent: no data for 5m".into(),
+            kind: crate::alerting::ProblemKind::NoData,
         };
         let events = store
             .evaluate_host(host, true, |_| Evaluation {

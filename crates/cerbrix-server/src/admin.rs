@@ -997,6 +997,7 @@ mod tests {
             severity,
             at_ms,
             summary: format!("{trigger} is bad"),
+            kind: crate::alerting::ProblemKind::Compare,
         }
     }
 
@@ -1360,6 +1361,7 @@ mod tests {
             acknowledged_at: Some(at(T0_MS)),
             acknowledged_by: Some("w\rho".into()),
             ack_comment: None,
+            kind: crate::alerting::ProblemKind::Compare,
         };
         let line = problem_line(&p);
         assert!(!line.contains(char::is_control), "{line:?}");

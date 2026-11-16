@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use cerbrix_common::{Comparison, MetricValue, TriggerExpr};
 
-use super::{ActiveTrigger, Evaluation, OpenProblem, ResolveProblem, TriggerState, instance_key};
+use super::{
+    ActiveTrigger, Evaluation, OpenProblem, ProblemKind, ResolveProblem, TriggerState, instance_key,
+};
 
 /// Decides from the stored trigger state and newly arrived values which problems
 /// open and which resolve.
@@ -114,6 +116,7 @@ pub fn evaluate(
                         severity: trigger.severity,
                         at_ms: v.ts_ms,
                         summary: summary(&trigger.expression, v.value, &instance),
+                        kind: ProblemKind::Compare,
                     });
                 }
             } else {
