@@ -15,7 +15,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{MethodRouter, delete, get, post, put};
+use axum::routing::{MethodRouter, delete, get, patch, post, put};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,7 @@ use super::{ApiError, AppState};
 use crate::auth::{AuthError, AuthedUser, Role, authenticate, require};
 
 mod session;
+mod users;
 
 /// Largest request body of a UI route.
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -61,6 +62,12 @@ pub(crate) const ROUTES: &[(&str, &str, Access)] = &[
     ("GET", "/api/v1/session", Access::Viewer),
     ("DELETE", "/api/v1/session", Access::Viewer),
     ("PUT", "/api/v1/session/password", Access::Viewer),
+    ("GET", "/api/v1/users", Access::Admin),
+    ("POST", "/api/v1/users", Access::Admin),
+    ("PATCH", "/api/v1/users/{id}", Access::Admin),
+    ("POST", "/api/v1/users/{id}/password", Access::Admin),
+    // Last of the `{id}` routes: the access matrix deletes the fixture's `subject` here.
+    ("DELETE", "/api/v1/users/{id}", Access::Admin),
 ];
 
 /// One registered route: the handler for a method and path. Built with `Entry::new`, the
@@ -81,6 +88,7 @@ impl Entry {
             "GET" => get(handler),
             "POST" => post(handler),
             "PUT" => put(handler),
+            "PATCH" => patch(handler),
             "DELETE" => delete(handler),
             other => panic!("unsupported method {other} for {path}"),
         };
@@ -96,6 +104,7 @@ impl Entry {
 fn entries() -> Vec<Entry> {
     let mut all = Vec::new();
     all.extend(session::entries());
+    all.extend(users::entries());
     all
 }
 
@@ -447,6 +456,9 @@ pub(crate) mod testing {
         pub viewer: Uuid,
         pub operator: Uuid,
         pub admin: Uuid,
+        /// A fifth user (a viewer) that `fill` puts into `{id}` of the users routes, so a
+        /// route that changes or deletes it does not touch the users that hold sessions.
+        pub subject: Uuid,
     }
 
     impl Fixture {
@@ -463,6 +475,7 @@ pub(crate) mod testing {
                 ("viewer", Role::Viewer),
                 ("operator", Role::Operator),
                 ("admin", Role::Admin),
+                ("subject", Role::Viewer),
             ] {
                 ids.push(store.create_user(name, role, &hash, now).await.unwrap().id);
             }
@@ -480,6 +493,7 @@ pub(crate) mod testing {
                 viewer: ids[0],
                 operator: ids[1],
                 admin: ids[2],
+                subject: ids[3],
             }
         }
 
@@ -509,7 +523,7 @@ pub(crate) mod testing {
         /// Fills the path parameters of a route pattern with ids that exist in the fixture.
         /// A later task that adds a route with a parameter adds the parameter here.
         pub fn fill(&self, pattern: &str) -> String {
-            pattern.to_owned()
+            pattern.replace("{id}", &self.subject.to_string())
         }
 
         /// Sends a request. `cookie` is a session token, `headers` extra request headers,
@@ -598,7 +612,21 @@ mod tests {
         let token = fx.session(Role::Admin).await;
         for (_, pattern, _) in ROUTES {
             let sibling = format!("{}/not-in-routes", fx.fill(pattern));
-            for method in ["GET", "POST", "PUT", "DELETE"] {
+            // A path parameter takes any segment: a "sibling" that another pattern matches
+            // (`/users/not-in-routes` is `/users/{id}`) is a listed route, not a made-up one.
+            let is_listed = |path: &str| {
+                ROUTES.iter().any(|(_, p, _)| {
+                    let (a, b): (Vec<_>, Vec<_>) =
+                        (p.split('/').collect(), path.split('/').collect());
+                    a.len() == b.len()
+                        && a.iter().zip(&b).all(|(x, y)| x == y || x.starts_with('{'))
+                })
+            };
+            let made_up = !is_listed(&sibling);
+            for method in ["GET", "POST", "PUT", "DELETE"]
+                .into_iter()
+                .filter(|_| made_up)
+            {
                 let body = (method != "GET" && method != "DELETE").then_some("{}");
                 let reply = fx.call(method, &sibling, Some(&token), &[], body).await;
                 assert_eq!(reply.status, StatusCode::NOT_FOUND, "{method} {sibling}");

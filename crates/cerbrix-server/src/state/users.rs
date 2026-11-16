@@ -177,6 +177,72 @@ impl StateStore {
         Ok(User { disabled, ..user })
     }
 
+    /// One page of users ordered by name, and the number of all users.
+    pub async fn users_page(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<User>, i64), StateError> {
+        let rows: Vec<UserRow> = sqlx::query_as(
+            "SELECT id, name, role, disabled, created_at, password_changed_at \
+             FROM users ORDER BY name LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+            .fetch_one(&self.pool)
+            .await?;
+        let users = rows.into_iter().map(user_from).collect::<Result<_, _>>()?;
+        Ok((users, total))
+    }
+
+    /// The user with this id, if there is one.
+    pub async fn user_by_id(&self, id: Uuid) -> Result<Option<User>, StateError> {
+        let row: Option<UserRow> = sqlx::query_as(
+            "SELECT id, name, role, disabled, created_at, password_changed_at \
+             FROM users WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(user_from).transpose()
+    }
+
+    /// Changes the role and/or the disabled flag in one transaction: either both apply or,
+    /// when the result would leave no enabled admin (`Conflict`), neither. Ends the user's
+    /// sessions when a role is given or the user is disabled, like the single changes do.
+    pub async fn update_user(
+        &self,
+        id: Uuid,
+        role: Option<Role>,
+        disabled: Option<bool>,
+    ) -> Result<User, StateError> {
+        let mut tx = self.pool.begin().await?;
+        let (user, only_admin) = lock_target(&mut tx, id).await?;
+        if only_admin && (role.is_some_and(|r| r != Role::Admin) || disabled == Some(true)) {
+            return Err(StateError::Conflict(LAST_ADMIN.to_owned()));
+        }
+        let role_now = role.unwrap_or(user.role);
+        let disabled_now = disabled.unwrap_or(user.disabled);
+        sqlx::query("UPDATE users SET role = $2, disabled = $3 WHERE id = $1")
+            .bind(id)
+            .bind(role_now.as_str())
+            .bind(disabled_now)
+            .execute(&mut *tx)
+            .await?;
+        if role.is_some() || disabled == Some(true) {
+            end_sessions(&mut tx, id).await?;
+        }
+        tx.commit().await?;
+        Ok(User {
+            role: role_now,
+            disabled: disabled_now,
+            ..user
+        })
+    }
+
     /// Stores a new password hash, clears the failed-login state and ends the user's
     /// sessions.
     pub async fn set_user_password(
