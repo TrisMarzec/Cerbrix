@@ -55,14 +55,6 @@ fn with_cookie(mut response: Response, cookie: &str) -> Response {
     response
 }
 
-fn too_many() -> ApiError {
-    ApiError::new(
-        StatusCode::TOO_MANY_REQUESTS,
-        "too_many_attempts",
-        "too many failed attempts, try again in a few minutes",
-    )
-}
-
 async fn login(
     State(app): State<AppState>,
     ApiJson(body): ApiJson<LoginBody>,
@@ -71,7 +63,7 @@ async fn login(
         ApiError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
-            "wrong user name or password",
+            "wrong user name or password, or the account is temporarily locked",
         )
     };
     // No user name contains NUL, and PostgreSQL cannot compare with one.
@@ -97,8 +89,9 @@ async fn login(
             );
             Ok(with_cookie(Json(Me::from(&user)).into_response(), &cookie))
         }
-        LoginOutcome::Wrong => Err(wrong()),
-        LoginOutcome::Locked => Err(too_many()),
+        // A locked account answers exactly like a wrong password: nobody learns which
+        // names exist.
+        LoginOutcome::Wrong | LoginOutcome::Locked => Err(wrong()),
     }
 }
 
@@ -149,14 +142,14 @@ async fn change_password(
         .map_err(|e| store_failed("password check failed", &e))?
     {
         PasswordCheck::Right => {}
-        PasswordCheck::Wrong => {
+        // A wrong password and a locked account answer alike.
+        PasswordCheck::Wrong | PasswordCheck::Locked => {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "the current password is wrong",
             ));
         }
-        PasswordCheck::Locked => return Err(too_many()),
     }
     let hash = crate::auth::hash_password(body.new).await.map_err(|e| {
         tracing::error!(error = %e, "hashing the new password failed");
@@ -253,12 +246,26 @@ mod tests {
         assert!(seen.windows(2).all(|w| w[0] == w[1]), "identical answers");
         let body: serde_json::Value = serde_json::from_slice(&seen[0]).unwrap();
         assert_eq!(body["error"], "unauthorized");
-        assert_eq!(body["message"], "wrong user name or password");
+        assert_eq!(
+            body["message"],
+            "wrong user name or password, or the account is temporarily locked"
+        );
         assert_eq!(session_count(&pool).await, 0);
     }
 
+    fn comparable(reply: &Reply) -> (StatusCode, Vec<u8>, Vec<(String, String)>) {
+        let mut headers: Vec<_> = reply
+            .headers
+            .iter()
+            .filter(|(name, _)| *name != "date")
+            .map(|(n, v)| (n.to_string(), v.to_str().unwrap().to_owned()))
+            .collect();
+        headers.sort();
+        (reply.status, reply.body.clone(), headers)
+    }
+
     #[sqlx::test(migrations = "./migrations")]
-    async fn too_many_failures_answer_429(pool: PgPool) {
+    async fn locked_and_unknown_user_answer_identically(pool: PgPool) {
         let fx = Fixture::new(pool).await;
         for _ in 0..5 {
             assert_eq!(
@@ -266,11 +273,17 @@ mod tests {
                 StatusCode::UNAUTHORIZED
             );
         }
-        // Locked, even for the right password.
-        let reply = login(&fx, "admin", PASSWORD).await;
-        assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(reply.error_code(), "too_many_attempts");
-        assert!(reply.header("set-cookie").is_none());
+        // Locked, even for the right password: the answer is that of an unknown name.
+        let locked = login(&fx, "admin", PASSWORD).await;
+        let unknown = login(&fx, "nobody", PASSWORD).await;
+        assert_eq!(locked.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(comparable(&locked), comparable(&unknown));
+        assert_eq!(locked.error_code(), "unauthorized");
+        assert_eq!(
+            locked.json()["message"],
+            "wrong user name or password, or the account is temporarily locked"
+        );
+        assert!(locked.header("set-cookie").is_none());
         // Other users are not affected.
         assert_eq!(login(&fx, "viewer", PASSWORD).await.status, StatusCode::OK);
     }
@@ -465,13 +478,14 @@ mod tests {
             let reply = change(&fx, &token, "wrong", "a brand new password").await;
             assert_eq!(reply.status, StatusCode::FORBIDDEN);
         }
-        // Locked now: even the right current password is refused, and so is a login.
+        // Locked now: even the right current password is refused with the same 403, and
+        // so is a login (as a wrong one).
         let reply = change(&fx, &token, PASSWORD, "a brand new password").await;
-        assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(reply.error_code(), "too_many_attempts");
+        assert_eq!(reply.status, StatusCode::FORBIDDEN);
+        assert_eq!(reply.error_code(), "forbidden");
         assert_eq!(
             login(&fx, "admin", PASSWORD).await.status,
-            StatusCode::TOO_MANY_REQUESTS
+            StatusCode::UNAUTHORIZED
         );
     }
 }

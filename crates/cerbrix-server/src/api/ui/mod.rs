@@ -151,13 +151,20 @@ async fn guard(State(guard): State<Guard>, mut req: Request, next: Next) -> Resp
     next.run(req).await
 }
 
+/// Where the UI API lives.
+const PREFIX: &str = "/api/v1";
+
 /// Everything under `/api/v1`. Merged into `api::router`, so one server serves both APIs.
+///
+/// All routes sit in one router that is nested under the prefix and carries the guards,
+/// the same-origin check, the body limit and `no-store` for everything below it, its own
+/// fallback included. Nothing can be registered beside it.
 ///
 /// # Panics
 ///
 /// When a handler is registered for a route that is not in `ROUTES`.
 pub fn router(state: AppState) -> Router {
-    let mut router = Router::new();
+    let mut inner = Router::new();
     for entry in entries() {
         let access = access_of(&entry);
         let guarded = entry.route.route_layer(from_fn_with_state(
@@ -167,13 +174,29 @@ pub fn router(state: AppState) -> Router {
             },
             guard,
         ));
-        router = router.route(entry.path, guarded);
+        let relative = entry
+            .path
+            .strip_prefix(PREFIX)
+            .unwrap_or_else(|| panic!("route {} is not under {PREFIX}", entry.path));
+        inner = inner.route(relative, guarded);
     }
-    router
+    // `/api/v1` and `/api/v1/` themselves are not routes either.
+    let inner = inner
+        .route("/", axum::routing::any(not_found))
+        .fallback(not_found)
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(from_fn(request_checks))
-        .layer(from_fn(no_store))
+        .layer(from_fn(no_store));
+    // The bare prefix with a trailing slash is not part of the nest: answer it alike.
+    let root = axum::routing::any(not_found)
+        .layer(from_fn(request_checks))
+        .layer(from_fn(no_store));
+    Router::new().nest(PREFIX, inner).route("/api/v1/", root)
+}
+
+async fn not_found() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such endpoint")
 }
 
 /// Answers must not be cached: they depend on the session.
@@ -565,6 +588,83 @@ mod tests {
         for (_, path, _) in ROUTES {
             assert!(path.starts_with("/api/v1/"), "{path}");
         }
+    }
+
+    /// Nothing is served under `/api/v1` except what `ROUTES` lists: a made-up sibling of
+    /// every listed path and every unlisted method on a listed path is refused.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn nothing_unlisted_is_served(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        let token = fx.session(Role::Admin).await;
+        for (_, pattern, _) in ROUTES {
+            let sibling = format!("{}/not-in-routes", fx.fill(pattern));
+            for method in ["GET", "POST", "PUT", "DELETE"] {
+                let body = (method != "GET" && method != "DELETE").then_some("{}");
+                let reply = fx.call(method, &sibling, Some(&token), &[], body).await;
+                assert_eq!(reply.status, StatusCode::NOT_FOUND, "{method} {sibling}");
+            }
+            for method in ["GET", "POST", "PUT", "DELETE"] {
+                if ROUTES.iter().any(|(m, p, _)| *m == method && p == pattern) {
+                    continue;
+                }
+                let body = (method != "GET" && method != "DELETE").then_some("{}");
+                let reply = fx
+                    .call(method, &fx.fill(pattern), Some(&token), &[], body)
+                    .await;
+                assert_eq!(
+                    reply.status,
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "{method} {pattern}"
+                );
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn unknown_path_under_api_v1_is_404_json_and_not_cacheable(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        for path in [
+            "/api/v1/nope",
+            "/api/v1/session/nope/deeper",
+            "/api/v1/",
+            "/api/v1",
+        ] {
+            let reply = fx.call("GET", path, None, &[], None).await;
+            assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(reply.error_code(), "not_found", "{path}");
+            assert_eq!(reply.header("cache-control"), Some("no-store"), "{path}");
+        }
+        let reply = fx.call("POST", "/api/v1/nope", None, &[], Some("{}")).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+        assert_eq!(reply.header("cache-control"), Some("no-store"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn agent_routes_are_not_behind_the_ui_guard(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        let reply = fx
+            .call("POST", "/api/agent/v1/values", None, &[], Some("{}"))
+            .await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(reply.json()["message"], "missing or invalid credential");
+        assert_eq!(reply.header("cache-control"), None);
+        assert_eq!(reply.header("set-cookie"), None);
+        // A cross-origin agent request is not subject to the browser rule.
+        let reply = fx
+            .call(
+                "POST",
+                "/api/agent/v1/values",
+                None,
+                &[("origin", "https://evil.example")],
+                Some("{}"),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+        // Unknown agent paths keep the plain 404 of the router.
+        let reply = fx.call("GET", "/api/agent/v1/nope", None, &[], None).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+        assert!(reply.body.is_empty());
+        assert_eq!(reply.header("cache-control"), None);
     }
 
     #[test]

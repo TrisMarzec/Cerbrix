@@ -298,6 +298,17 @@ pub enum PasswordCheck {
     Locked,
 }
 
+/// The first half of a login: what the password check found.
+enum Verified {
+    Wrong,
+    Locked,
+    /// The password matched this hash of this user.
+    Right {
+        id: Uuid,
+        hash: String,
+    },
+}
+
 type SessionRow = (
     Uuid,
     String,
@@ -314,7 +325,8 @@ impl StateStore {
     ///
     /// An unknown or disabled user gets a password check against a dummy hash, so every
     /// `Wrong` takes about the same time, and nothing is changed for such a user. A locked
-    /// user is refused without a password check.
+    /// user also gets the dummy check (so timing does not tell a lock from an unknown name)
+    /// and is refused even with the right password.
     pub async fn login(
         &self,
         name: &str,
@@ -322,6 +334,17 @@ impl StateStore {
         now: OffsetDateTime,
         cfg: &AuthConfig,
     ) -> Result<LoginOutcome, StateError> {
+        let verified = self.verify_login(name, password, now).await?;
+        self.finish_login(verified, now, cfg).await
+    }
+
+    /// The first half of a login: looks the user up and verifies the password.
+    async fn verify_login(
+        &self,
+        name: &str,
+        password: &str,
+        now: OffsetDateTime,
+    ) -> Result<Verified, StateError> {
         let found: Option<(Uuid, bool, String, Option<OffsetDateTime>)> = sqlx::query_as(
             "SELECT id, disabled, password_hash, locked_until FROM users WHERE name = $1",
         )
@@ -330,39 +353,65 @@ impl StateStore {
         .await?;
         let Some((id, false, hash, locked_until)) = found else {
             verify_password(password.to_owned(), DUMMY_HASH.to_owned()).await;
-            return Ok(LoginOutcome::Wrong);
+            return Ok(Verified::Wrong);
         };
-        match self.attempt(id, hash, locked_until, password, now).await? {
-            PasswordCheck::Wrong => return Ok(LoginOutcome::Wrong),
-            PasswordCheck::Locked => return Ok(LoginOutcome::Locked),
-            PasswordCheck::Right => {}
+        Ok(
+            match self
+                .attempt(id, hash.clone(), locked_until, password, now)
+                .await?
+            {
+                PasswordCheck::Wrong => Verified::Wrong,
+                PasswordCheck::Locked => Verified::Locked,
+                PasswordCheck::Right => Verified::Right { id, hash },
+            },
+        )
+    }
+
+    /// The second half of a login: starts the session, but only while the user is still
+    /// enabled and still has the password hash that was verified. A password change or
+    /// reset between the two halves has already ended the sessions that existed, so a
+    /// session created now from the old password would survive it; it gets none. The user
+    /// row is locked `FOR SHARE`, so a change that is still running commits first and the
+    /// condition sees its result.
+    async fn finish_login(
+        &self,
+        verified: Verified,
+        now: OffsetDateTime,
+        cfg: &AuthConfig,
+    ) -> Result<LoginOutcome, StateError> {
+        let (id, hash) = match verified {
+            Verified::Wrong => return Ok(LoginOutcome::Wrong),
+            Verified::Locked => return Ok(LoginOutcome::Locked),
+            Verified::Right { id, hash } => (id, hash),
+        };
+        let token = tokens::generate("cbx_se_");
+        let max = i64::try_from(cfg.session_max_secs).unwrap_or(i64::MAX);
+        let inserted = sqlx::query(
+            "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) \
+             SELECT $1, id, $3, $3, $4 FROM users \
+             WHERE id = $2 AND NOT disabled AND password_hash = $5 FOR SHARE",
+        )
+        .bind(&tokens::hash(&token)[..])
+        .bind(id)
+        .bind(now)
+        .bind(now + time::Duration::seconds(max))
+        .bind(&hash)
+        .execute(&self.pool)
+        .await?;
+        if inserted.rows_affected() != 1 {
+            return Ok(LoginOutcome::Wrong);
         }
-        // Read the user afresh: it may have been changed or disabled while the password
-        // was being verified.
         let row: Option<UserRow> = sqlx::query_as(
             "SELECT id, name, role, disabled, created_at, password_changed_at \
-             FROM users WHERE id = $1 AND NOT disabled",
+             FROM users WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        let Some(row) = row else {
-            return Ok(LoginOutcome::Wrong);
-        };
-        let user = user_from(row)?;
-        let token = tokens::generate("cbx_se_");
-        let max = i64::try_from(cfg.session_max_secs).unwrap_or(i64::MAX);
-        sqlx::query(
-            "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) \
-             VALUES ($1, $2, $3, $3, $4)",
-        )
-        .bind(&tokens::hash(&token)[..])
-        .bind(user.id)
-        .bind(now)
-        .bind(now + time::Duration::seconds(max))
-        .execute(&self.pool)
-        .await?;
-        Ok(LoginOutcome::Ok(user, token))
+        match row {
+            Some(row) => Ok(LoginOutcome::Ok(user_from(row)?, token)),
+            None => Ok(LoginOutcome::Wrong),
+        }
     }
 
     /// Checks `password` against the stored hash of a user with the same failure counting
@@ -397,17 +446,22 @@ impl StateStore {
         now: OffsetDateTime,
     ) -> Result<PasswordCheck, StateError> {
         if locked_until.is_some_and(|until| until > now) {
+            // The same work as for a wrong password.
+            verify_password(password.to_owned(), DUMMY_HASH.to_owned()).await;
             return Ok(PasswordCheck::Locked);
         }
-        if verify_password(password.to_owned(), hash).await {
-            // Only an unlocked user is reset: a lock set meanwhile by concurrent wrong
-            // attempts wins.
+        if verify_password(password.to_owned(), hash.clone()).await {
+            // Only an unlocked user whose hash is still the verified one is reset: a lock
+            // set meanwhile by concurrent wrong attempts wins, and so does a password
+            // change.
             let reset = sqlx::query(
                 "UPDATE users SET failed_logins = 0, locked_until = NULL \
-                 WHERE id = $1 AND (locked_until IS NULL OR locked_until <= $2)",
+                 WHERE id = $1 AND password_hash = $3 \
+                   AND (locked_until IS NULL OR locked_until <= $2)",
             )
             .bind(id)
             .bind(now)
+            .bind(&hash)
             .execute(&self.pool)
             .await?;
             return Ok(if reset.rows_affected() == 1 {
@@ -418,7 +472,7 @@ impl StateStore {
         }
         // A counter left from before an expired lock starts again at one. While a lock is
         // running (a concurrent attempt set it) it is neither extended nor counted.
-        sqlx::query(
+        let after: Option<(String, Option<OffsetDateTime>)> = sqlx::query_as(
             "UPDATE users SET \
                failed_logins = CASE WHEN locked_until > $2 THEN failed_logins \
                                     WHEN locked_until <= $2 THEN 1 \
@@ -427,14 +481,21 @@ impl StateStore {
                                    WHEN (CASE WHEN locked_until <= $2 THEN 1 \
                                               ELSE failed_logins + 1 END) >= $3 THEN $4 \
                                    ELSE NULL END \
-             WHERE id = $1",
+             WHERE id = $1 RETURNING name, locked_until",
         )
         .bind(id)
         .bind(now)
         .bind(LOCK_AFTER_FAILURES)
         .bind(now + LOCK_DURATION)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
+        // The lock this very statement set (not one that was already running) is logged,
+        // once; attempts while it runs are refused above and log nothing.
+        if let Some((name, Some(until))) = after
+            && until == now + LOCK_DURATION
+        {
+            tracing::warn!(user = %name, "user locked for 5 minutes after repeated failed logins");
+        }
         Ok(PasswordCheck::Wrong)
     }
 
@@ -1106,6 +1167,86 @@ mod login_tests {
             PasswordCheck::Right
         );
         assert_eq!(failed(&pool, amy.id).await, (0, None));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn login_racing_a_password_change_gets_no_session(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let amy = add(&store, "amy", Role::Viewer).await;
+        // The password is verified ...
+        let verified = store.verify_login("amy", PASSWORD, t0()).await.unwrap();
+        assert!(matches!(verified, Verified::Right { .. }));
+        // ... then changed (this ends the sessions that exist) ...
+        store
+            .set_user_password(amy.id, "$argon2id$new", t0())
+            .await
+            .unwrap();
+        // ... and only then the session would be created, from the old password.
+        let outcome = store.finish_login(verified, t0(), &cfg()).await.unwrap();
+        assert!(matches!(outcome, LoginOutcome::Wrong), "{outcome:?}");
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0);
+    }
+
+    /// Everything the process logs while the tests run, from a subscriber installed once
+    /// for the whole process (a per-test subscriber misses events when tests run in
+    /// parallel). A test reads only the lines that name its own user.
+    static LOGS: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+    struct LogWriter;
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            LOGS.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn logged_lines_about(user: &str) -> Vec<String> {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(|| LogWriter)
+                    .finish(),
+            );
+        });
+        let text = String::from_utf8(LOGS.lock().unwrap().clone()).unwrap();
+        text.lines()
+            .filter(|l| l.contains(user))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn lock_is_logged_once(pool: PgPool) {
+        let user = "lock-log-user";
+        logged_lines_about(user); // installs the subscriber before anything is logged
+        let store = StateStore::from_pool(pool.clone());
+        add(&store, user, Role::Viewer).await;
+        for _ in 0..4 {
+            try_login(&store, user, "wrong", t0()).await;
+        }
+        assert!(logged_lines_about(user).is_empty());
+        try_login(&store, user, "wrong", t0()).await; // the fifth sets the lock
+        // Attempts while locked do not log again.
+        for _ in 0..3 {
+            try_login(&store, user, "wrong", t0() + Duration::minutes(1)).await;
+        }
+        let lines = logged_lines_about(user);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("WARN") && lines[0].contains("locked"),
+            "{lines:?}"
+        );
+        assert!(!lines[0].contains("$argon2"), "{lines:?}");
     }
 
     #[test]
