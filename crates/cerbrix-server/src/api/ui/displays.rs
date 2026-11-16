@@ -505,8 +505,7 @@ mod tests {
         );
 
         // The fixture dashboard selects every host, so the alarm is on both dashboards and the
-        // higher priority wins; the sync issues are
-        // counted, their text stays off the wall.
+        // higher priority wins. The sync issues are counted; their text stays off the wall.
         host_in(&fx, "host-o", "go").await;
         let cause = alarm(&fx, "host-o", "critical", false).await;
         let issues = [crate::gitops::SyncIssue {

@@ -382,9 +382,7 @@ mod tests {
             order.rotate_left(round % 4);
             order.reverse();
             let t = alarm_target(&d, &inputs(&order, hosts.clone()));
-            assert_eq!(t.target, reference.target, "round {round}");
-            assert_eq!(t.waiting, reference.waiting, "round {round}");
-            assert_eq!(t.causes.len(), reference.causes.len(), "round {round}");
+            assert_eq!(t, reference, "round {round}");
         }
     }
 }

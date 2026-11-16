@@ -55,27 +55,43 @@ impl StateStore {
     /// Creates the token of a display and returns it; it is shown once and stored only as a
     /// hash. A token the display already has stops working. `NotFound` for a display that is
     /// not in the active configuration.
+    ///
+    /// Guarantee: a token is never stored for a display that a committed configuration
+    /// removed. The display's `config_documents` row is locked (`FOR KEY SHARE`) before the
+    /// token is written, so a concurrent `apply_config` (which deletes and re-inserts every
+    /// document, then deletes the tokens of displays it no longer has) either waits for this
+    /// call or is waited for by it, and this call then sees the committed truth. During a sync
+    /// that keeps the display the old row is deleted, so the call can answer a spurious
+    /// `NotFound`; it never hangs: `apply_config` takes the document rows before the token
+    /// rows, this call takes them in the same order, and nothing waits for a token row.
     pub async fn create_display_token(
         &self,
         display_id: &str,
         now: OffsetDateTime,
     ) -> Result<String, StateError> {
         let plain = tokens::generate(tokens::DISPLAY_TOKEN_PREFIX);
-        let done = sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let exists: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM config_documents WHERE kind = 'display' AND id = $1 FOR KEY SHARE",
+        )
+        .bind(display_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if exists.is_none() {
+            return Err(StateError::NotFound);
+        }
+        sqlx::query(
             "INSERT INTO display_tokens (display_id, token_hash, created_at) \
-             SELECT $1, $2, $3 \
-             WHERE EXISTS (SELECT 1 FROM config_documents WHERE kind = 'display' AND id = $1) \
+             VALUES ($1, $2, $3) \
              ON CONFLICT (display_id) DO UPDATE \
              SET token_hash = EXCLUDED.token_hash, created_at = EXCLUDED.created_at",
         )
         .bind(display_id)
         .bind(tokens::hash(&plain).as_slice())
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        if done.rows_affected() == 0 {
-            return Err(StateError::NotFound);
-        }
+        tx.commit().await?;
         Ok(plain)
     }
 
@@ -280,5 +296,57 @@ mod tests {
         assert_eq!(all[0].2.name, "NOC");
         assert!(store.display("noc").await.unwrap().is_some());
         assert!(store.display("x").await.unwrap().is_none());
+    }
+
+    /// A token created while a sync that removes the display is running must not survive it.
+    /// The second transaction does what `apply_config` does to this display before its commit.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn token_creation_waits_for_a_sync_that_removes_the_display(pool: PgPool) {
+        let store = store_with_display(pool.clone()).await;
+        let mut sync = pool.begin().await.unwrap();
+        sqlx::query("DELETE FROM config_documents WHERE kind = 'display' AND id = 'noc'")
+            .execute(&mut *sync)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM display_tokens WHERE display_id = 'noc'")
+            .execute(&mut *sync)
+            .await
+            .unwrap();
+
+        let creating = {
+            let store = store.clone();
+            tokio::spawn(async move { store.create_display_token("noc", now()).await })
+        };
+        // The call is blocked on a lock held by the open transaction: wait until PostgreSQL
+        // reports a backend waiting for one, then check the call has not completed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let (waiting,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND datname = current_database()",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the call never waited for the lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!creating.is_finished());
+
+        sync.commit().await.unwrap();
+        let result = creating.await.unwrap();
+        assert!(matches!(result, Err(StateError::NotFound)), "{result:?}");
+        let (n,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM display_tokens WHERE display_id = 'noc'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(n, 0);
     }
 }
