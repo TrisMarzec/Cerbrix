@@ -19,7 +19,9 @@ pub use config::{Severity, validate_name};
 pub use enroll::{EnrollRequest, EnrollResponse, validate_host_name};
 pub use error::{ErrorBody, ValidationError};
 pub use interval::{Interval, IntervalError};
-pub use items::{BUILTIN_ITEMS, ItemSpec, builtin_item, default_agent_items};
+pub use items::{
+    BUILTIN_ITEMS, ItemSpec, builtin_item, default_agent_items, key_for_metric, metric_name,
+};
 pub use metric::{
     IngestResponse, MAX_BATCH_VALUES, MAX_ITEM_KEY_LEN, MAX_PARAM_VALUE_LEN, MAX_PARAMS,
     MetricValue, PROTOCOL_VERSION, ValueBatch, validate_item_key, validate_param_name,

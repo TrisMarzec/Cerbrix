@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cerbrix_common::{
-    DashboardFile, DisplayFile, GRID_COLUMNS, GRID_ROWS, Panel, Show, validate_name,
+    DashboardFile, DisplayFile, GRID_COLUMNS, GRID_ROWS, Panel, Show, builtin_item, validate_name,
 };
 
 use super::Issues;
@@ -196,6 +196,17 @@ fn check_series_panel(
         item,
         params,
     } = *series;
+    // The metrics store refuses a query that matches several series, so a panel must name
+    // the one parameter of its item: without it the selector would match every instance.
+    if let Some(want) = builtin_item(item).and_then(|spec| spec.param)
+        && !params.is_some_and(|p| p.contains_key(want))
+    {
+        issues.add(Some(file), || {
+            format!(
+                "panel {n}: item {item:?} needs the parameter {want:?} in params, so that the panel shows one series"
+            )
+        });
+    }
     let Some(found) = hosts.iter().find(|h| h.name == host) else {
         issues.add(Some(file), || {
             format!("panel {n}: host {host:?} does not exist")

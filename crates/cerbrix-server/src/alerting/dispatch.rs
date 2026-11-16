@@ -336,6 +336,7 @@ mod tests {
                     severity: Severity::Critical,
                     at_ms,
                     summary: format!("{trigger} is bad"),
+                    kind: crate::alerting::ProblemKind::Compare,
                 }],
                 ..Evaluation::default()
             })

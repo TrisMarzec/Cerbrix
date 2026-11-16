@@ -30,6 +30,15 @@ pub enum SyncStatus {
 }
 
 impl SyncStatus {
+    /// The name the API uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncStatus::Never => "never",
+            SyncStatus::InSync => "in_sync",
+            SyncStatus::OutOfSync => "out_of_sync",
+        }
+    }
+
     fn parse(s: &str) -> Result<Self, StateError> {
         match s {
             "never" => Ok(SyncStatus::Never),
@@ -424,6 +433,18 @@ impl StateStore {
             .await?;
         }
 
+        // A display that is no longer in the revision loses its token.
+        let displays: Vec<&str> = compiled
+            .documents
+            .iter()
+            .filter(|d| d.kind.as_str() == "display")
+            .map(|d| d.id.as_str())
+            .collect();
+        sqlx::query("DELETE FROM display_tokens WHERE display_id <> ALL($1)")
+            .bind(&displays)
+            .execute(&mut *tx)
+            .await?;
+
         for set in [
             &mut changes.hosts,
             &mut changes.templates,
@@ -524,6 +545,34 @@ impl StateStore {
                 changes: changes.0,
             })
             .collect())
+    }
+
+    /// One page of the applied revisions, newest first, and the number of all of them.
+    pub async fn sync_history_page(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<SyncHistoryEntry>, i64), StateError> {
+        let rows: Vec<(String, OffsetDateTime, Json<SyncChanges>)> = sqlx::query_as(
+            "SELECT commit, applied_at, changes FROM sync_history \
+             ORDER BY id DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let total: i64 = sqlx::query_scalar("SELECT count(*) FROM sync_history")
+            .fetch_one(&self.pool)
+            .await?;
+        let items = rows
+            .into_iter()
+            .map(|(commit, applied_at, changes)| SyncHistoryEntry {
+                commit,
+                applied_at,
+                changes: changes.0,
+            })
+            .collect();
+        Ok((items, total))
     }
 
     /// The effective configuration of an active host synced from Git.

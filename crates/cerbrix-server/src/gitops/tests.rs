@@ -431,6 +431,59 @@ fn graph_item_not_on_host() {
 }
 
 #[test]
+fn series_panel_needs_the_parameter_of_its_item() {
+    // `disk.*` items take `mount`: a panel without it would match every mount.
+    let d = dashboard(
+        r#"{"type":"graph","host":"db-01","item":"disk.used_percent","x":0,"y":0,"w":2,"h":2},
+        {"type":"value","host":"db-01","item":"disk.used_percent","params":{},"x":2,"y":0,"w":2,"h":2},
+        {"type":"value","host":"db-01","item":"disk.used_percent","params":{"mount":"/"},"x":4,"y":0,"w":2,"h":2}"#,
+    );
+    let issues = with_example(&[("dashboards/d.json", &d)]);
+    let missing = |panel: usize| {
+        issues.iter().any(|i| {
+            i.file.as_deref() == Some("dashboards/d.json")
+                && i.reason.contains(&format!("panel {panel}:"))
+                && i.reason.contains("disk.used_percent")
+                && i.reason.contains("needs the parameter \"mount\"")
+        })
+    };
+    assert!(missing(1), "{issues:?}");
+    assert!(missing(2), "{issues:?}");
+    assert!(!missing(3), "{issues:?}");
+}
+
+#[test]
+fn series_panel_with_the_wrong_parameter_is_reported() {
+    let d = dashboard(
+        r#"{"type":"graph","host":"db-01","item":"disk.used_percent","params":{"interface":"eth0"},"x":0,"y":0,"w":2,"h":2}"#,
+    );
+    let issues = with_example(&[("dashboards/d.json", &d)]);
+    assert!(has_issue(
+        &issues,
+        "dashboards/d.json",
+        "needs the parameter \"mount\""
+    ));
+    assert!(has_issue(
+        &issues,
+        "dashboards/d.json",
+        "only accepts the parameter"
+    ));
+}
+
+#[test]
+fn series_panel_of_an_item_without_parameter_needs_none() {
+    // cpu.usage has no parameter; db-01 collects it in the example repository.
+    let d = dashboard(
+        r#"{"type":"graph","host":"db-01","item":"cpu.usage","x":0,"y":0,"w":2,"h":2},
+        {"type":"value","host":"db-01","item":"cpu.usage","params":{},"x":2,"y":0,"w":2,"h":2}"#,
+    );
+    let mut s = example_snapshot();
+    s.files
+        .insert("dashboards/d.json".to_owned(), d.into_bytes());
+    compile(&s).unwrap_or_else(|i| panic!("{i:#?}"));
+}
+
+#[test]
 fn duplicate_dashboard_stem_in_subdirectories() {
     let d = |n: &str| format!(r#"{{"name":"{n}"}}"#);
     let issues = issues_of(&[

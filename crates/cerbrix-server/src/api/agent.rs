@@ -373,6 +373,7 @@ mod tests {
             gitops: Default::default(),
             alerting: Default::default(),
             smtp: Default::default(),
+            auth: Default::default(),
         })
     }
 
@@ -385,6 +386,7 @@ mod tests {
             config: config(max_body_bytes),
             warnings: Arc::default(),
             queue_mail: false,
+            passwords: Default::default(),
         });
         (router, metrics, store)
     }
@@ -957,6 +959,7 @@ mod tests {
             config: config(2 * 1024 * 1024),
             warnings: Arc::default(),
             queue_mail,
+            passwords: Default::default(),
         });
         (router, store)
     }

@@ -11,11 +11,13 @@ use axum::routing::{get, post};
 use cerbrix_common::ErrorBody;
 use uuid::Uuid;
 
+use crate::auth::PasswordGate;
 use crate::config::Config;
 use crate::metrics::MetricsStore;
 use crate::state::StateStore;
 
 mod agent;
+pub mod ui;
 
 /// Shared handles of the API. Everything in it is a connection handle or read-only
 /// configuration; no request data is kept here. The one exception is `warnings`, which
@@ -28,6 +30,8 @@ pub struct AppState {
     pub warnings: Arc<WarnLimiter>,
     /// Whether problems queue e-mail: true when an SMTP server is configured.
     pub queue_mail: bool,
+    /// The limit on password hashing and checking; one for the whole process.
+    pub passwords: PasswordGate,
 }
 
 /// Lets a warning through at most once per hour per host. Process-local and bounded: it
@@ -67,22 +71,23 @@ impl WarnLimiter {
     }
 }
 
-/// Builds the router for the agent-facing API.
+/// Builds the router: the agent-facing API and the UI API under `/api/v1`.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(agent::healthz))
         .route("/api/agent/v1/enroll", post(agent::enroll))
         .route("/api/agent/v1/values", post(agent::values))
         .route("/api/agent/v1/config", get(agent::config))
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(ui::router(state))
 }
 
 /// An error answer: a status plus an `ErrorBody` with a stable code.
 #[derive(Debug)]
-pub(crate) struct ApiError {
+pub struct ApiError {
     status: StatusCode,
     code: &'static str,
-    message: &'static str,
+    message: std::borrow::Cow<'static, str>,
 }
 
 impl ApiError {
@@ -90,7 +95,17 @@ impl ApiError {
         Self {
             status,
             code,
-            message,
+            message: message.into(),
+        }
+    }
+
+    /// An error with a message made at run time; it must not contain secrets or raw input
+    /// beyond names that were validated.
+    pub(crate) fn with_message(status: StatusCode, code: &'static str, message: String) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
         }
     }
 
@@ -108,7 +123,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = ErrorBody {
             error: self.code.to_owned(),
-            message: self.message.to_owned(),
+            message: self.message.into_owned(),
         };
         (self.status, axum::Json(body)).into_response()
     }

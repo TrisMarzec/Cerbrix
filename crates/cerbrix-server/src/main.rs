@@ -1,3 +1,4 @@
+use std::io::BufRead as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -80,6 +81,24 @@ async fn main() -> ExitCode {
                 // Needs only the SMTP settings, so it works while the database is down.
                 AdminCommand::Notify(NotifyCommand::Test { address }) => {
                     admin::notify_test(&config.smtp, &address).await
+                }
+                AdminCommand::User(command) => {
+                    async {
+                        // Read the password before connecting; it never goes into a log.
+                        let password = if command.reads_password_stdin() {
+                            let mut line = String::new();
+                            std::io::stdin()
+                                .lock()
+                                .read_line(&mut line)
+                                .context("cannot read the password from standard input")?;
+                            Some(admin::password_from_line(&line).to_owned())
+                        } else {
+                            None
+                        };
+                        let store = StateStore::connect(&config.database.url).await?;
+                        admin::run_user(&store, command, password, OffsetDateTime::now_utc()).await
+                    }
+                    .await
                 }
                 command => {
                     async {

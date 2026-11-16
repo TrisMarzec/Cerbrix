@@ -3,19 +3,27 @@
 //! Enrolment keys and agent credentials are stored only as SHA-256 hashes.
 
 mod alerting;
+mod displays;
 mod enrollment;
 mod hosts;
+mod read;
 mod sync;
+mod users;
 
 pub use alerting::{
     AlertContext, LEASE_SECS, OldestPending, OutboxItem, OutboxSummary, Problem, ProblemEvent,
     ProblemFilter,
 };
-pub use enrollment::UnknownAgent;
+pub use enrollment::{EnrollmentKey, UnknownAgent};
+pub use read::{
+    BoardInputs, DashboardHosts, HostCounts, HostDetail, HostQuery, HostRow, HostStateFilter,
+    ProblemCounts, ProblemQuery, ProblemStateFilter, SeverityCount,
+};
 pub use sync::{
     Applied, ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock,
     SyncState, SyncStatus,
 };
+pub use users::{LoginOutcome, PasswordCheck, User};
 
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;

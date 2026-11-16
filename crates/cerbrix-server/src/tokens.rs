@@ -9,6 +9,8 @@ use sha2::{Digest as _, Sha256};
 pub const ENROLLMENT_KEY_PREFIX: &str = "cbx_ek_";
 /// Prefix of agent credentials.
 pub const AGENT_CREDENTIAL_PREFIX: &str = "cbx_ac_";
+/// Prefix of display tokens.
+pub const DISPLAY_TOKEN_PREFIX: &str = "cbx_dt_";
 
 /// Generates a token: the prefix followed by 32 random bytes, base64url without padding.
 pub fn generate(prefix: &str) -> String {

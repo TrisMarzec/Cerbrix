@@ -45,7 +45,61 @@ VictoriaMetrics on `127.0.0.1:8428` only; PostgreSQL is not published at all. Ch
 curl http://127.0.0.1:8443/healthz
 ```
 
-## 3. Create a host and an enrolment key
+## 3. First login
+
+The web UI needs a user. Create the first one as an admin:
+
+```sh
+docker compose exec server cerbrix-server admin user create t.marzec --role admin
+```
+
+The command prints `user t.marzec created with role admin` and a generated password on a
+second line. The password is shown only once; store it now. Names use lower case letters,
+digits, `.`, `_` and `-`. To choose the password yourself, read it from standard input
+(at least 12 characters, the first line is used):
+
+```sh
+printf '%s\n' "$PASSWORD" | docker compose exec -T server cerbrix-server admin user create t.marzec --role admin --password-stdin
+```
+
+Other commands: `admin user list`, `admin user set-role <name> <viewer|operator|admin>`,
+`admin user disable <name>`, `admin user enable <name>`, `admin user reset-password <name>`
+(also with `--password-stdin`) and `admin user delete <name>`. Changing a role or password,
+disabling or deleting a user ends the user's sessions. The last enabled admin cannot be
+demoted, disabled or deleted.
+
+### Login settings
+
+Sessions are kept in PostgreSQL, so they survive a restart of the server. Three settings
+(in `deploy/server.env`, a commented block is in the example file) control them:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CERBRIX_AUTH__SESSION_IDLE_SECS` | `43200` (12 hours) | A session that was not used for this long ends. 300 to 604800. |
+| `CERBRIX_AUTH__SESSION_MAX_SECS` | `604800` (7 days) | A session ends this long after the login, however active it is. Not smaller than the idle time, at most 2592000 (30 days). |
+| `CERBRIX_AUTH__SECURE_COOKIE` | unset | Whether the session cookie carries the `Secure` attribute, so that a browser sends it only over HTTPS. Unset means on, unless `CERBRIX_SERVER__INSECURE_HTTP=true`. Set it to `true` when a reverse proxy terminates TLS. |
+
+An invalid value stops the server at start. After five wrong passwords in a row a user is
+locked for five minutes; the lock ends by itself and a login with the right password resets
+the count. The login answer is the same for a wrong password, an unknown name and a locked
+user. The [API reference](api.md) describes the login and the roles.
+
+### Behind a reverse proxy
+
+The login and every request that changes something are checked against cross-site requests:
+when a browser sends an `Origin` header, its host and port must equal those of the `Host`
+header. So the proxy must pass the `Host` header on unchanged. In nginx that is
+`proxy_set_header Host $http_host;`, in Caddy it is the default. If the proxy replaces `Host`
+with the name of the upstream, every login from a browser is answered with 403.
+
+When the proxy terminates TLS and talks plain HTTP to the server, as in
+[option (b) below](#making-the-server-reachable-for-agents), set
+`CERBRIX_AUTH__SECURE_COOKIE=true`. The server cannot see that the browser uses HTTPS, and
+without the setting it sends the cookie without `Secure`. Do not publish the plain HTTP port
+of the server to a network; the session cookie and the passwords of a login would cross it
+unencrypted.
+
+## 4. Create a host and an enrolment key
 
 A host must be registered before its agent can enrol, and enrolment needs a key. The
 key is printed once and stored only as a hash. With [GitOps](#configuration-from-git) on, you
@@ -274,7 +328,9 @@ setting.
 **(b) A reverse proxy in front.** Keep plain HTTP and the default bind address
 `127.0.0.1`. Run a TLS-terminating proxy (nginx, Caddy, Traefik, ...) on the same host that
 listens on port 443 and forwards to `127.0.0.1:8443`. Agents then use
-`https://your-server-name` as `server_url`.
+`https://your-server-name` as `server_url`. The same proxy can serve the web UI and the
+[API](api.md); it must pass the `Host` header unchanged and you must set
+`CERBRIX_AUTH__SECURE_COOKIE=true`, see [Behind a reverse proxy](#behind-a-reverse-proxy).
 
 ## Agent installation
 
@@ -282,7 +338,7 @@ The agent runs on every monitored Linux host (x86_64 or aarch64, with systemd) a
 systemd service under its own `cerbrix` user. The install script downloads the release
 binary, verifies its SHA-256 checksum, creates the user and the configuration and starts
 the service. You need the host name and the enrolment key from
-[step 3](#3-create-a-host-and-an-enrolment-key), and the server must be reachable over
+[step 4](#4-create-a-host-and-an-enrolment-key), and the server must be reachable over
 `https` ([Making the server reachable for agents](#making-the-server-reachable-for-agents)).
 
 Download the script, read it, then run it as root. Pass the key through the environment
@@ -351,7 +407,7 @@ Then release the host on the server (`admin host release <name>`) if it will enr
 Git repository, enrols a locally built agent and checks that its values arrive in
 VictoriaMetrics. It then pushes a broken host file, checks that the installation reports
 `out of sync` while values keep arriving, and that reverting the commit makes it `in sync`
-again. It also checks alerting against a real mail server (Mailpit): a problem opens and is mailed, resolves and is mailed, an acknowledgement shows in the problem list, and a stopped agent is reported. It does not test TLS or a login at the mail server; use `admin notify test` for that. It needs Docker, curl, git and a Rust toolchain; CI runs it on every push.
+again. It also checks alerting against a real mail server (Mailpit): a problem opens and is mailed, resolves and is mailed, an acknowledgement shows in the problem list, and a stopped agent is reported. Finally it walks through the [API](api.md) with `curl`: login, status, hosts, a series, problems with an acknowledgement, a dashboard, a wall display with its token, and the access rules. It does not test TLS or a login at the mail server; use `admin notify test` for that. It needs Docker, curl 7.55 or newer, awk, git and a Rust toolchain; CI runs it on every push.
 
 ## Troubleshooting
 

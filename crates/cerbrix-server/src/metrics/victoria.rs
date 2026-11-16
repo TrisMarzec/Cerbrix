@@ -3,11 +3,15 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use cerbrix_common::{MetricValue, validate_item_key, validate_param_name};
+use cerbrix_common::{
+    MetricValue, key_for_metric, metric_name, validate_host_name, validate_item_key,
+    validate_param_name,
+};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
-use super::{MetricsError, MetricsStore, RangeQuery, Sample};
+use super::{LatestQuery, LatestSample, MetricsError, MetricsStore, RangeQuery, Sample};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -41,11 +45,6 @@ impl VictoriaMetrics {
     }
 }
 
-/// `disk.used_percent` becomes `cerbrix_disk_used_percent`.
-fn series_name(key: &str) -> String {
-    format!("cerbrix_{}", key.replace('.', "_"))
-}
-
 /// Escapes a label value for use inside a double-quoted PromQL string.
 fn escape_selector_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -77,7 +76,7 @@ fn selector(query: &RangeQuery) -> Result<String, MetricsError> {
     validate_series(&query.key, query.params.keys())?;
     let mut s = format!(
         "{}{{host=\"{}\"",
-        series_name(&query.key),
+        metric_name(&query.key),
         escape_selector_value(&query.host)
     );
     for (name, value) in &query.params {
@@ -96,7 +95,7 @@ fn import_line(host: &str, v: &MetricValue) -> Result<String, MetricsError> {
         )));
     }
     let mut metric = BTreeMap::new();
-    metric.insert("__name__".to_owned(), series_name(&v.key));
+    metric.insert("__name__".to_owned(), metric_name(&v.key));
     metric.insert("host".to_owned(), host.to_owned());
     for (name, value) in &v.params {
         metric.insert(format!("p_{name}"), value.clone());
@@ -107,6 +106,100 @@ fn import_line(host: &str, v: &MetricValue) -> Result<String, MetricsError> {
         "timestamps": [v.ts_ms],
     });
     Ok(line.to_string())
+}
+
+/// The selector of the series a latest query covers. The names it puts in are built-in
+/// series names, the host is validated and escaped.
+fn latest_selector(query: &LatestQuery) -> Result<String, MetricsError> {
+    if let Some(host) = &query.host {
+        validate_host_name(host).map_err(|e| MetricsError::Rejected(e.to_string()))?;
+    }
+    if let Some(key) = &query.key {
+        validate_item_key(key).map_err(|e| MetricsError::Rejected(e.to_string()))?;
+    }
+    let host = query.host.as_deref().map(escape_selector_value);
+    match (&query.key, host) {
+        (Some(key), Some(host)) => Ok(format!("{}{{host=\"{host}\"}}", metric_name(key))),
+        (Some(key), None) => Ok(metric_name(key)),
+        (None, Some(host)) => Ok(format!("{{__name__=~\"cerbrix_.+\",host=\"{host}\"}}")),
+        (None, None) => Err(MetricsError::Rejected(
+            "a latest query needs a host or a key".into(),
+        )),
+    }
+}
+
+/// One instant query that answers, per series, both its newest value and the time of that
+/// sample. `last_over_time` returns the value but stamps it with the query time, so the
+/// sample's own time comes from `tlast_over_time` (seconds), marked with the label `__ts`
+/// so the two kinds of series can be told apart; `keep_metric_names` keeps the name
+/// that pairs them. VictoriaMetrics also hides the newest 30 seconds of data from queries
+/// (`-search.latencyOffset`), which is fine for a window of minutes.
+fn latest_expression(query: &LatestQuery) -> Result<String, MetricsError> {
+    let selector = latest_selector(query)?;
+    if query.max_age_secs == 0 {
+        return Err(MetricsError::Rejected(
+            "max_age_secs must be at least 1".into(),
+        ));
+    }
+    let window = format!("{selector}[{}s]", query.max_age_secs);
+    Ok(format!(
+        "(last_over_time({window}), \
+         label_set(tlast_over_time({window}) keep_metric_names, \"{TS_LABEL}\", \"1\"))"
+    ))
+}
+
+/// The label that marks a series of sample times in a latest answer.
+const TS_LABEL: &str = "__ts";
+
+#[derive(Deserialize)]
+struct Instant {
+    metric: BTreeMap<String, String>,
+    value: (f64, String),
+}
+
+/// Pairs the value series and the time series of a latest answer. Series that are no
+/// built-in item, have no host, miss their time or value or carry a value that is not
+/// finite are dropped.
+fn latest_samples(result: Vec<Instant>) -> Vec<LatestSample> {
+    type SeriesId = (String, String, BTreeMap<String, String>);
+    let mut values: BTreeMap<SeriesId, f64> = BTreeMap::new();
+    let mut times: BTreeMap<SeriesId, f64> = BTreeMap::new();
+    for item in result {
+        let mut labels = item.metric;
+        let is_time = labels.remove(TS_LABEL).is_some();
+        let (Some(name), Some(host)) = (labels.remove("__name__"), labels.remove("host")) else {
+            continue;
+        };
+        let Some(key) = key_for_metric(&name) else {
+            continue;
+        };
+        let params: BTreeMap<String, String> = labels
+            .into_iter()
+            .filter_map(|(label, value)| Some((label.strip_prefix("p_")?.to_owned(), value)))
+            .collect();
+        let Some(number) = item.value.1.parse::<f64>().ok().filter(|v| v.is_finite()) else {
+            continue;
+        };
+        let id = (host, key.to_owned(), params);
+        if is_time {
+            times.insert(id, number);
+        } else {
+            values.insert(id, number);
+        }
+    }
+    values
+        .into_iter()
+        .filter_map(|((host, key, params), value)| {
+            let ts = times.get(&(host.clone(), key.clone(), params.clone()))?;
+            Some(LatestSample {
+                host,
+                key,
+                params,
+                ts_ms: (ts * 1000.0).round() as i64,
+                value,
+            })
+        })
+        .collect()
 }
 
 /// Seconds as VictoriaMetrics expects them; may be fractional.
@@ -135,17 +228,33 @@ async fn check_status(response: Response) -> Result<Response, MetricsError> {
 }
 
 #[derive(Deserialize)]
-struct QueryResponse {
+#[serde(bound(deserialize = "S: Deserialize<'de>"))]
+struct QueryResponse<S> {
     status: String,
     #[serde(default)]
     error: Option<String>,
     #[serde(default)]
-    data: Option<QueryData>,
+    data: Option<QueryData<S>>,
 }
 
 #[derive(Deserialize)]
-struct QueryData {
-    result: Vec<Series>,
+struct QueryData<S> {
+    result: Vec<S>,
+}
+
+/// Checks the status and reads the `result` list of a query answer.
+async fn read_result<S: DeserializeOwned>(response: Response) -> Result<Vec<S>, MetricsError> {
+    let parsed: QueryResponse<S> = check_status(response)
+        .await?
+        .json()
+        .await
+        .map_err(|e| MetricsError::Unavailable(format!("unreadable response: {e}")))?;
+    if parsed.status != "success" {
+        return Err(MetricsError::Rejected(
+            parsed.error.unwrap_or_else(|| "query failed".into()),
+        ));
+    }
+    Ok(parsed.data.map(|d| d.result).unwrap_or_default())
 }
 
 #[derive(Deserialize)]
@@ -188,20 +297,15 @@ impl MetricsStore for VictoriaMetrics {
             .send()
             .await
             .map_err(send_error)?;
-        let parsed: QueryResponse = check_status(response)
-            .await?
-            .json()
-            .await
-            .map_err(|e| MetricsError::Unavailable(format!("unreadable response: {e}")))?;
-        if parsed.status != "success" {
+        let series = read_result::<Series>(response).await?;
+        // The selector pins one series; more than one means the caller left a parameter
+        // out, and merging them would draw a mixed line.
+        if series.len() > 1 {
             return Err(MetricsError::Rejected(
-                parsed.error.unwrap_or_else(|| "query failed".into()),
+                "the query matched more than one series".into(),
             ));
         }
-        let mut samples: Vec<Sample> = parsed
-            .data
-            .map(|d| d.result)
-            .unwrap_or_default()
+        let mut samples: Vec<Sample> = series
             .into_iter()
             .flat_map(|s| s.values)
             .filter_map(|(ts, value)| {
@@ -215,6 +319,17 @@ impl MetricsStore for VictoriaMetrics {
         samples.sort_by_key(|s| s.ts_ms);
         Ok(samples)
     }
+
+    async fn latest(&self, query: &LatestQuery) -> Result<Vec<LatestSample>, MetricsError> {
+        let response = self
+            .client
+            .get(self.endpoint("api/v1/query")?)
+            .query(&[("query", latest_expression(query)?)])
+            .send()
+            .await
+            .map_err(send_error)?;
+        Ok(latest_samples(read_result::<Instant>(response).await?))
+    }
 }
 
 #[cfg(test)]
@@ -226,7 +341,9 @@ mod tests {
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use crate::metrics::{MetricsError, MetricsStore, RangeQuery, Sample, VictoriaMetrics};
+    use crate::metrics::{
+        LatestQuery, LatestSample, MetricsError, MetricsStore, RangeQuery, Sample, VictoriaMetrics,
+    };
 
     fn mv(key: &str, params: &[(&str, &str)], ts_ms: i64, value: f64) -> MetricValue {
         MetricValue {
@@ -353,6 +470,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_range_refuses_more_than_one_series() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query_range"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": {"resultType": "matrix", "result": [
+                    {"metric": {"p_mount": "/"}, "values": [[1_700_000_000, "1"]]},
+                    {"metric": {"p_mount": "/data"}, "values": [[1_700_000_000, "2"]]}
+                ]}
+            })))
+            .mount(&server)
+            .await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        let err = vm.query_range(&range(&[])).await.unwrap_err();
+        assert!(matches!(err, MetricsError::Rejected(_)), "{err:?}");
+        assert!(err.to_string().contains("more than one series"), "{err}");
+    }
+
+    #[tokio::test]
     async fn query_range_parses_matrix_result() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -476,6 +613,234 @@ mod tests {
         assert!(matches!(err, MetricsError::Unavailable(_)), "{err:?}");
     }
 
+    fn latest_query(host: Option<&str>, key: Option<&str>) -> LatestQuery {
+        LatestQuery {
+            host: host.map(str::to_owned),
+            key: key.map(str::to_owned),
+            max_age_secs: 600,
+        }
+    }
+
+    /// One series of an instant-query answer: the value series or its timestamp series.
+    fn vector_item(name: &str, labels: &[(&str, &str)], ts: bool, value: &str) -> Value {
+        let mut metric = serde_json::Map::new();
+        metric.insert("__name__".into(), json!(name));
+        for (k, v) in labels {
+            metric.insert((*k).into(), json!(v));
+        }
+        if ts {
+            metric.insert("__ts".into(), json!("1"));
+        }
+        json!({"metric": metric, "value": [1_700_000_100, value]})
+    }
+
+    async fn instant_server(result: Vec<Value>) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": {"resultType": "vector", "result": result}
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn sent_query(server: &MockServer) -> String {
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "one query per call");
+        requests[0]
+            .url
+            .query_pairs()
+            .find(|(k, _)| k == "query")
+            .map(|(_, v)| v.into_owned())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn latest_builds_one_instant_query() {
+        fn expected(selector: &str) -> String {
+            format!(
+                "(last_over_time({selector}[600s]), \
+                 label_set(tlast_over_time({selector}[600s]) keep_metric_names, \"__ts\", \"1\"))"
+            )
+        }
+        for (host, key, selector) in [
+            (
+                Some("web-01"),
+                Some("cpu.usage"),
+                r#"cerbrix_cpu_usage{host="web-01"}"#,
+            ),
+            (
+                Some("web-01"),
+                None,
+                r#"{__name__=~"cerbrix_.+",host="web-01"}"#,
+            ),
+            (None, Some("cpu.usage"), "cerbrix_cpu_usage"),
+        ] {
+            let server = instant_server(vec![]).await;
+            let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+            let got = vm.latest(&latest_query(host, key)).await.unwrap();
+            assert!(got.is_empty());
+            assert_eq!(sent_query(&server).await, expected(selector));
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_maps_labels_to_params() {
+        let labels = [("host", "web-01"), ("p_mount", "/")];
+        let server = instant_server(vec![
+            vector_item("cerbrix_disk_used_percent", &labels, false, "42.5"),
+            vector_item("cerbrix_disk_used_percent", &labels, true, "1699999990"),
+            vector_item("cerbrix_cpu_usage", &[("host", "web-01")], false, "7"),
+            vector_item(
+                "cerbrix_cpu_usage",
+                &[("host", "web-01")],
+                true,
+                "1699999995.5",
+            ),
+        ])
+        .await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        let mut got = vm
+            .latest(&latest_query(Some("web-01"), None))
+            .await
+            .unwrap();
+        got.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(
+            got,
+            vec![
+                LatestSample {
+                    host: "web-01".into(),
+                    key: "cpu.usage".into(),
+                    params: BTreeMap::new(),
+                    // The sample's own time, not the query time (1_700_000_100).
+                    ts_ms: 1_699_999_995_500,
+                    value: 7.0,
+                },
+                LatestSample {
+                    host: "web-01".into(),
+                    key: "disk.used_percent".into(),
+                    params: BTreeMap::from([("mount".to_owned(), "/".to_owned())]),
+                    ts_ms: 1_699_999_990_000,
+                    value: 42.5,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_skips_unknown_metric_names() {
+        let labels = [("host", "web-01")];
+        let server = instant_server(vec![
+            vector_item("cerbrix_not_an_item", &labels, false, "1"),
+            vector_item("cerbrix_not_an_item", &labels, true, "1699999990"),
+            vector_item("up", &labels, false, "1"),
+            vector_item("up", &labels, true, "1699999990"),
+            // A value without its timestamp, a series without a host and a value that is
+            // not finite are unusable.
+            vector_item("cerbrix_cpu_usage", &labels, false, "5"),
+            vector_item("cerbrix_memory_used_percent", &[], false, "5"),
+            vector_item("cerbrix_memory_used_percent", &[], true, "1699999990"),
+            vector_item("cerbrix_system_load1", &labels, false, "NaN"),
+            vector_item("cerbrix_system_load1", &labels, true, "1699999990"),
+        ])
+        .await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        let got = vm
+            .latest(&latest_query(Some("web-01"), None))
+            .await
+            .unwrap();
+        assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn latest_unavailable_and_rejected_mapping() {
+        for (status, unavailable) in [(500, true), (503, true), (429, true), (400, false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/query"))
+                .respond_with(ResponseTemplate::new(status))
+                .mount(&server)
+                .await;
+            let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+            let err = vm
+                .latest(&latest_query(Some("web-01"), None))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                matches!(err, MetricsError::Unavailable(_)),
+                unavailable,
+                "{status}: {err:?}"
+            );
+        }
+        // An answer with status "error" is a rejection; unreadable JSON is unavailable.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "error", "error": "bad query"
+            })))
+            .mount(&server)
+            .await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        let err = vm
+            .latest(&latest_query(Some("web-01"), None))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MetricsError::Rejected(_)), "{err:?}");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        let err = vm
+            .latest(&latest_query(Some("web-01"), None))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MetricsError::Unavailable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn latest_rejects_bad_host_or_key_before_any_request() {
+        let server = no_request_server().await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        let hosts = [
+            r#"x"} or {__name__=~".+""#,
+            "a b",
+            "a\"b",
+            "a\\b",
+            "a\nb",
+            "a\rb",
+            "",
+            "-x",
+        ];
+        for host in hosts {
+            let err = vm
+                .latest(&latest_query(Some(host), None))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, MetricsError::Rejected(_)),
+                "{host:?}: {err:?}"
+            );
+        }
+        for key in [r#"x{host=~".+"} or cerbrix_y"#, "a}", "A.b", "a..b", ""] {
+            let err = vm.latest(&latest_query(None, Some(key))).await.unwrap_err();
+            assert!(matches!(err, MetricsError::Rejected(_)), "{key:?}: {err:?}");
+        }
+        // Neither host nor key: no query over every series. No window: nothing to ask for.
+        let err = vm.latest(&latest_query(None, None)).await.unwrap_err();
+        assert!(matches!(err, MetricsError::Rejected(_)), "{err:?}");
+        let mut zero = latest_query(Some("web-01"), None);
+        zero.max_age_secs = 0;
+        let err = vm.latest(&zero).await.unwrap_err();
+        assert!(matches!(err, MetricsError::Rejected(_)), "{err:?}");
+        server.verify().await;
+    }
+
     /// Needs the dev compose stack: `docker compose -f docker-compose.dev.yml up -d`.
     #[tokio::test]
     #[ignore = "needs VictoriaMetrics on localhost:8428"]
@@ -524,6 +889,39 @@ mod tests {
         assert_eq!(samples.first().map(|s| s.value), Some(41.5), "{samples:?}");
         assert_eq!(samples.last().map(|s| s.value), Some(42.5), "{samples:?}");
         assert!(samples.iter().all(|s| s.value == 41.5 || s.value == 42.5));
+
+        // The newest sample of the series, with its own timestamp, by host and by host+key.
+        for key in [None, Some("disk.used_percent".to_owned())] {
+            let latest = vm
+                .latest(&LatestQuery {
+                    host: Some(host.clone()),
+                    key,
+                    max_age_secs: 600,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                latest,
+                vec![LatestSample {
+                    host: host.clone(),
+                    key: "disk.used_percent".into(),
+                    params: BTreeMap::from([("mount".to_owned(), mount.to_owned())]),
+                    ts_ms: t2,
+                    value: 42.5,
+                }]
+            );
+        }
+        // Older than the window: nothing. VictoriaMetrics evaluates about 30 s in the past
+        // (-search.latencyOffset), so the window ends there, not now; the sample is 90 s old.
+        let none = vm
+            .latest(&LatestQuery {
+                host: Some(host.clone()),
+                key: None,
+                max_age_secs: 20,
+            })
+            .await
+            .unwrap();
+        assert!(none.is_empty(), "{none:?}");
 
         // A different host sees nothing.
         let other = RangeQuery {
