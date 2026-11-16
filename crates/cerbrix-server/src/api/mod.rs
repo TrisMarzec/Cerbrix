@@ -84,7 +84,7 @@ pub fn router(state: AppState) -> Router {
 pub struct ApiError {
     status: StatusCode,
     code: &'static str,
-    message: &'static str,
+    message: std::borrow::Cow<'static, str>,
 }
 
 impl ApiError {
@@ -92,7 +92,17 @@ impl ApiError {
         Self {
             status,
             code,
-            message,
+            message: message.into(),
+        }
+    }
+
+    /// An error with a message made at run time; it must not contain secrets or raw input
+    /// beyond names that were validated.
+    pub(crate) fn with_message(status: StatusCode, code: &'static str, message: String) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
         }
     }
 
@@ -110,7 +120,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = ErrorBody {
             error: self.code.to_owned(),
-            message: self.message.to_owned(),
+            message: self.message.into_owned(),
         };
         (self.status, axum::Json(body)).into_response()
     }

@@ -297,8 +297,15 @@ impl MetricsStore for VictoriaMetrics {
             .send()
             .await
             .map_err(send_error)?;
-        let mut samples: Vec<Sample> = read_result::<Series>(response)
-            .await?
+        let series = read_result::<Series>(response).await?;
+        // The selector pins one series; more than one means the caller left a parameter
+        // out, and merging them would draw a mixed line.
+        if series.len() > 1 {
+            return Err(MetricsError::Rejected(
+                "the query matched more than one series".into(),
+            ));
+        }
+        let mut samples: Vec<Sample> = series
             .into_iter()
             .flat_map(|s| s.values)
             .filter_map(|(ts, value)| {
@@ -460,6 +467,26 @@ mod tests {
         assert_eq!(line["metric"]["p_mount"], mount);
         let got = vm.query_range(&range(&[("mount", mount)])).await.unwrap();
         assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_range_refuses_more_than_one_series() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query_range"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": {"resultType": "matrix", "result": [
+                    {"metric": {"p_mount": "/"}, "values": [[1_700_000_000, "1"]]},
+                    {"metric": {"p_mount": "/data"}, "values": [[1_700_000_000, "2"]]}
+                ]}
+            })))
+            .mount(&server)
+            .await;
+        let vm = VictoriaMetrics::new(&server.uri()).unwrap();
+        let err = vm.query_range(&range(&[])).await.unwrap_err();
+        assert!(matches!(err, MetricsError::Rejected(_)), "{err:?}");
+        assert!(err.to_string().contains("more than one series"), "{err}");
     }
 
     #[tokio::test]

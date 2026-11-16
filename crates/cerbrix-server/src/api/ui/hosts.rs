@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use cerbrix_common::config::Severity;
 use cerbrix_common::{
-    Comparison, MAX_PARAMS, TriggerExpr, default_agent_items, validate_host_name,
+    Comparison, MAX_PARAMS, TriggerExpr, builtin_item, default_agent_items, validate_host_name,
     validate_item_key, validate_param_name,
 };
 use serde::{Deserialize, Serialize};
@@ -444,6 +444,7 @@ fn series_request(pairs: Vec<(String, String)>) -> Result<SeriesRequest, ApiErro
     }
     let item = item.ok_or_else(|| invalid("item is required"))?;
     validate_item_key(&item).map_err(|_| invalid("item is not a valid item key"))?;
+    check_item_params(&item, &params)?;
     let range = range.ok_or_else(|| invalid("range is required"))?;
     if series_range(&range).is_none() {
         return Err(invalid("range must be 1h, 6h, 24h or 7d"));
@@ -453,6 +454,37 @@ fn series_request(pairs: Vec<(String, String)>) -> Result<SeriesRequest, ApiErro
         range,
         params,
     })
+}
+
+/// A series is one item with exactly the parameter the item has: an item with a parameter
+/// needs it (without it the selector would match every instance and the points of several
+/// series would be mixed), an item without one takes none. Items that are not built in are
+/// not known well enough to check. Parameter names are validated identifiers, so they can
+/// be named in the message.
+fn check_item_params(item: &str, params: &BTreeMap<String, String>) -> Result<(), ApiError> {
+    let Some(spec) = builtin_item(item) else {
+        return Ok(());
+    };
+    let wrong =
+        |message: String| ApiError::with_message(StatusCode::BAD_REQUEST, "invalid", message);
+    match spec.param {
+        Some(want) => {
+            if !params.contains_key(want) {
+                return Err(wrong(format!("{item} needs the parameter p_{want}")));
+            }
+            if let Some(other) = params.keys().find(|name| name.as_str() != want) {
+                return Err(wrong(format!(
+                    "{item} has no parameter p_{other}, only p_{want}"
+                )));
+            }
+        }
+        None => {
+            if let Some(other) = params.keys().next() {
+                return Err(wrong(format!("{item} has no parameter p_{other}")));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A trigger limit drawn into the graph of its item.
@@ -1376,7 +1408,7 @@ mod tests {
         // Known by the default items, with no trigger to draw.
         let reply = get(
             &fx,
-            "/api/v1/hosts/fixture-host/series?item=net.rx_bytes_per_sec&range=1h",
+            "/api/v1/hosts/fixture-host/series?item=net.rx_bytes_per_sec&range=1h&p_interface=eth0",
         )
         .await;
         assert_eq!(reply.status, StatusCode::OK);
@@ -1407,6 +1439,48 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn series_needs_the_items_parameter(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        // Without the mount the selector would match every mount and mix their points.
+        let reply = get(
+            &fx,
+            "/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h",
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(reply.error_code(), "invalid");
+        assert!(String::from_utf8_lossy(&reply.body).contains("mount"));
+        // The item has one parameter: no other.
+        let reply = get(
+            &fx,
+            "/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h&p_mount=/&p_interface=eth0",
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        let reply = get(
+            &fx,
+            "/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h&p_interface=eth0",
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_rejects_a_parameter_the_item_does_not_have(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        let reply = get(
+            &fx,
+            "/api/v1/hosts/web-01/series?item=cpu.usage&range=1h&p_mount=/",
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(reply.error_code(), "invalid");
+        assert!(String::from_utf8_lossy(&reply.body).contains("mount"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn series_bad_query_parameters_are_invalid(pool: PgPool) {
         let fx = Fixture::new(pool).await;
         apply_example(&fx).await;
@@ -1427,9 +1501,17 @@ mod tests {
             "&item=cpu.usage".to_owned(),
             many,
         ] {
+            // The mount is given unless the case is about the mount itself.
+            let base = if extra.starts_with("&p_mount") {
+                ""
+            } else {
+                "&p_mount=/"
+            };
             let reply = get(
                 &fx,
-                &format!("/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h{extra}"),
+                &format!(
+                    "/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h{base}{extra}"
+                ),
             )
             .await;
             assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{extra}");
