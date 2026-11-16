@@ -305,6 +305,10 @@ pub async fn run(
             description,
             expires_in,
         }) => {
+            // Like `POST /api/v1/enrollment-keys`: blank is empty.
+            if description.trim().is_empty() {
+                bail!("the description must not be empty");
+            }
             let expires_at = now
                 .checked_add(expires_in)
                 .ok_or_else(|| anyhow!("expiry is out of range"))?;
@@ -825,6 +829,30 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn key_create_refuses_a_blank_description(pool: PgPool) {
+        let store = StateStore::from_pool(pool);
+        for description in ["", "   ", "\t"] {
+            let err = run(
+                &store,
+                AdminCommand::Key(KeyCommand::Create {
+                    description: description.to_owned(),
+                    expires_in: parse_duration("1d").unwrap(),
+                }),
+                now(),
+                &cfg(false),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "the description must not be empty",
+                "{description:?}"
+            );
+        }
+        assert!(store.enrollment_keys().await.unwrap().is_empty());
     }
 
     #[sqlx::test(migrations = "./migrations")]

@@ -464,7 +464,11 @@ impl StateStore {
     /// query.
     pub async fn host_counts(&self) -> Result<HostCounts, StateError> {
         let (total, with_problems, never_seen): (i64, i64, i64) = sqlx::query_as(
-            "SELECT count(*), \n             count(*) FILTER (WHERE EXISTS (SELECT 1 FROM problems p \n                              WHERE p.host_id = h.id AND p.resolved_at IS NULL)), \n             count(*) FILTER (WHERE h.last_seen_at IS NULL) \n             FROM hosts h WHERE h.active",
+            "SELECT count(*), \
+             count(*) FILTER (WHERE EXISTS (SELECT 1 FROM problems p \
+                              WHERE p.host_id = h.id AND p.resolved_at IS NULL)), \
+             count(*) FILTER (WHERE h.last_seen_at IS NULL) \
+             FROM hosts h WHERE h.active",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -519,7 +523,8 @@ impl StateStore {
     /// many dashboards and hosts there are. Dashboards are ordered by id, hosts by name.
     pub async fn board_inputs(&self) -> Result<BoardInputs, StateError> {
         let rows: Vec<(String, String, Json<serde_json::Value>)> = sqlx::query_as(
-            "SELECT id, source_file, body FROM config_documents              WHERE kind = 'dashboard' ORDER BY id",
+            "SELECT id, source_file, body FROM config_documents \
+             WHERE kind = 'dashboard' ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -566,7 +571,8 @@ impl StateStore {
         names: &[String],
     ) -> Result<HashMap<String, EffectiveHost>, StateError> {
         let rows: Vec<(String, Json<EffectiveHost>)> = sqlx::query_as(
-            "SELECT name, config FROM hosts              WHERE active AND name = ANY($1) AND config IS NOT NULL",
+            "SELECT name, config FROM hosts \
+             WHERE active AND name = ANY($1) AND config IS NOT NULL",
         )
         .bind(names)
         .fetch_all(&self.pool)
@@ -580,7 +586,8 @@ impl StateStore {
         id: &str,
     ) -> Result<Option<(String, DashboardFile)>, StateError> {
         let row: Option<(String, Json<serde_json::Value>)> = sqlx::query_as(
-            "SELECT source_file, body FROM config_documents              WHERE kind = 'dashboard' AND id = $1",
+            "SELECT source_file, body FROM config_documents \
+             WHERE kind = 'dashboard' AND id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -592,7 +599,8 @@ impl StateStore {
     /// The active hosts, ordered by name, without their open problems.
     async fn active_hosts(&self) -> Result<Vec<HostRow>, StateError> {
         let columns: Vec<HostColumns> = sqlx::query_as(
-            "SELECT id, name, address, groups, source_file, last_seen_at              FROM hosts WHERE active ORDER BY name, id",
+            "SELECT id, name, address, groups, source_file, last_seen_at \
+             FROM hosts WHERE active ORDER BY name, id",
         )
         .fetch_all(&self.pool)
         .await?;

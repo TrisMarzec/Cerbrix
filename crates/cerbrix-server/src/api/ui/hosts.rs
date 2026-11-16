@@ -1008,7 +1008,8 @@ mod tests {
         assert_eq!(reply.status, StatusCode::OK);
         assert_eq!(reply.json()["metrics_available"], false);
         assert!(reply.json()["items"][0]["cpu"].is_null());
-        // The two calls run concurrently, each with a 3 s limit.
+        // The two calls run concurrently, each with a 3 s limit: below the 6 s of waiting
+        // one after another.
         assert!(
             took >= std::time::Duration::from_secs(3) && took < std::time::Duration::from_secs(6),
             "{took:?}"

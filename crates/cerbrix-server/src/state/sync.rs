@@ -554,7 +554,8 @@ impl StateStore {
         offset: i64,
     ) -> Result<(Vec<SyncHistoryEntry>, i64), StateError> {
         let rows: Vec<(String, OffsetDateTime, Json<SyncChanges>)> = sqlx::query_as(
-            "SELECT commit, applied_at, changes FROM sync_history \n             ORDER BY id DESC LIMIT $1 OFFSET $2",
+            "SELECT commit, applied_at, changes FROM sync_history \
+             ORDER BY id DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)
         .bind(offset)

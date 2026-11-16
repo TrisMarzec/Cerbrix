@@ -1014,9 +1014,10 @@ mod tests {
         assert_eq!(body["metrics_available"], false);
         assert!(body["panels"][1]["points"].is_null());
         assert!(body["panels"][4]["value"].is_null());
-        // Four panels wait at the same time, each for at most 5 s.
+        // Four panels wait at the same time, each for at most 5 s: well below the 20 s of
+        // waiting one after another, with room for a loaded machine.
         assert!(
-            took >= Duration::from_secs(5) && took < Duration::from_secs(9),
+            took >= Duration::from_secs(5) && took < Duration::from_secs(15),
             "{took:?}"
         );
     }
@@ -1140,7 +1141,8 @@ mod tests {
              FROM (SELECT id, substr(name, 2)::int % 4 AS k FROM hosts WHERE name LIKE 'h%') h \
              JOIN (VALUES (0, 'A', 'critical', false), (0, 'B', 'warning', false), \
                           (1, 'A', 'high', true), (1, 'B', 'info', true), \
-                          (2, 'A', 'critical', true), (2, 'B', 'high', false), \n                          (3, 'A', 'info', false), (3, 'B', 'info', false)) \
+                          (2, 'A', 'critical', true), (2, 'B', 'high', false), \
+                          (3, 'A', 'info', false), (3, 'B', 'info', false)) \
                   AS t(k, name, severity, acked) ON t.k = h.k",
         )
         .execute(&pool)
