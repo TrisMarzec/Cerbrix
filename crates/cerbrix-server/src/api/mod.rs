@@ -16,6 +16,7 @@ use crate::metrics::MetricsStore;
 use crate::state::StateStore;
 
 mod agent;
+pub mod ui;
 
 /// Shared handles of the API. Everything in it is a connection handle or read-only
 /// configuration; no request data is kept here. The one exception is `warnings`, which
@@ -67,19 +68,20 @@ impl WarnLimiter {
     }
 }
 
-/// Builds the router for the agent-facing API.
+/// Builds the router: the agent-facing API and the UI API under `/api/v1`.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(agent::healthz))
         .route("/api/agent/v1/enroll", post(agent::enroll))
         .route("/api/agent/v1/values", post(agent::values))
         .route("/api/agent/v1/config", get(agent::config))
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(ui::router(state))
 }
 
 /// An error answer: a status plus an `ErrorBody` with a stable code.
 #[derive(Debug)]
-pub(crate) struct ApiError {
+pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     message: &'static str,

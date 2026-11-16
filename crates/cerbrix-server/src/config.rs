@@ -30,6 +30,8 @@ pub struct Config {
     pub alerting: AlertingConfig,
     #[serde(default)]
     pub smtp: SmtpConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +99,45 @@ impl AlertingConfig {
         }
         if !(5..=300).contains(&self.nodata_check_secs) {
             return bad("alerting.nodata_check_secs must be between 5 and 300");
+        }
+        Ok(())
+    }
+}
+
+/// Settings for web UI sessions.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// A session unused for this long ends.
+    pub session_idle_secs: u64,
+    /// A session ends this long after login, however active it is.
+    pub session_max_secs: u64,
+    /// Whether the session cookie carries `Secure`. Unset: on, unless `server.insecure_http`.
+    /// Behind a TLS-terminating reverse proxy, set it to true.
+    pub secure_cookie: Option<bool>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            session_idle_secs: 43_200,
+            session_max_secs: 604_800,
+            secure_cookie: None,
+        }
+    }
+}
+
+impl AuthConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        let bad = |msg: &str| Err(ConfigError::Invalid(msg.to_owned()));
+        if !(300..=604_800).contains(&self.session_idle_secs) {
+            return bad("auth.session_idle_secs must be between 300 and 604800");
+        }
+        if self.session_max_secs < self.session_idle_secs {
+            return bad("auth.session_max_secs must not be smaller than auth.session_idle_secs");
+        }
+        if self.session_max_secs > 2_592_000 {
+            return bad("auth.session_max_secs must be at most 2592000");
         }
         Ok(())
     }
@@ -511,7 +552,15 @@ impl Config {
         self.gitops.validate()?;
         self.alerting.validate()?;
         self.smtp.validate()?;
+        self.auth.validate()?;
         Ok(())
+    }
+
+    /// Whether the session cookie is marked `Secure`.
+    pub fn secure_cookie(&self) -> bool {
+        self.auth
+            .secure_cookie
+            .unwrap_or(!self.server.insecure_http)
     }
 }
 
@@ -926,6 +975,42 @@ mod tests {
                     assert!(invalid(result).contains("alerting.nodata_check_secs"));
                 }
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn auth_defaults_and_bounds() {
+        Jail::expect_with(|_| {
+            let cfg = load_gitops(&base_toml(DB, VM)).unwrap();
+            assert_eq!(cfg.auth.session_idle_secs, 43_200);
+            assert_eq!(cfg.auth.session_max_secs, 604_800);
+            assert_eq!(cfg.auth.secure_cookie, None);
+            // Unset, the cookie follows the server mode: base_toml serves plain HTTP.
+            assert!(!cfg.secure_cookie());
+            let with = |extra: &str| load_gitops(&format!("{}[auth]\n{extra}", base_toml(DB, VM)));
+            for (value, ok) in [(299, false), (300, true), (604_800, true), (604_801, false)] {
+                let result = with(&format!(
+                    "session_idle_secs = {value}\nsession_max_secs = 604800\n"
+                ));
+                assert_eq!(result.is_ok(), ok, "idle {value}");
+                if !ok {
+                    assert!(invalid(result).contains("auth.session_idle_secs"));
+                }
+            }
+            // The maximum may not be below the idle time, and has an upper bound.
+            let result = with("session_idle_secs = 7200\nsession_max_secs = 7199\n");
+            assert!(invalid(result).contains("auth.session_max_secs"));
+            assert!(with("session_idle_secs = 7200\nsession_max_secs = 7200\n").is_ok());
+            assert!(with("session_max_secs = 2592000\n").is_ok());
+            assert!(invalid(with("session_max_secs = 2592001\n")).contains("session_max_secs"));
+            // An explicit setting wins over the server mode, both ways.
+            assert!(with("secure_cookie = true\n").unwrap().secure_cookie());
+            let tls_toml = "[server]\ninsecure_http = false\ntls_cert = \"c.pem\"\ntls_key = \"k.pem\"\n[database]\nurl = \"postgres://localhost/x\"\n[metrics]\nurl = \"http://localhost:8428\"\n";
+            let secure_by_default = load_gitops(tls_toml).unwrap();
+            assert!(secure_by_default.secure_cookie());
+            let off = load_gitops(&format!("{tls_toml}[auth]\nsecure_cookie = false\n")).unwrap();
+            assert!(!off.secure_cookie());
             Ok(())
         });
     }

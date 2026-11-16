@@ -17,7 +17,7 @@ pub use sync::{
     Applied, ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock,
     SyncState, SyncStatus,
 };
-pub use users::User;
+pub use users::{LoginOutcome, PasswordCheck, User};
 
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;

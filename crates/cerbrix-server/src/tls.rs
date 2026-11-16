@@ -17,6 +17,7 @@ use crate::alerting::channel::{Channel, SmtpChannel};
 use crate::alerting::dispatch::run_dispatch_loop;
 use crate::alerting::nodata::run_nodata_loop;
 use crate::api::{AppState, router};
+use crate::auth::{SESSION_CLEANUP_EVERY, run_session_cleanup_loop};
 use crate::config::Config;
 use crate::gitops::{GitSource, run_sync_loop};
 use crate::metrics::VictoriaMetrics;
@@ -89,6 +90,11 @@ pub async fn serve(
         Duration::from_secs(config.alerting.nodata_check_secs),
         shutdown_token.clone(),
     ));
+    let sessions_task = tokio::spawn(run_session_cleanup_loop(
+        store.clone(),
+        SESSION_CLEANUP_EVERY,
+        shutdown_token.clone(),
+    ));
     let dispatch_task = channel.map(|channel| {
         tokio::spawn(run_dispatch_loop(
             store.clone(),
@@ -154,6 +160,9 @@ pub async fn serve(
     }
     if let Err(err) = nodata_task.await {
         tracing::error!(%err, "no-data loop ended abnormally");
+    }
+    if let Err(err) = sessions_task.await {
+        tracing::error!(%err, "session cleanup loop ended abnormally");
     }
     if let Some(task) = dispatch_task
         && let Err(err) = task.await

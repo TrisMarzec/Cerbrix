@@ -373,6 +373,7 @@ mod tests {
             gitops: Default::default(),
             alerting: Default::default(),
             smtp: Default::default(),
+            auth: Default::default(),
         })
     }
 

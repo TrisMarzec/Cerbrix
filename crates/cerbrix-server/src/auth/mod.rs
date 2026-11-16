@@ -1,14 +1,25 @@
-//! Users, roles and passwords.
+//! Users, roles, passwords and the extractors that enforce roles on routes.
 //!
 //! Passwords are stored only as Argon2id PHC strings; hashing and verifying run on blocking
 //! threads because they take tens of milliseconds of CPU and a lot of memory.
 
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher as _, PasswordVerifier as _};
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use rand::RngExt as _;
+use time::OffsetDateTime;
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
+
+use crate::api::{ApiError, AppState};
+use crate::state::{StateStore, User};
 
 /// What a user may do. The order is the order of privilege: `Viewer < Operator < Admin`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -133,9 +144,283 @@ pub fn generate_password() -> String {
         .collect()
 }
 
+/// Name of the session cookie. Its value is the session token and nothing else.
+pub const SESSION_COOKIE: &str = "cerbrix_session";
+
+/// How often expired sessions are deleted.
+pub const SESSION_CLEANUP_EVERY: Duration = Duration::from_secs(600);
+
+/// The cookie that carries a new session.
+pub fn session_cookie(token: &str, max_age_secs: u64, secure: bool) -> String {
+    cookie(token, max_age_secs, secure)
+}
+
+/// The cookie that removes the session cookie from the browser.
+pub fn clear_cookie(secure: bool) -> String {
+    cookie("", 0, secure)
+}
+
+fn cookie(value: &str, max_age_secs: u64, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_secs}{secure}"
+    )
+}
+
+/// The session token of a request: the value of the session cookie, if present.
+pub fn session_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, value)| *name == SESSION_COOKIE && !value.is_empty())
+        .map(|(_, value)| value)
+}
+
+/// Why a request was not let through. Becomes a 401, 403 or 500 answer.
+#[derive(Debug)]
+pub enum AuthError {
+    /// No session, or one that is invalid, expired or belongs to a disabled user. When the
+    /// request carried a session cookie, the answer removes it.
+    Unauthorized {
+        clear_cookie: bool,
+    },
+    /// A valid session whose role is too low.
+    Forbidden,
+    Internal,
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        match self {
+            AuthError::Unauthorized {
+                clear_cookie: clear,
+            } => {
+                let mut response =
+                    ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "login required")
+                        .into_response();
+                if clear && let Ok(value) = HeaderValue::from_str(&clear_cookie(false)) {
+                    response.headers_mut().insert(header::SET_COOKIE, value);
+                }
+                response
+            }
+            AuthError::Forbidden => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "your role does not allow this",
+            )
+            .into_response(),
+            AuthError::Internal => ApiError::internal().into_response(),
+        }
+    }
+}
+
+/// The user a request is made by, put into the request extensions by the route guard so
+/// that the extractors below do not look the session up a second time.
+#[derive(Debug, Clone)]
+pub(crate) struct AuthedUser(pub(crate) User);
+
+/// Resolves the session of a request to its user.
+pub(crate) async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<User, AuthError> {
+    let Some(token) = session_token(headers) else {
+        return Err(AuthError::Unauthorized {
+            clear_cookie: false,
+        });
+    };
+    match app
+        .store
+        .session_user(token, OffsetDateTime::now_utc(), &app.config.auth)
+        .await
+    {
+        Ok(Some(user)) => Ok(user),
+        Ok(None) => Err(AuthError::Unauthorized { clear_cookie: true }),
+        Err(e) => {
+            tracing::error!(error = %e, "session lookup failed");
+            Err(AuthError::Internal)
+        }
+    }
+}
+
+/// `Ok(user)` when the user's role is at least `min`.
+pub(crate) fn require(user: User, min: Role) -> Result<User, AuthError> {
+    if user.role >= min {
+        Ok(user)
+    } else {
+        Err(AuthError::Forbidden)
+    }
+}
+
+async fn extract(parts: &mut Parts, app: &AppState, min: Role) -> Result<User, AuthError> {
+    let user = match parts.extensions.get::<AuthedUser>() {
+        Some(AuthedUser(user)) => user.clone(),
+        None => authenticate(app, &parts.headers).await?,
+    };
+    require(user, min)
+}
+
+/// A handler that takes one of these runs only for a session whose user has at least that
+/// role: viewer, operator or admin. A request without a valid session is answered 401, one
+/// with too low a role 403.
+macro_rules! role_extractor {
+    ($(#[$doc:meta])* $name:ident, $min:expr) => {
+        $(#[$doc])*
+        #[derive(Debug)]
+        pub struct $name(pub User);
+
+        impl FromRequestParts<AppState> for $name {
+            type Rejection = AuthError;
+
+            async fn from_request_parts(
+                parts: &mut Parts,
+                app: &AppState,
+            ) -> Result<Self, Self::Rejection> {
+                extract(parts, app, $min).await.map($name)
+            }
+        }
+    };
+}
+
+role_extractor!(
+    /// Any logged-in user.
+    Viewer,
+    Role::Viewer
+);
+role_extractor!(
+    /// An operator or an admin.
+    Operator,
+    Role::Operator
+);
+role_extractor!(
+    /// An admin.
+    Admin,
+    Role::Admin
+);
+
+/// Deletes expired sessions immediately and then every `every` until `shutdown` is
+/// cancelled. A failed run is logged and tried again at the next tick.
+pub async fn run_session_cleanup_loop(
+    store: StateStore,
+    every: Duration,
+    shutdown: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(every.max(Duration::from_millis(1)));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            _ = ticker.tick() => {}
+        }
+        match store
+            .delete_expired_sessions(OffsetDateTime::now_utc())
+            .await
+        {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(sessions = n, "deleted expired sessions"),
+            Err(e) => tracing::error!(error = %e, "deleting expired sessions failed"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn expired_sessions_are_deleted_by_the_loop(pool: sqlx::PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let user = store
+            .create_user(
+                "amy",
+                Role::Viewer,
+                "$argon2id$x",
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let now = OffsetDateTime::now_utc();
+        for (name, expires) in [
+            ("old", now - time::Duration::hours(1)),
+            ("new", now + time::Duration::hours(1)),
+        ] {
+            sqlx::query(
+                "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) \
+                 VALUES ($1, $2, $3, $3, $4)",
+            )
+            .bind(name.as_bytes())
+            .bind(user.id)
+            .bind(now - time::Duration::hours(2))
+            .bind(expires)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let shutdown = CancellationToken::new();
+        let handle = tokio::spawn(run_session_cleanup_loop(
+            store.clone(),
+            Duration::from_millis(50),
+            shutdown.clone(),
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let left: Vec<Vec<u8>> = sqlx::query_scalar("SELECT token_hash FROM sessions")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            if left == [b"new".to_vec()] {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the old session is deleted"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(30), handle)
+            .await
+            .expect("the loop stops after shutdown")
+            .expect("the loop did not panic");
+    }
+
+    #[test]
+    fn cookie_attributes() {
+        assert_eq!(
+            session_cookie("cbx_se_abc", 604_800, false),
+            "cerbrix_session=cbx_se_abc; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
+        );
+        assert_eq!(
+            session_cookie("cbx_se_abc", 60, true),
+            "cerbrix_session=cbx_se_abc; Path=/; HttpOnly; SameSite=Strict; Max-Age=60; Secure"
+        );
+        assert!(clear_cookie(false).starts_with("cerbrix_session=; "));
+        assert!(clear_cookie(false).ends_with("Max-Age=0"));
+    }
+
+    #[test]
+    fn the_token_is_read_from_the_cookie_header() {
+        let headers = |values: &[&str]| {
+            let mut h = HeaderMap::new();
+            for v in values {
+                h.append(header::COOKIE, HeaderValue::from_str(v).unwrap());
+            }
+            h
+        };
+        assert_eq!(session_token(&headers(&[])), None);
+        assert_eq!(session_token(&headers(&["a=b"])), None);
+        assert_eq!(session_token(&headers(&["cerbrix_session="])), None);
+        assert_eq!(
+            session_token(&headers(&["x=1; cerbrix_session=tok; y=2"])),
+            Some("tok")
+        );
+        assert_eq!(
+            session_token(&headers(&["x=1", "cerbrix_session=tok"])),
+            Some("tok")
+        );
+        // A cookie that only ends in the name is not the session cookie.
+        assert_eq!(session_token(&headers(&["xcerbrix_session=tok"])), None);
+    }
 
     #[test]
     fn role_order_and_text() {
