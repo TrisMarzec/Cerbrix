@@ -6,15 +6,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-use super::{ApiError, ApiJson, Entry, Listed, Page, invalid};
+use super::{ApiError, ApiJson, Entry, Listed, Page, hash_failed, invalid};
 use crate::api::AppState;
-use crate::auth::{
-    Admin, Role, generate_password, hash_password, validate_password, validate_user_name,
-};
+use crate::auth::{Admin, Role, generate_password, validate_password, validate_user_name};
 use crate::state::{StateError, User};
+use crate::view::rfc3339;
 
 pub(super) fn entries() -> Vec<Entry> {
     vec![
@@ -38,12 +36,6 @@ struct UserOut {
     password_changed_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<String>,
-}
-
-fn rfc3339(t: OffsetDateTime) -> String {
-    t.to_offset(time::UtcOffset::UTC)
-        .format(&Rfc3339)
-        .unwrap_or_default()
 }
 
 impl UserOut {
@@ -108,11 +100,8 @@ fn password_or_generated(given: Option<String>) -> Result<(String, Option<String
     }
 }
 
-async fn hash(password: String) -> Result<String, ApiError> {
-    hash_password(password).await.map_err(|e| {
-        tracing::error!(error = %e, "hashing a password failed");
-        ApiError::internal()
-    })
+async fn hash(app: &AppState, password: String) -> Result<String, ApiError> {
+    app.passwords.hash(password).await.map_err(hash_failed)
 }
 
 async fn list(
@@ -152,7 +141,7 @@ async fn create(
     })?;
     let role = parse_role(&body.role)?;
     let (password, generated) = password_or_generated(body.password)?;
-    let hash = hash(password).await?;
+    let hash = hash(&app, password).await?;
     let user = app
         .store
         .create_user(&body.name, role, &hash, OffsetDateTime::now_utc())
@@ -228,7 +217,7 @@ async fn reset_password(
         .await
         .map_err(|e| store_failed("loading a user failed", &e))?
         .ok_or_else(not_found)?;
-    let hash = hash(password).await?;
+    let hash = hash(&app, password).await?;
     app.store
         .set_user_password(id, &hash, OffsetDateTime::now_utc())
         .await

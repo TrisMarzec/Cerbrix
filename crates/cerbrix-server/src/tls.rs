@@ -17,7 +17,7 @@ use crate::alerting::channel::{Channel, SmtpChannel};
 use crate::alerting::dispatch::run_dispatch_loop;
 use crate::alerting::nodata::run_nodata_loop;
 use crate::api::{AppState, router};
-use crate::auth::{SESSION_CLEANUP_EVERY, run_session_cleanup_loop};
+use crate::auth::{PasswordGate, SESSION_CLEANUP_EVERY, run_session_cleanup_loop};
 use crate::config::Config;
 use crate::gitops::{GitSource, run_sync_loop};
 use crate::metrics::VictoriaMetrics;
@@ -109,6 +109,7 @@ pub async fn serve(
         config: Arc::new(config),
         warnings: Arc::default(),
         queue_mail,
+        passwords: PasswordGate::default(),
     };
     let app = router(state).layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,

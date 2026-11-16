@@ -229,8 +229,8 @@ const PREFIX: &str = "/api/v1";
 /// Everything under `/api/v1`. Merged into `api::router`, so one server serves both APIs.
 ///
 /// All routes sit in one router that is nested under the prefix and carries the guards,
-/// the same-origin check, the body limit and `no-store` for everything below it, its own
-/// fallback included. Nothing can be registered beside it.
+/// the same-origin check, the body limit and the response headers (`no-store`, `nosniff`)
+/// for everything below it, its own fallback included. Nothing can be registered beside it.
 ///
 /// # Panics
 ///
@@ -259,11 +259,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(from_fn(request_checks))
-        .layer(from_fn(no_store));
+        .layer(from_fn(response_headers));
     // The bare prefix with a trailing slash is not part of the nest: answer it alike.
     let root = axum::routing::any(not_found)
         .layer(from_fn(request_checks))
-        .layer(from_fn(no_store));
+        .layer(from_fn(response_headers));
     Router::new().nest(PREFIX, inner).route("/api/v1/", root)
 }
 
@@ -271,12 +271,16 @@ async fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such endpoint")
 }
 
-/// Answers must not be cached: they depend on the session.
-async fn no_store(req: Request, next: Next) -> Response {
+/// Answers must not be cached: they depend on the session. And a browser must not guess
+/// another content type than the one given: the answers are JSON, never a page.
+async fn response_headers(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     response
 }
 
@@ -286,6 +290,27 @@ fn invalid(message: &'static str) -> ApiError {
 
 fn forbidden(message: &'static str) -> ApiError {
     ApiError::new(StatusCode::FORBIDDEN, "forbidden", message)
+}
+
+/// The answer when no permit for password work came in time (see `PasswordGate`). The same
+/// for every user name: a waiting request has learned nothing.
+fn passwords_busy() -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too_many_attempts",
+        "the server is busy checking passwords, try again shortly",
+    )
+}
+
+/// The answer to a failed hash through the gate.
+fn hash_failed(e: crate::auth::HashError) -> ApiError {
+    match e {
+        crate::auth::HashError::Busy => passwords_busy(),
+        crate::auth::HashError::Failed(e) => {
+            tracing::error!(error = %e, "hashing a password failed");
+            ApiError::internal()
+        }
+    }
 }
 
 /// Checks a free-text query parameter before it reaches the store: at most `max_chars`
@@ -562,6 +587,8 @@ pub(crate) mod testing {
 
     pub struct Fixture {
         pub router: Router,
+        /// What `router` was built from; `use_metrics` and `use_password_gate` change it.
+        app: crate::api::AppState,
         #[allow(dead_code)] // for the tests of later tasks
         pub store: StateStore,
         pub pool: PgPool,
@@ -619,15 +646,17 @@ pub(crate) mod testing {
                 Err(e) => panic!("creating the fixture host failed: {e}"),
             }
             let metrics = Arc::new(MemoryMetrics::new());
-            let router = crate::api::router(crate::api::AppState {
+            let app = crate::api::AppState {
                 store: store.clone(),
                 metrics: metrics.clone(),
                 config,
                 warnings: Arc::default(),
                 queue_mail,
-            });
+                passwords: crate::auth::PasswordGate::default(),
+            };
             Self {
-                router,
+                router: crate::api::router(app.clone()),
+                app,
                 store,
                 pool,
                 metrics,
@@ -706,7 +735,9 @@ pub(crate) mod testing {
         /// layout over every host.
         pub async fn ensure_dashboard(&self) {
             sqlx::query(
-                "INSERT INTO config_documents (kind, id, source_file, body)                  VALUES ('dashboard', $1, 'dashboards/fixture-board.json',                          '{\"name\": \"Fixture board\"}'::jsonb)",
+                "INSERT INTO config_documents (kind, id, source_file, body) \
+                 VALUES ('dashboard', $1, 'dashboards/fixture-board.json', \
+                 '{\"name\": \"Fixture board\"}'::jsonb)",
             )
             .bind(self.dashboard)
             .execute(&self.pool)
@@ -771,13 +802,14 @@ pub(crate) mod testing {
 
         /// The router on top of another metrics store.
         pub fn use_metrics(&mut self, metrics: Arc<dyn crate::metrics::MetricsStore>) {
-            self.router = crate::api::router(crate::api::AppState {
-                store: self.store.clone(),
-                metrics,
-                config: config(true, None),
-                warnings: Arc::default(),
-                queue_mail: false,
-            });
+            self.app.metrics = metrics;
+            self.router = crate::api::router(self.app.clone());
+        }
+
+        /// The router with another limit on password work.
+        pub fn use_password_gate(&mut self, gate: crate::auth::PasswordGate) {
+            self.app.passwords = gate;
+            self.router = crate::api::router(self.app.clone());
         }
 
         /// Fills the path parameters of a route pattern with ids that exist in the fixture.
@@ -929,46 +961,52 @@ mod tests {
         }
     }
 
-    /// Nothing is served under `/api/v1` except what `ROUTES` lists: a made-up sibling of
-    /// every listed path and every unlisted method on a listed path is refused.
+    /// Nothing is served under `/api/v1` except what `ROUTES` lists: made-up siblings (one
+    /// and two segments deeper) of every listed path are 404 in the error format, and every
+    /// unlisted method on a listed path is 405 with an empty body.
     #[sqlx::test(migrations = "./migrations")]
     async fn nothing_unlisted_is_served(pool: PgPool) {
+        const METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
         let fx = Fixture::new(pool).await;
         let token = fx.session(Role::Admin).await;
-        for (_, pattern, _) in ROUTES {
-            let sibling = format!("{}/not-in-routes", fx.fill(pattern));
-            // A path parameter takes any segment: a "sibling" that another pattern matches
-            // (`/users/not-in-routes` is `/users/{id}`) is a listed route, not a made-up one.
-            let is_listed = |path: &str| {
-                ROUTES.iter().any(|(_, p, _)| {
-                    let (a, b): (Vec<_>, Vec<_>) =
-                        (p.split('/').collect(), path.split('/').collect());
-                    a.len() == b.len()
-                        && a.iter().zip(&b).all(|(x, y)| x == y || x.starts_with('{'))
-                })
-            };
-            let made_up = !is_listed(&sibling);
-            for method in ["GET", "POST", "PUT", "DELETE"]
-                .into_iter()
-                .filter(|_| made_up)
-            {
-                let body = (method != "GET" && method != "DELETE").then_some("{}");
-                let reply = fx.call(method, &sibling, Some(&token), &[], body).await;
-                assert_eq!(reply.status, StatusCode::NOT_FOUND, "{method} {sibling}");
+        // A path parameter takes any segment: `/users/not-in-routes` is `/users/{id}`.
+        let matches = |pattern: &str, path: &str| {
+            let (a, b): (Vec<_>, Vec<_>) =
+                (pattern.split('/').collect(), path.split('/').collect());
+            a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x == y || x.starts_with('{'))
+        };
+        let refused = |method: &str, path: &str| {
+            let path_listed = ROUTES.iter().any(|(_, p, _)| matches(p, path));
+            let route_listed = ROUTES
+                .iter()
+                .any(|(m, p, _)| *m == method && matches(p, path));
+            match (path_listed, route_listed) {
+                (_, true) => None, // a listed route: served, not refused
+                (true, false) => Some(StatusCode::METHOD_NOT_ALLOWED),
+                (false, false) => Some(StatusCode::NOT_FOUND),
             }
-            for method in ["GET", "POST", "PUT", "DELETE"] {
-                if ROUTES.iter().any(|(m, p, _)| *m == method && p == pattern) {
-                    continue;
+        };
+        for (_, pattern, _) in ROUTES {
+            let filled = fx.fill(pattern);
+            let paths = [
+                filled.clone(),
+                format!("{filled}/not-in-routes"),
+                format!("{filled}/not-in-routes/deeper"),
+            ];
+            for path in &paths {
+                for method in METHODS {
+                    let Some(expected) = refused(method, path) else {
+                        continue;
+                    };
+                    let body = matches!(method, "POST" | "PUT" | "PATCH").then_some("{}");
+                    let reply = fx.call(method, path, Some(&token), &[], body).await;
+                    assert_eq!(reply.status, expected, "{method} {path}");
+                    if expected == StatusCode::NOT_FOUND {
+                        assert_eq!(reply.error_code(), "not_found", "{method} {path}");
+                    } else {
+                        assert!(reply.body.is_empty(), "{method} {path}");
+                    }
                 }
-                let body = (method != "GET" && method != "DELETE").then_some("{}");
-                let reply = fx
-                    .call(method, &fx.fill(pattern), Some(&token), &[], body)
-                    .await;
-                assert_eq!(
-                    reply.status,
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    "{method} {pattern}"
-                );
             }
         }
     }
@@ -1188,12 +1226,59 @@ mod tests {
                 Some("{}"),
             )
             .await;
-        for reply in [ok, denied, bad] {
+        let unknown = fx.call("GET", "/api/v1/nope", None, &[], None).await;
+        let root = fx.call("GET", "/api/v1/", None, &[], None).await;
+        for reply in [ok, denied, bad, unknown, root] {
             assert_eq!(reply.header("cache-control"), Some("no-store"));
+            assert_eq!(reply.header("x-content-type-options"), Some("nosniff"));
         }
         // The agent routes are not touched.
         let health = fx.call("GET", "/healthz", None, &[], None).await;
         assert_eq!(health.header("cache-control"), None);
+        assert_eq!(health.header("x-content-type-options"), None);
+    }
+
+    /// The same-origin rule cannot fall off a route: every route that is not a GET refuses
+    /// a foreign `Origin`, even for an admin, before its handler runs.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn every_changing_route_refuses_a_foreign_origin(pool: PgPool) {
+        let fx = Fixture::new(pool.clone()).await;
+        fx.ensure_problem().await;
+        fx.ensure_key().await;
+        fx.ensure_dashboard().await;
+        fx.ensure_display().await;
+        let foreign = [
+            ("host", "cerbrix.example"),
+            ("origin", "https://evil.example"),
+        ];
+        let mut checked: i64 = 0;
+        for (method, pattern, _) in ROUTES.iter().filter(|(m, _, _)| *m != "GET") {
+            let token = fx.session(Role::Admin).await;
+            let body = matches!(*method, "POST" | "PUT" | "PATCH").then_some("{}");
+            let path = fx.fill(pattern);
+            let reply = fx.call(method, &path, Some(&token), &foreign, body).await;
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{method} {pattern}");
+            assert_eq!(
+                reply.json(),
+                serde_json::json!({"error": "forbidden",
+                                   "message": "cross-origin requests are not allowed"}),
+                "{method} {pattern}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 10, "{checked}");
+        // Nothing was done: the session the logout would end, the subject the delete would
+        // remove and the key the revocation would revoke are all still there.
+        let (sessions, subject, revoked): (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM sessions), \
+             (SELECT count(*) FROM users WHERE id = $1), \
+             (SELECT count(*) FROM enrollment_keys WHERE revoked_at IS NOT NULL)",
+        )
+        .bind(fx.subject)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((sessions, subject, revoked), (checked, 1, 0));
     }
 
     #[sqlx::test(migrations = "./migrations")]

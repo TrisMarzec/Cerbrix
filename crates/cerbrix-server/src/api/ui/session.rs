@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{ApiError, ApiJson, Entry, invalid};
+use super::{ApiError, ApiJson, Entry, hash_failed, invalid, passwords_busy};
 use crate::api::AppState;
 use crate::auth::{Viewer, clear_cookie, session_cookie, session_token, validate_password};
 use crate::state::{LoginOutcome, PasswordCheck, StateError, User};
@@ -77,22 +77,32 @@ async fn login(
             &body.password,
             OffsetDateTime::now_utc(),
             &app.config.auth,
+            &app.passwords,
         )
         .await
         .map_err(|e| store_failed("login failed", &e))?;
     match outcome {
-        LoginOutcome::Ok(user, token) => {
-            let cookie = session_cookie(
-                &token,
-                app.config.auth.session_max_secs,
-                app.config.secure_cookie(),
-            );
-            Ok(with_cookie(Json(Me::from(&user)).into_response(), &cookie))
-        }
+        LoginOutcome::Ok(user, token) => Ok(with_session(
+            &app,
+            Json(Me::from(&user)).into_response(),
+            &token,
+        )),
         // A locked account answers exactly like a wrong password: nobody learns which
         // names exist.
         LoginOutcome::Wrong | LoginOutcome::Locked => Err(wrong()),
+        // The same for every name, and nothing was counted.
+        LoginOutcome::Busy => Err(passwords_busy()),
     }
+}
+
+/// `response` with the cookie of the new session `token`.
+fn with_session(app: &AppState, response: Response, token: &str) -> Response {
+    let cookie = session_cookie(
+        token,
+        app.config.auth.session_max_secs,
+        app.config.secure_cookie(),
+    );
+    with_cookie(response, &cookie)
 }
 
 async fn show(Viewer(user): Viewer) -> Json<Me> {
@@ -122,13 +132,14 @@ struct PasswordBody {
     new: String,
 }
 
-/// Changes the password of the logged-in user and ends the user's other sessions. The
-/// current password is checked like a login: a wrong one counts as a failed attempt and a
-/// locked user is refused, so a stolen session cannot be used to guess the password.
+/// Changes the password of the logged-in user, ends all of the user's sessions and starts a
+/// new one for the caller, whose cookie the answer sets: a copy of the old cookie does not
+/// survive the change. The current password is checked like a login: a wrong one counts as
+/// a failed attempt and a locked user is refused, so a stolen session cannot be used to
+/// guess the password.
 async fn change_password(
     State(app): State<AppState>,
     Viewer(user): Viewer,
-    headers: HeaderMap,
     ApiJson(body): ApiJson<PasswordBody>,
 ) -> Result<Response, ApiError> {
     // Checked first, and without counting an attempt: it reveals nothing about `current`.
@@ -137,7 +148,7 @@ async fn change_password(
     let now = OffsetDateTime::now_utc();
     match app
         .store
-        .check_password(user.id, &body.current, now)
+        .check_password(user.id, &body.current, now, &app.passwords)
         .await
         .map_err(|e| store_failed("password check failed", &e))?
     {
@@ -150,19 +161,19 @@ async fn change_password(
                 "the current password is wrong",
             ));
         }
+        PasswordCheck::Busy => return Err(passwords_busy()),
     }
-    let hash = crate::auth::hash_password(body.new).await.map_err(|e| {
-        tracing::error!(error = %e, "hashing the new password failed");
-        ApiError::internal()
-    })?;
-    let Some(token) = session_token(&headers) else {
-        return Err(ApiError::internal());
-    };
-    app.store
-        .set_user_password_keeping_session(user.id, &hash, now, token)
+    let hash = app.passwords.hash(body.new).await.map_err(hash_failed)?;
+    let token = app
+        .store
+        .set_user_password_renewing_session(user.id, &hash, now, &app.config.auth)
         .await
         .map_err(|e| store_failed("changing the password failed", &e))?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Ok(with_session(
+        &app,
+        StatusCode::NO_CONTENT.into_response(),
+        &token,
+    ))
 }
 
 #[cfg(test)]
@@ -171,7 +182,7 @@ mod tests {
     use sqlx::PgPool;
 
     use crate::api::ui::testing::*;
-    use crate::auth::Role;
+    use crate::auth::{PasswordGate, Role};
 
     fn login_body(name: &str, password: &str) -> String {
         serde_json::json!({ "name": name, "password": password }).to_string()
@@ -410,21 +421,40 @@ mod tests {
         let new = "a brand new password";
         let reply = change(&fx, &current, PASSWORD, new).await;
         assert_eq!(reply.status, StatusCode::NO_CONTENT, "{:?}", reply.json());
+        assert!(reply.body.is_empty());
+        // The answer carries a fresh session, with the attributes of a login.
+        let renewed = token_of(&reply);
+        assert!(renewed.starts_with("cbx_se_"));
+        assert_ne!(renewed, current);
+        assert_eq!(
+            reply.header("set-cookie").unwrap(),
+            format!("cerbrix_session={renewed}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800")
+        );
+        let (created, expires): (time::OffsetDateTime, time::OffsetDateTime) =
+            sqlx::query_as("SELECT created_at, expires_at FROM sessions WHERE token_hash = $1")
+                .bind(&crate::tokens::hash(&renewed)[..])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(expires - created, time::Duration::seconds(604_800));
         // The old password no longer logs in, the new one does.
         assert_eq!(
             login(&fx, "operator", PASSWORD).await.status,
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(login(&fx, "operator", new).await.status, StatusCode::OK);
-        // The other session ended, this one stays.
-        let gone = fx
-            .call("GET", "/api/v1/session", Some(&second), &[], None)
+        // The other session and the old cookie of this one ended; the new cookie works.
+        for ended in [&second, &current] {
+            let gone = fx
+                .call("GET", "/api/v1/session", Some(ended), &[], None)
+                .await;
+            assert_eq!(gone.status, StatusCode::UNAUTHORIZED);
+        }
+        let works = fx
+            .call("GET", "/api/v1/session", Some(&renewed), &[], None)
             .await;
-        assert_eq!(gone.status, StatusCode::UNAUTHORIZED);
-        let stays = fx
-            .call("GET", "/api/v1/session", Some(&current), &[], None)
-            .await;
-        assert_eq!(stays.status, StatusCode::OK);
+        assert_eq!(works.status, StatusCode::OK);
+        assert_eq!(works.json()["name"], "operator");
         // Another user's sessions are untouched.
         let admin = fx.session(Role::Admin).await;
         assert_eq!(
@@ -468,6 +498,136 @@ mod tests {
             login(&fx, "operator", PASSWORD).await.status,
             StatusCode::OK
         );
+    }
+
+    async fn failed_logins(pool: &PgPool, name: &str) -> i32 {
+        sqlx::query_scalar("SELECT failed_logins FROM users WHERE name = $1")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A fixture whose password checks wait at most `wait` for the one permit there is.
+    fn gate(fx: &mut Fixture, wait: std::time::Duration) -> PasswordGate {
+        let gate = PasswordGate::new(1, wait);
+        fx.use_password_gate(gate.clone());
+        gate
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_busy_server_answers_429_alike_and_counts_nothing(pool: PgPool) {
+        let mut fx = Fixture::new(pool.clone()).await;
+        // Lock the admin: five wrong passwords.
+        for _ in 0..5 {
+            login(&fx, "admin", "wrong").await;
+        }
+        let wait = std::time::Duration::from_millis(200);
+        let gate = gate(&mut fx, wait);
+        let held = gate.occupy();
+        let mut answers = Vec::new();
+        for (name, password) in [
+            ("operator", PASSWORD),   // exists, right password
+            ("operator", "wrong pw"), // exists, wrong password
+            ("nobody", PASSWORD),     // unknown
+            ("admin", PASSWORD),      // locked
+        ] {
+            let started = std::time::Instant::now();
+            let reply = login(&fx, name, password).await;
+            let took = started.elapsed();
+            assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS, "{name}");
+            assert_eq!(reply.error_code(), "too_many_attempts", "{name}");
+            assert_eq!(
+                reply.json()["message"],
+                "the server is busy checking passwords, try again shortly"
+            );
+            assert!(reply.header("set-cookie").is_none(), "{name}");
+            // It waited for the permit, and not much longer than that.
+            assert!(
+                took >= wait && took < std::time::Duration::from_secs(30),
+                "{took:?}"
+            );
+            answers.push(comparable(&reply));
+        }
+        assert!(
+            answers.windows(2).all(|w| w[0] == w[1]),
+            "identical answers"
+        );
+        // A waiting request learned nothing and counts as no attempt.
+        assert_eq!(failed_logins(&pool, "operator").await, 0);
+        assert_eq!(failed_logins(&pool, "admin").await, 5);
+        assert_eq!(session_count(&pool).await, 0);
+        // With the permit free, the login proceeds.
+        drop(held);
+        assert_eq!(
+            login(&fx, "operator", PASSWORD).await.status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            login(&fx, "operator", "wrong pw").await.status,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(failed_logins(&pool, "operator").await, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_login_waits_for_a_permit_that_comes_free(pool: PgPool) {
+        let mut fx = Fixture::new(pool).await;
+        // A generous wait: the permit is given back long before it ends.
+        let gate = gate(&mut fx, std::time::Duration::from_secs(30));
+        let held = gate.occupy();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            drop(held);
+        });
+        assert_eq!(login(&fx, "viewer", PASSWORD).await.status, StatusCode::OK);
+        release.await.unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn every_route_that_hashes_answers_429_when_busy(pool: PgPool) {
+        let mut fx = Fixture::new(pool.clone()).await;
+        let gate = gate(&mut fx, std::time::Duration::from_millis(100));
+        let operator = fx.session(Role::Operator).await;
+        let admin = fx.session(Role::Admin).await;
+        let held = gate.occupy();
+        let reset = format!("/api/v1/users/{}/password", fx.subject);
+        for (method, uri, token, body) in [
+            (
+                "PUT",
+                "/api/v1/session/password",
+                &operator,
+                password_body(PASSWORD, "a brand new password"),
+            ),
+            (
+                "POST",
+                "/api/v1/users",
+                &admin,
+                r#"{"name": "newbie", "role": "viewer"}"#.to_owned(),
+            ),
+            ("POST", reset.as_str(), &admin, "{}".to_owned()),
+        ] {
+            let reply = fx.call(method, uri, Some(token), &[], Some(&body)).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::TOO_MANY_REQUESTS,
+                "{method} {uri}"
+            );
+            assert_eq!(reply.error_code(), "too_many_attempts", "{method} {uri}");
+        }
+        // Nothing changed: no user, no new password, no counted attempt, sessions kept.
+        assert_eq!(failed_logins(&pool, "operator").await, 0);
+        let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE name = 'newbie'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(users, 0);
+        drop(held);
+        assert_eq!(
+            login(&fx, "operator", PASSWORD).await.status,
+            StatusCode::OK
+        );
+        assert_eq!(login(&fx, "subject", PASSWORD).await.status, StatusCode::OK);
     }
 
     #[sqlx::test(migrations = "./migrations")]

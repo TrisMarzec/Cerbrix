@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use cerbrix_common::ErrorBody;
 use uuid::Uuid;
 
+use crate::auth::PasswordGate;
 use crate::config::Config;
 use crate::metrics::MetricsStore;
 use crate::state::StateStore;
@@ -29,6 +30,8 @@ pub struct AppState {
     pub warnings: Arc<WarnLimiter>,
     /// Whether problems queue e-mail: true when an SMTP server is configured.
     pub queue_mail: bool,
+    /// The limit on password hashing and checking; one for the whole process.
+    pub passwords: PasswordGate,
 }
 
 /// Lets a warning through at most once per hour per host. Process-local and bounded: it

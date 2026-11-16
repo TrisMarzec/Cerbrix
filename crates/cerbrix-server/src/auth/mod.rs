@@ -5,6 +5,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use argon2::Argon2;
@@ -15,6 +16,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use rand::RngExt as _;
 use time::OffsetDateTime;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -110,37 +112,127 @@ pub fn validate_password(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Hashes a password with Argon2id (default parameters, random salt) into a PHC string, on
-/// a blocking thread.
-pub async fn hash_password(password: String) -> anyhow::Result<String> {
-    tokio::task::spawn_blocking(move || {
-        Argon2::default()
-            .hash_password(password.as_bytes())
-            .map(|hash| hash.to_string())
-            .map_err(|e| anyhow::anyhow!("cannot hash the password: {e}"))
-    })
-    .await?
+fn hash_now(password: &str) -> anyhow::Result<String> {
+    Argon2::default()
+        .hash_password(password.as_bytes())
+        .map(|hash| hash.to_string())
+        .map_err(|e| anyhow::anyhow!("cannot hash the password: {e}"))
 }
 
-/// Checks a password against a PHC string, on a blocking thread. A malformed hash or a
-/// failed worker verifies as false.
+fn verify_now(password: &str, hash: &str) -> bool {
+    Argon2::default()
+        .verify_password(password.as_bytes(), hash)
+        .is_ok()
+}
+
+/// Hashes a password with Argon2id (default parameters, random salt) into a PHC string, on
+/// a blocking thread, without a limit. For the admin command line, a process of its own;
+/// the server hashes only through [`PasswordGate`].
+pub async fn hash_password(password: String) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || hash_now(&password)).await?
+}
+
+/// Checks a password against a PHC string, on a blocking thread, without a limit. A
+/// malformed hash or a failed worker verifies as false. The server verifies only through
+/// [`PasswordGate`].
 pub async fn verify_password(password: String, hash: String) -> bool {
-    tokio::task::spawn_blocking(move || {
-        Argon2::default()
-            .verify_password(password.as_bytes(), hash.as_str())
-            .is_ok()
-    })
-    .await
-    .unwrap_or(false)
+    tokio::task::spawn_blocking(move || verify_now(&password, &hash))
+        .await
+        .unwrap_or(false)
+}
+
+/// No permit for a password computation came within the wait: the server is busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Busy;
+
+/// Why hashing a password through the gate gave no hash.
+#[derive(Debug, thiserror::Error)]
+pub enum HashError {
+    #[error("the server is busy checking passwords")]
+    Busy,
+    #[error(transparent)]
+    Failed(#[from] anyhow::Error),
+}
+
+/// Bounds the Argon2 work of the server process: every hash and every verification (about
+/// 19 MiB and tens of milliseconds of CPU each) needs one of a few permits, so a flood of
+/// logins cannot exhaust the memory and CPU that ingestion and alerting need. A caller
+/// waits for a permit at most `wait`, then gives up with [`Busy`]. Cheap to clone; the
+/// clones share the permits, and the server makes one for the whole process.
+#[derive(Debug, Clone)]
+pub struct PasswordGate {
+    permits: Arc<Semaphore>,
+    wait: Duration,
+}
+
+impl Default for PasswordGate {
+    /// One permit per available core, at least 2 and at most 8; a wait of 5 seconds.
+    fn default() -> Self {
+        let cores = std::thread::available_parallelism().map_or(2, std::num::NonZero::get);
+        Self::new(cores.clamp(2, 8), Duration::from_secs(5))
+    }
+}
+
+impl PasswordGate {
+    /// A gate with `permits` permits and a wait of `wait`. The server uses
+    /// [`PasswordGate::default`]; other values are for tests.
+    pub fn new(permits: usize, wait: Duration) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(permits)),
+            wait,
+        }
+    }
+
+    async fn permit(&self) -> Result<OwnedSemaphorePermit, Busy> {
+        match tokio::time::timeout(self.wait, self.permits.clone().acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            // Timed out, or closed (never: the gate does not close its semaphore).
+            _ => Err(Busy),
+        }
+    }
+
+    /// Like [`hash_password`], within the limit. The permit is held by the blocking thread
+    /// until the hash is done, even when the caller stops waiting.
+    pub async fn hash(&self, password: String) -> Result<String, HashError> {
+        let permit = self.permit().await.map_err(|Busy| HashError::Busy)?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            hash_now(&password)
+        })
+        .await
+        .map_err(anyhow::Error::from)?
+        .map_err(HashError::Failed)
+    }
+
+    /// Like [`verify_password`], within the limit. The permit is held by the blocking thread
+    /// until the check is done, even when the caller stops waiting.
+    pub async fn verify(&self, password: String, hash: String) -> Result<bool, Busy> {
+        let permit = self.permit().await?;
+        Ok(tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            verify_now(&password, &hash)
+        })
+        .await
+        .unwrap_or(false))
+    }
+
+    /// Takes a permit and keeps it until the guard is dropped, as a running check would.
+    #[cfg(test)]
+    pub(crate) fn occupy(&self) -> OwnedSemaphorePermit {
+        self.permits
+            .clone()
+            .try_acquire_owned()
+            .expect("a free permit")
+    }
 }
 
 /// Generates a password of 20 characters, each drawn uniformly from a-z, A-Z and 0-9 with
 /// the cryptographically secure thread generator.
 pub fn generate_password() -> String {
-    const ALPHABET: &[u8; 62] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::rng();
-    (0..20)
-        .map(|_| char::from(ALPHABET[rng.random_range(0..ALPHABET.len())]))
+    rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(20)
+        .map(char::from)
         .collect()
 }
 

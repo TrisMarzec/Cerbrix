@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{StateError, StateStore, is_unique_violation};
-use crate::auth::{Role, verify_password};
+use crate::auth::{Busy, PasswordGate, Role};
 use crate::config::AuthConfig;
 use crate::tokens;
 
@@ -65,6 +65,33 @@ async fn lock_target(
     let user = user_from(row.ok_or(StateError::NotFound)?)?;
     let only_admin = admins.len() == 1 && admins[0] == id;
     Ok((user, only_admin))
+}
+
+/// When a session started at `now` ends at the latest.
+fn session_end(now: OffsetDateTime, cfg: &AuthConfig) -> OffsetDateTime {
+    let max = i64::try_from(cfg.session_max_secs).unwrap_or(i64::MAX);
+    now + time::Duration::seconds(max)
+}
+
+/// Stores a new session of `user` that starts at `now`.
+async fn insert_session(
+    conn: &mut PgConnection,
+    token_hash: &[u8],
+    user: Uuid,
+    now: OffsetDateTime,
+    cfg: &AuthConfig,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) \
+         VALUES ($1, $2, $3, $3, $4)",
+    )
+    .bind(token_hash)
+    .bind(user)
+    .bind(now)
+    .bind(session_end(now, cfg))
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 async fn end_sessions(conn: &mut PgConnection, user: Uuid) -> Result<(), StateError> {
@@ -251,30 +278,37 @@ impl StateStore {
         password_hash: &str,
         now: OffsetDateTime,
     ) -> Result<(), StateError> {
-        self.store_password(id, password_hash, now, None).await
+        let tx = self.store_password(id, password_hash, now).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
-    /// Like `set_user_password`, but the session of `keep_token` stays: a user changing the
-    /// own password ends the other sessions only.
-    pub async fn set_user_password_keeping_session(
+    /// Like `set_user_password`, and in the same transaction starts a new session for the
+    /// user, with the limits of a fresh login: a user changing the own password ends every
+    /// session, the one of the request included, and goes on with the new one. Returns its
+    /// token, once; only its hash is stored.
+    pub async fn set_user_password_renewing_session(
         &self,
         id: Uuid,
         password_hash: &str,
         now: OffsetDateTime,
-        keep_token: &str,
-    ) -> Result<(), StateError> {
-        let keep = tokens::hash(keep_token);
-        self.store_password(id, password_hash, now, Some(&keep[..]))
-            .await
+        cfg: &AuthConfig,
+    ) -> Result<String, StateError> {
+        let mut tx = self.store_password(id, password_hash, now).await?;
+        let token = tokens::generate("cbx_se_");
+        insert_session(&mut tx, &tokens::hash(&token), id, now, cfg).await?;
+        tx.commit().await?;
+        Ok(token)
     }
 
+    /// Stores the hash, clears the failed-login state and ends the sessions; the caller
+    /// commits.
     async fn store_password(
         &self,
         id: Uuid,
         password_hash: &str,
         now: OffsetDateTime,
-        keep: Option<&[u8]>,
-    ) -> Result<(), StateError> {
+    ) -> Result<Transaction<'static, Postgres>, StateError> {
         let mut tx = self.pool.begin().await?;
         let done = sqlx::query(
             "UPDATE users SET password_hash = $2, password_changed_at = $3, \
@@ -288,18 +322,8 @@ impl StateStore {
         if done.rows_affected() == 0 {
             return Err(StateError::NotFound);
         }
-        match keep {
-            None => end_sessions(&mut tx, id).await?,
-            Some(keep) => {
-                sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2")
-                    .bind(id)
-                    .bind(keep)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-        }
-        tx.commit().await?;
-        Ok(())
+        end_sessions(&mut tx, id).await?;
+        Ok(tx)
     }
 
     /// Deletes a user and the user's sessions. `Conflict` for the last enabled admin.
@@ -340,6 +364,8 @@ pub enum LoginOutcome {
     Wrong,
     /// Too many failed attempts: refused without looking at the password.
     Locked,
+    /// No permit for the password check came in time: nothing was checked or counted.
+    Busy,
 }
 
 impl fmt::Debug for LoginOutcome {
@@ -352,6 +378,7 @@ impl fmt::Debug for LoginOutcome {
                 .finish(),
             LoginOutcome::Wrong => f.write_str("Wrong"),
             LoginOutcome::Locked => f.write_str("Locked"),
+            LoginOutcome::Busy => f.write_str("Busy"),
         }
     }
 }
@@ -362,12 +389,15 @@ pub enum PasswordCheck {
     Right,
     Wrong,
     Locked,
+    /// No permit for the check came in time: nothing was checked or counted.
+    Busy,
 }
 
 /// The first half of a login: what the password check found.
 enum Verified {
     Wrong,
     Locked,
+    Busy,
     /// The password matched this hash of this user.
     Right {
         id: Uuid,
@@ -393,14 +423,18 @@ impl StateStore {
     /// `Wrong` takes about the same time, and nothing is changed for such a user. A locked
     /// user also gets the dummy check (so timing does not tell a lock from an unknown name)
     /// and is refused even with the right password.
+    ///
+    /// Every check takes a permit of `gate`; when none comes in time the outcome is `Busy`,
+    /// for every name alike, and nothing is changed or counted.
     pub async fn login(
         &self,
         name: &str,
         password: &str,
         now: OffsetDateTime,
         cfg: &AuthConfig,
+        gate: &PasswordGate,
     ) -> Result<LoginOutcome, StateError> {
-        let verified = self.verify_login(name, password, now).await?;
+        let verified = self.verify_login(name, password, now, gate).await?;
         self.finish_login(verified, now, cfg).await
     }
 
@@ -410,6 +444,7 @@ impl StateStore {
         name: &str,
         password: &str,
         now: OffsetDateTime,
+        gate: &PasswordGate,
     ) -> Result<Verified, StateError> {
         let found: Option<(Uuid, bool, String, Option<OffsetDateTime>)> = sqlx::query_as(
             "SELECT id, disabled, password_hash, locked_until FROM users WHERE name = $1",
@@ -418,16 +453,24 @@ impl StateStore {
         .fetch_optional(&self.pool)
         .await?;
         let Some((id, false, hash, locked_until)) = found else {
-            verify_password(password.to_owned(), DUMMY_HASH.to_owned()).await;
-            return Ok(Verified::Wrong);
+            return Ok(
+                match gate
+                    .verify(password.to_owned(), DUMMY_HASH.to_owned())
+                    .await
+                {
+                    Ok(_) => Verified::Wrong,
+                    Err(Busy) => Verified::Busy,
+                },
+            );
         };
         Ok(
             match self
-                .attempt(id, hash.clone(), locked_until, password, now)
+                .attempt(id, hash.clone(), locked_until, password, now, gate)
                 .await?
             {
                 PasswordCheck::Wrong => Verified::Wrong,
                 PasswordCheck::Locked => Verified::Locked,
+                PasswordCheck::Busy => Verified::Busy,
                 PasswordCheck::Right => Verified::Right { id, hash },
             },
         )
@@ -448,10 +491,10 @@ impl StateStore {
         let (id, hash) = match verified {
             Verified::Wrong => return Ok(LoginOutcome::Wrong),
             Verified::Locked => return Ok(LoginOutcome::Locked),
+            Verified::Busy => return Ok(LoginOutcome::Busy),
             Verified::Right { id, hash } => (id, hash),
         };
         let token = tokens::generate("cbx_se_");
-        let max = i64::try_from(cfg.session_max_secs).unwrap_or(i64::MAX);
         let inserted = sqlx::query(
             "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) \
              SELECT $1, id, $3, $3, $4 FROM users \
@@ -460,7 +503,7 @@ impl StateStore {
         .bind(&tokens::hash(&token)[..])
         .bind(id)
         .bind(now)
-        .bind(now + time::Duration::seconds(max))
+        .bind(session_end(now, cfg))
         .bind(&hash)
         .execute(&self.pool)
         .await?;
@@ -475,18 +518,25 @@ impl StateStore {
         .fetch_optional(&self.pool)
         .await?;
         match row {
-            Some(row) => Ok(LoginOutcome::Ok(user_from(row)?, token)),
+            Some(row) => {
+                let user = user_from(row)?;
+                // The name only: never the password or the token.
+                tracing::info!(user = %user.name, "user logged in");
+                Ok(LoginOutcome::Ok(user, token))
+            }
             None => Ok(LoginOutcome::Wrong),
         }
     }
 
     /// Checks `password` against the stored hash of a user with the same failure counting
-    /// and lock as a login: a wrong password counts, a locked user is refused.
+    /// and lock as a login: a wrong password counts, a locked user is refused. `Busy`, with
+    /// nothing counted, when `gate` gives no permit in time.
     pub async fn check_password(
         &self,
         id: Uuid,
         password: &str,
         now: OffsetDateTime,
+        gate: &PasswordGate,
     ) -> Result<PasswordCheck, StateError> {
         let found: Option<(String, Option<OffsetDateTime>)> =
             sqlx::query_as("SELECT password_hash, locked_until FROM users WHERE id = $1")
@@ -494,15 +544,23 @@ impl StateStore {
                 .fetch_optional(&self.pool)
                 .await?;
         let Some((hash, locked_until)) = found else {
-            verify_password(password.to_owned(), DUMMY_HASH.to_owned()).await;
-            return Ok(PasswordCheck::Wrong);
+            return Ok(
+                match gate
+                    .verify(password.to_owned(), DUMMY_HASH.to_owned())
+                    .await
+                {
+                    Ok(_) => PasswordCheck::Wrong,
+                    Err(Busy) => PasswordCheck::Busy,
+                },
+            );
         };
-        self.attempt(id, hash, locked_until, password, now).await
+        self.attempt(id, hash, locked_until, password, now, gate)
+            .await
     }
 
     /// The shared part of a login and a password check. The password is verified before any
-    /// state changes. The counter and the lock are each updated by one statement, so two
-    /// concurrent wrong attempts count as two.
+    /// state changes, so a `Busy` check changes nothing. The counter and the lock are each
+    /// updated by one statement, so two concurrent wrong attempts count as two.
     async fn attempt(
         &self,
         id: Uuid,
@@ -510,13 +568,24 @@ impl StateStore {
         locked_until: Option<OffsetDateTime>,
         password: &str,
         now: OffsetDateTime,
+        gate: &PasswordGate,
     ) -> Result<PasswordCheck, StateError> {
         if locked_until.is_some_and(|until| until > now) {
             // The same work as for a wrong password.
-            verify_password(password.to_owned(), DUMMY_HASH.to_owned()).await;
-            return Ok(PasswordCheck::Locked);
+            return Ok(
+                match gate
+                    .verify(password.to_owned(), DUMMY_HASH.to_owned())
+                    .await
+                {
+                    Ok(_) => PasswordCheck::Locked,
+                    Err(Busy) => PasswordCheck::Busy,
+                },
+            );
         }
-        if verify_password(password.to_owned(), hash.clone()).await {
+        let Ok(right) = gate.verify(password.to_owned(), hash.clone()).await else {
+            return Ok(PasswordCheck::Busy);
+        };
+        if right {
             // Only an unlocked user whose hash is still the verified one is reset: a lock
             // set meanwhile by concurrent wrong attempts wins, and so does a password
             // change.
@@ -879,7 +948,10 @@ mod login_tests {
         pw: &str,
         at: OffsetDateTime,
     ) -> LoginOutcome {
-        store.login(name, pw, at, &cfg()).await.unwrap()
+        store
+            .login(name, pw, at, &cfg(), &PasswordGate::default())
+            .await
+            .unwrap()
     }
 
     async fn failed(pool: &PgPool, id: Uuid) -> (i32, Option<OffsetDateTime>) {
@@ -1011,7 +1083,10 @@ mod login_tests {
         for _ in 0..4 {
             let store = store.clone();
             tasks.push(tokio::spawn(async move {
-                store.login("amy", "wrong", t0(), &cfg()).await.unwrap()
+                store
+                    .login("amy", "wrong", t0(), &cfg(), &PasswordGate::default())
+                    .await
+                    .unwrap()
             }));
         }
         for task in tasks {
@@ -1185,41 +1260,114 @@ mod login_tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn changing_the_password_can_keep_one_session(pool: PgPool) {
+    async fn changing_the_password_renews_the_session(pool: PgPool) {
         let store = StateStore::from_pool(pool.clone());
         let amy = add(&store, "amy", Role::Viewer).await;
-        let keep = token_of(try_login(&store, "amy", PASSWORD, t0()).await);
-        let gone = token_of(try_login(&store, "amy", PASSWORD, t0()).await);
-        store
-            .set_user_password_keeping_session(amy.id, "$argon2id$new", t0(), &keep)
+        let current = token_of(try_login(&store, "amy", PASSWORD, t0()).await);
+        let other = token_of(try_login(&store, "amy", PASSWORD, t0()).await);
+        let later = t0() + Duration::minutes(10);
+        let renewed = store
+            .set_user_password_renewing_session(amy.id, "$argon2id$new", later, &cfg())
             .await
             .unwrap();
-        assert!(
-            store
-                .session_user(&keep, t0(), &cfg())
-                .await
-                .unwrap()
-                .is_some()
+        assert!(renewed.starts_with("cbx_se_"));
+        for ended in [&current, &other] {
+            assert_eq!(
+                store.session_user(ended, later, &cfg()).await.unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            store.session_user(&renewed, later, &cfg()).await.unwrap(),
+            Some(User {
+                password_changed_at: later,
+                ..amy.clone()
+            })
         );
-        assert_eq!(store.session_user(&gone, t0(), &cfg()).await.unwrap(), None);
+        // The limits of a fresh login, counted from the change.
+        let (created, expires): (OffsetDateTime, OffsetDateTime) =
+            sqlx::query_as("SELECT created_at, expires_at FROM sessions")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!((created, expires), (later, later + Duration::seconds(3600)));
         assert_eq!(
             store.user_password_hash(amy.id).await.unwrap().as_deref(),
             Some("$argon2id$new")
         );
+        // An unknown user gets no session.
+        assert!(matches!(
+            store
+                .set_user_password_renewing_session(Uuid::new_v4(), "h", later, &cfg())
+                .await,
+            Err(StateError::NotFound)
+        ));
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_busy_gate_checks_and_counts_nothing(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let amy = add(&store, "amy", Role::Viewer).await;
+        let gate = PasswordGate::new(1, std::time::Duration::from_millis(50));
+        let held = gate.occupy();
+        for password in [PASSWORD, "wrong"] {
+            assert!(matches!(
+                store
+                    .login("amy", password, t0(), &cfg(), &gate)
+                    .await
+                    .unwrap(),
+                LoginOutcome::Busy
+            ));
+            assert_eq!(
+                store
+                    .check_password(amy.id, password, t0(), &gate)
+                    .await
+                    .unwrap(),
+                PasswordCheck::Busy
+            );
+        }
+        assert!(matches!(
+            store
+                .login("nobody", PASSWORD, t0(), &cfg(), &gate)
+                .await
+                .unwrap(),
+            LoginOutcome::Busy
+        ));
+        assert_eq!(failed(&pool, amy.id).await, (0, None));
+        drop(held);
+        assert!(matches!(
+            store
+                .login("amy", PASSWORD, t0(), &cfg(), &gate)
+                .await
+                .unwrap(),
+            LoginOutcome::Ok(..)
+        ));
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn checking_a_password_counts_failures_like_a_login(pool: PgPool) {
         let store = StateStore::from_pool(pool.clone());
         let amy = add(&store, "amy", Role::Viewer).await;
+        let gate = PasswordGate::default();
         for _ in 0..5 {
             assert_eq!(
-                store.check_password(amy.id, "wrong", t0()).await.unwrap(),
+                store
+                    .check_password(amy.id, "wrong", t0(), &gate)
+                    .await
+                    .unwrap(),
                 PasswordCheck::Wrong
             );
         }
         assert_eq!(
-            store.check_password(amy.id, PASSWORD, t0()).await.unwrap(),
+            store
+                .check_password(amy.id, PASSWORD, t0(), &gate)
+                .await
+                .unwrap(),
             PasswordCheck::Locked
         );
         assert!(matches!(
@@ -1228,7 +1376,10 @@ mod login_tests {
         ));
         let later = t0() + Duration::minutes(6);
         assert_eq!(
-            store.check_password(amy.id, PASSWORD, later).await.unwrap(),
+            store
+                .check_password(amy.id, PASSWORD, later, &gate)
+                .await
+                .unwrap(),
             PasswordCheck::Right
         );
         assert_eq!(failed(&pool, amy.id).await, (0, None));
@@ -1239,7 +1390,10 @@ mod login_tests {
         let store = StateStore::from_pool(pool.clone());
         let amy = add(&store, "amy", Role::Viewer).await;
         // The password is verified ...
-        let verified = store.verify_login("amy", PASSWORD, t0()).await.unwrap();
+        let verified = store
+            .verify_login("amy", PASSWORD, t0(), &PasswordGate::default())
+            .await
+            .unwrap();
         assert!(matches!(verified, Verified::Right { .. }));
         // ... then changed (this ends the sessions that exist) ...
         store
@@ -1314,6 +1468,27 @@ mod login_tests {
             "{lines:?}"
         );
         assert!(!lines[0].contains("$argon2"), "{lines:?}");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_login_is_logged_with_the_name_only(pool: PgPool) {
+        let user = "login-log-user";
+        logged_lines_about(user); // installs the subscriber before anything is logged
+        let store = StateStore::from_pool(pool);
+        add(&store, user, Role::Viewer).await;
+        try_login(&store, user, "wrong", t0()).await;
+        assert!(logged_lines_about(user).is_empty(), "a failed login is not");
+        let token = token_of(try_login(&store, user, PASSWORD, t0()).await);
+        let lines = logged_lines_about(user);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("INFO") && lines[0].contains("logged in"),
+            "{lines:?}"
+        );
+        assert!(
+            !lines[0].contains(&token) && !lines[0].contains(PASSWORD),
+            "{lines:?}"
+        );
     }
 
     #[test]
