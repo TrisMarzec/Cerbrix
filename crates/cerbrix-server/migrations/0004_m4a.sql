@@ -29,3 +29,13 @@ ALTER TABLE problems ADD COLUMN kind text NOT NULL DEFAULT 'compare' CHECK (kind
 CREATE INDEX problems_open_host ON problems (host_id) WHERE resolved_at IS NULL;
 UPDATE problems SET kind = 'no_data' WHERE summary LIKE 'no data for %' OR summary LIKE '%: no data for %';
 ALTER TABLE problems ADD COLUMN closed_by text, ADD COLUMN close_comment text;
+-- M3 recorded a manual close of an unacknowledged problem as its acknowledgement, written by
+-- the close itself: resolve reason closed_by_operator and acknowledged_at = resolved_at. Move
+-- the closer to the close fields; such a problem was never acknowledged. A problem
+-- acknowledged before it was closed kept that acknowledgement in M3, and its closer was not
+-- recorded: it stays as it is.
+UPDATE problems
+   SET closed_by = acknowledged_by, close_comment = ack_comment,
+       acknowledged_at = NULL, acknowledged_by = NULL, ack_comment = NULL
+ WHERE resolve_reason = 'closed_by_operator' AND acknowledged_at = resolved_at
+   AND closed_by IS NULL;

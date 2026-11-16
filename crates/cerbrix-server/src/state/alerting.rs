@@ -1186,12 +1186,70 @@ mod tests {
             .await
             .unwrap();
         }
+        // What M3 wrote: a manual close of an unacknowledged problem recorded the closer as
+        // its acknowledgement, at the close time; one acknowledged earlier kept it.
+        let started = at(T0_MS);
+        let (acked_at, closed_at) = (at(T0_MS + 1000), at(T0_MS + 60_000));
+        for (trigger, resolved, reason, ack_at, by, comment) in [
+            (
+                "closed",
+                Some(closed_at),
+                Some("closed_by_operator"),
+                Some(closed_at),
+                Some("bob"),
+                Some("disk unmounted"),
+            ),
+            (
+                "acked-then-closed",
+                Some(closed_at),
+                Some("closed_by_operator"),
+                Some(acked_at),
+                Some("anna"),
+                Some("looking"),
+            ),
+            (
+                "acked",
+                None,
+                None,
+                Some(acked_at),
+                Some("anna"),
+                Some("on it"),
+            ),
+            (
+                "acked-then-ended",
+                Some(acked_at),
+                Some("condition_ended"),
+                Some(acked_at),
+                Some("anna"),
+                Some("same time"),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO problems (id, host_id, trigger_name, instance, severity, summary, \
+                 started_at, resolved_at, resolve_reason, acknowledged_at, acknowledged_by, \
+                 ack_comment) VALUES ($1, $2, $3, '', 'high', 's', $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(host)
+            .bind(trigger)
+            .bind(started)
+            .bind(resolved)
+            .bind(reason)
+            .bind(ack_at)
+            .bind(by)
+            .bind(comment)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
         migrator.run(&pool).await.unwrap();
-        let kinds: Vec<(String, String)> =
-            sqlx::query_as("SELECT trigger_name, kind FROM problems ORDER BY trigger_name")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let kinds: Vec<(String, String)> = sqlx::query_as(
+            "SELECT trigger_name, kind FROM problems \
+             WHERE trigger_name IN ('cmp', 'host', 'item') ORDER BY trigger_name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             kinds,
             [
@@ -1199,6 +1257,47 @@ mod tests {
                 ("host".to_owned(), "no_data".to_owned()),
                 ("item".to_owned(), "no_data".to_owned()),
             ]
+        );
+        type Who = (
+            Option<OffsetDateTime>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let who = |trigger: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, Who>(
+                    "SELECT acknowledged_at, acknowledged_by, ack_comment, closed_by, \
+                     close_comment FROM problems WHERE trigger_name = $1",
+                )
+                .bind(trigger)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let s = |v: &str| Some(v.to_owned());
+        // The closer moves to the close fields; the problem was never acknowledged.
+        assert_eq!(
+            who("closed").await,
+            (None, None, None, s("bob"), s("disk unmounted"))
+        );
+        // Acknowledged before the close: M3 kept that acknowledgement and recorded no
+        // closer, so it stays as it is.
+        assert_eq!(
+            who("acked-then-closed").await,
+            (Some(acked_at), s("anna"), s("looking"), None, None)
+        );
+        // Not closed by hand: untouched, even when the times are equal.
+        assert_eq!(
+            who("acked").await,
+            (Some(acked_at), s("anna"), s("on it"), None, None)
+        );
+        assert_eq!(
+            who("acked-then-ended").await,
+            (Some(acked_at), s("anna"), s("same time"), None, None)
         );
     }
 
