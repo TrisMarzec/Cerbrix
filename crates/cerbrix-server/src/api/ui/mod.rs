@@ -23,6 +23,7 @@ use super::{ApiError, AppState};
 use crate::auth::{AuthError, AuthedUser, Role, authenticate, require};
 
 mod config;
+mod dashboards;
 mod hosts;
 mod problems;
 mod session;
@@ -76,6 +77,8 @@ pub(crate) const ROUTES: &[(&str, &str, Access)] = &[
     // The matrix posts `{}`: an acknowledgement with no comment succeeds, closing needs a
     // comment and answers 400, so the fixture problem is still there for every later row.
     ("POST", "/api/v1/problems/{id}/close", Access::Operator),
+    ("GET", "/api/v1/dashboards", Access::Viewer),
+    ("GET", "/api/v1/dashboards/{id}", Access::Viewer),
     ("GET", "/api/v1/status", Access::Viewer),
     ("GET", "/api/v1/sync/history", Access::Viewer),
     ("GET", "/api/v1/unknown-agents", Access::Operator),
@@ -128,6 +131,7 @@ fn entries() -> Vec<Entry> {
     all.extend(session::entries());
     all.extend(hosts::entries());
     all.extend(problems::entries());
+    all.extend(dashboards::entries());
     all.extend(config::entries());
     all.extend(users::entries());
     all
@@ -445,6 +449,9 @@ pub(crate) mod testing {
     /// The host every fixture has.
     pub const FIXTURE_HOST: &str = "fixture-host";
 
+    /// The id of the dashboard `ensure_dashboard` stores.
+    pub const FIXTURE_DASHBOARD: &str = "fixture-board";
+
     pub fn config(insecure_http: bool, secure_cookie: Option<bool>) -> Arc<Config> {
         Arc::new(Config {
             server: ServerConfig {
@@ -468,6 +475,32 @@ pub(crate) mod testing {
                 ..AuthConfig::default()
             },
         })
+    }
+
+    /// A metrics store whose every query is refused.
+    pub struct Refusing;
+
+    #[async_trait::async_trait]
+    impl crate::metrics::MetricsStore for Refusing {
+        async fn write(
+            &self,
+            _: &str,
+            _: &[cerbrix_common::MetricValue],
+        ) -> Result<(), crate::metrics::MetricsError> {
+            Ok(())
+        }
+        async fn query_range(
+            &self,
+            _: &crate::metrics::RangeQuery,
+        ) -> Result<Vec<crate::metrics::Sample>, crate::metrics::MetricsError> {
+            Err(crate::metrics::MetricsError::Rejected("no".into()))
+        }
+        async fn latest(
+            &self,
+            _: &crate::metrics::LatestQuery,
+        ) -> Result<Vec<crate::metrics::LatestSample>, crate::metrics::MetricsError> {
+            Err(crate::metrics::MetricsError::Rejected("no".into()))
+        }
     }
 
     pub struct Reply {
@@ -512,6 +545,9 @@ pub(crate) mod testing {
         /// The id `fill` puts into `{id}` of the enrolment key route. The key exists only
         /// after `ensure_key`.
         pub key: Uuid,
+        /// The id `fill` puts into `{id}` of the dashboard route. The dashboard exists only
+        /// after `ensure_dashboard`.
+        pub dashboard: &'static str,
     }
 
     impl Fixture {
@@ -562,6 +598,7 @@ pub(crate) mod testing {
                 host: FIXTURE_HOST,
                 problem: Uuid::new_v4(),
                 key: Uuid::new_v4(),
+                dashboard: FIXTURE_DASHBOARD,
             }
         }
 
@@ -624,6 +661,48 @@ pub(crate) mod testing {
             .unwrap();
         }
 
+        /// Stores the dashboard `fill` puts into `{id}` of the dashboard route: the standard
+        /// layout over every host.
+        pub async fn ensure_dashboard(&self) {
+            sqlx::query(
+                "INSERT INTO config_documents (kind, id, source_file, body)                  VALUES ('dashboard', $1, 'dashboards/fixture-board.json',                          '{\"name\": \"Fixture board\"}'::jsonb)",
+            )
+            .bind(self.dashboard)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
+        /// Applies the example configuration repository (`web-01`, `db-01`, the dashboard
+        /// `production`).
+        pub async fn apply_example(&self) {
+            let dir =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/config-repo");
+            let compiled =
+                crate::gitops::compile(&crate::gitops::read_tree(&dir, "c1").unwrap()).unwrap();
+            self.store
+                .apply_config(
+                    "c1",
+                    &compiled,
+                    OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap(),
+                    50,
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+
+        /// The router on top of another metrics store.
+        pub fn use_metrics(&mut self, metrics: Arc<dyn crate::metrics::MetricsStore>) {
+            self.router = crate::api::router(crate::api::AppState {
+                store: self.store.clone(),
+                metrics,
+                config: config(true, None),
+                warnings: Arc::default(),
+                queue_mail: false,
+            });
+        }
+
         /// Fills the path parameters of a route pattern with ids that exist in the fixture.
         /// A later task that adds a route with a parameter adds the parameter here.
         pub fn fill(&self, pattern: &str) -> String {
@@ -631,6 +710,8 @@ pub(crate) mod testing {
                 self.problem
             } else if pattern.starts_with("/api/v1/enrollment-keys/") {
                 self.key
+            } else if pattern.starts_with("/api/v1/dashboards/") {
+                return pattern.replace("{id}", self.dashboard);
             } else {
                 self.subject
             };
@@ -848,6 +929,7 @@ mod tests {
         let fx = Fixture::new(pool).await;
         fx.ensure_problem().await;
         fx.ensure_key().await;
+        fx.ensure_dashboard().await;
         for (method, pattern, access) in ROUTES {
             let path = fx.fill(pattern);
             for caller in [

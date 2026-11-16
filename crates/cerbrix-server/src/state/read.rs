@@ -1,6 +1,6 @@
 //! Reads for the web UI: the hosts list and the detail of one host.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use cerbrix_common::DashboardFile;
 use cerbrix_common::config::Severity;
@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::alerting::{Problem, ProblemRow, problem_from, problem_query};
 use super::{StateError, StateStore};
 use crate::gitops::EffectiveHost;
+use crate::view::dashboard::selected_hosts;
 
 /// Which hosts the list shows by their open problems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,29 +503,123 @@ impl StateStore {
     /// The ids of the active hosts the dashboard `id` selects; `None` for an unknown
     /// dashboard.
     pub async fn dashboard_host_ids(&self, id: &str) -> Result<Option<Vec<Uuid>>, StateError> {
-        let body: Option<Json<serde_json::Value>> = sqlx::query_scalar(
-            "SELECT body FROM config_documents WHERE kind = 'dashboard' AND id = $1",
+        let Some((_, dashboard)) = self.dashboard_document(id).await? else {
+            return Ok(None);
+        };
+        let hosts = self.active_hosts().await?;
+        Ok(Some(
+            selected_hosts(&dashboard, &hosts)
+                .into_iter()
+                .map(|h| h.id)
+                .collect(),
+        ))
+    }
+
+    /// Every dashboard and every active host with its open problems: three queries, however
+    /// many dashboards and hosts there are. Dashboards are ordered by id, hosts by name.
+    pub async fn board_inputs(&self) -> Result<BoardInputs, StateError> {
+        let rows: Vec<(String, String, Json<serde_json::Value>)> = sqlx::query_as(
+            "SELECT id, source_file, body FROM config_documents              WHERE kind = 'dashboard' ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let dashboards = rows
+            .into_iter()
+            .map(|(id, file, body)| Ok((id, file, decode_dashboard(body.0)?)))
+            .collect::<Result<_, StateError>>()?;
+        let mut hosts = self.active_hosts().await?;
+        let ids: Vec<Uuid> = hosts.iter().map(|h| h.id).collect();
+        let mut open = self.open_problems_of(&ids).await?;
+        for host in &mut hosts {
+            host.open = open.remove(&host.id).unwrap_or_default();
+        }
+        Ok(BoardInputs { dashboards, hosts })
+    }
+
+    /// One dashboard with the active hosts it selects and their open problems: three
+    /// queries. `None` for an unknown dashboard.
+    pub async fn dashboard_hosts(&self, id: &str) -> Result<Option<DashboardHosts>, StateError> {
+        let Some((file, dashboard)) = self.dashboard_document(id).await? else {
+            return Ok(None);
+        };
+        let all = self.active_hosts().await?;
+        let keep: HashSet<Uuid> = selected_hosts(&dashboard, &all)
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        let mut hosts: Vec<HostRow> = all.into_iter().filter(|h| keep.contains(&h.id)).collect();
+        let ids: Vec<Uuid> = hosts.iter().map(|h| h.id).collect();
+        let mut open = self.open_problems_of(&ids).await?;
+        for host in &mut hosts {
+            host.open = open.remove(&host.id).unwrap_or_default();
+        }
+        Ok(Some(DashboardHosts {
+            file,
+            dashboard,
+            hosts,
+        }))
+    }
+
+    /// The stored configuration of the active hosts `names` that have one.
+    pub async fn host_configs(
+        &self,
+        names: &[String],
+    ) -> Result<HashMap<String, EffectiveHost>, StateError> {
+        let rows: Vec<(String, Json<EffectiveHost>)> = sqlx::query_as(
+            "SELECT name, config FROM hosts              WHERE active AND name = ANY($1) AND config IS NOT NULL",
+        )
+        .bind(names)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(name, c)| (name, c.0)).collect())
+    }
+
+    /// The source file and content of the dashboard `id`.
+    async fn dashboard_document(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, DashboardFile)>, StateError> {
+        let row: Option<(String, Json<serde_json::Value>)> = sqlx::query_as(
+            "SELECT source_file, body FROM config_documents              WHERE kind = 'dashboard' AND id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        let Some(Json(body)) = body else {
-            return Ok(None);
-        };
-        let dashboard: DashboardFile = serde_json::from_value(body)
-            .map_err(|e| StateError::Db(sqlx::Error::Decode(e.into())))?;
-        let hosts: Vec<(Uuid, String, Vec<String>)> =
-            sqlx::query_as("SELECT id, name, groups FROM hosts WHERE active ORDER BY name")
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(Some(
-            hosts
-                .into_iter()
-                .filter(|(_, name, groups)| dashboard.hosts.selects(name, groups))
-                .map(|(id, _, _)| id)
-                .collect(),
-        ))
+        row.map(|(file, body)| Ok((file, decode_dashboard(body.0)?)))
+            .transpose()
     }
+
+    /// The active hosts, ordered by name, without their open problems.
+    async fn active_hosts(&self) -> Result<Vec<HostRow>, StateError> {
+        let columns: Vec<HostColumns> = sqlx::query_as(
+            "SELECT id, name, address, groups, source_file, last_seen_at              FROM hosts WHERE active ORDER BY name, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(columns.into_iter().map(|c| row_of(c, Vec::new())).collect())
+    }
+}
+
+fn decode_dashboard(body: serde_json::Value) -> Result<DashboardFile, StateError> {
+    serde_json::from_value(body).map_err(|e| StateError::Db(sqlx::Error::Decode(e.into())))
+}
+
+/// Every dashboard and every active host: what the summaries of all dashboards are made of.
+#[derive(Debug, Clone)]
+pub struct BoardInputs {
+    /// Id, source file and content of each dashboard.
+    pub dashboards: Vec<(String, String, DashboardFile)>,
+    /// The active hosts with their open problems.
+    pub hosts: Vec<HostRow>,
+}
+
+/// One dashboard with the hosts it selects.
+#[derive(Debug, Clone)]
+pub struct DashboardHosts {
+    pub file: String,
+    pub dashboard: DashboardFile,
+    /// The selected active hosts with their open problems, ordered by name.
+    pub hosts: Vec<HostRow>,
 }
 
 #[cfg(test)]

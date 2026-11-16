@@ -1,7 +1,6 @@
 //! The hosts list, the groups and the detail of one host.
 
 use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
 use std::time::Duration;
 
 use axum::Json;
@@ -9,19 +8,22 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use cerbrix_common::config::Severity;
 use cerbrix_common::{
-    Comparison, MAX_PARAMS, TriggerExpr, builtin_item, default_agent_items, validate_host_name,
-    validate_item_key, validate_param_name,
+    MAX_PARAMS, builtin_item, default_agent_items, validate_host_name, validate_item_key,
+    validate_param_name,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{ApiError, Entry, Page, invalid, query_text};
-use crate::alerting::active_triggers;
 use crate::api::AppState;
 use crate::auth::Viewer;
 use crate::gitops::{EffectiveHost, EffectiveItem, EffectiveTrigger};
-use crate::metrics::{LatestQuery, MetricsError, MetricsStore, RangeQuery};
+use crate::metrics::{LatestQuery, MetricsError, MetricsStore};
 use crate::state::{HostDetail, HostQuery, HostStateFilter, Problem, StateError};
+use crate::view::series::{
+    CURRENT_VALUE_MAX_AGE_SECS, Threshold, bounded, log_metrics_failure, ms_to_rfc3339,
+    range_query, thresholds,
+};
 use crate::view::{HostState, host_state, rfc3339, serialize_time_opt};
 
 pub(super) fn entries() -> Vec<Entry> {
@@ -49,31 +51,8 @@ const SERIES_TIMEOUT: Duration = Duration::from_secs(10);
 /// The newest value shown in the hosts list is at most this old.
 const LIST_MAX_AGE_SECS: u32 = 600;
 
-/// The current values of a host are at most this old.
-const VALUES_MAX_AGE_SECS: u32 = 3600;
-
 /// The longest parameter value taken in a series request.
 const MAX_PARAM_VALUE_CHARS: usize = 256;
-
-/// Runs a call to the metrics store for at most `limit`; running out of time is the same
-/// as the store being unavailable.
-async fn bounded<T>(
-    limit: Duration,
-    call: impl Future<Output = Result<T, MetricsError>>,
-) -> Result<T, MetricsError> {
-    tokio::time::timeout(limit, call)
-        .await
-        .unwrap_or_else(|_| Err(MetricsError::Unavailable("timed out".into())))
-}
-
-/// Logs a failed call to the metrics store: an outage is expected now and then, a refused
-/// query is a bug.
-fn log_metrics_failure(what: &str, e: &MetricsError) {
-    match e {
-        MetricsError::Unavailable(_) => tracing::warn!(error = %e, "{what}: metrics unavailable"),
-        MetricsError::Rejected(_) => tracing::error!(error = %e, "{what}: query refused"),
-    }
-}
 
 fn store_failed(what: &str, e: &StateError) -> ApiError {
     tracing::error!(error = %e, "{what}");
@@ -355,7 +334,7 @@ async fn values(
     let query = LatestQuery {
         host: Some(name),
         key: None,
-        max_age_secs: VALUES_MAX_AGE_SECS,
+        max_age_secs: CURRENT_VALUE_MAX_AGE_SECS,
     };
     let samples = match bounded(CURRENT_VALUES_TIMEOUT, app.metrics.latest(&query)).await {
         Ok(samples) => samples,
@@ -370,13 +349,11 @@ async fn values(
     let mut items: Vec<ValueOut> = samples
         .into_iter()
         .filter_map(|s| {
-            let at =
-                OffsetDateTime::from_unix_timestamp_nanos(i128::from(s.ts_ms) * 1_000_000).ok()?;
             Some(ValueOut {
+                at: ms_to_rfc3339(s.ts_ms)?,
                 key: s.key,
                 params: s.params,
                 value: s.value,
-                at: rfc3339(at),
             })
         })
         .collect();
@@ -487,60 +464,6 @@ fn check_item_params(item: &str, params: &BTreeMap<String, String>) -> Result<()
     Ok(())
 }
 
-/// A trigger limit drawn into the graph of its item.
-#[derive(Debug, Serialize)]
-struct Threshold {
-    trigger: String,
-    severity: Severity,
-    op: &'static str,
-    value: f64,
-}
-
-fn op_text(op: Comparison) -> &'static str {
-    match op {
-        Comparison::Gt => ">",
-        Comparison::Ge => ">=",
-        Comparison::Lt => "<",
-        Comparison::Le => "<=",
-        Comparison::Eq => "==",
-        Comparison::Ne => "!=",
-    }
-}
-
-/// The comparison triggers of the host on `key` whose selector fits the requested
-/// parameters: every parameter of the selector is requested with the same value. A selector
-/// without parameters fits every request.
-fn thresholds(
-    config: &EffectiveHost,
-    key: &str,
-    params: &BTreeMap<String, String>,
-) -> Vec<Threshold> {
-    active_triggers(config)
-        .into_iter()
-        .filter_map(|t| match t.expr {
-            TriggerExpr::Compare {
-                selector,
-                op,
-                threshold,
-                ..
-            } if selector.key == key
-                && selector
-                    .params
-                    .iter()
-                    .all(|(name, want)| params.get(name) == Some(want)) =>
-            {
-                Some(Threshold {
-                    trigger: t.name,
-                    severity: t.severity,
-                    op: op_text(op),
-                    value: threshold,
-                })
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 #[derive(Serialize)]
 struct SeriesOut {
     key: String,
@@ -589,14 +512,14 @@ async fn series(
     let (secs, step_secs) = series_range(&request.range).unwrap_or((3_600, 15));
     let to = OffsetDateTime::now_utc();
     let from = to - time::Duration::seconds(secs);
-    let range = RangeQuery {
-        host: name,
-        key: request.item.clone(),
-        params: request.params.clone(),
-        from_ms: (from.unix_timestamp_nanos() / 1_000_000) as i64,
-        to_ms: (to.unix_timestamp_nanos() / 1_000_000) as i64,
+    let range = range_query(
+        name,
+        request.item.clone(),
+        request.params.clone(),
+        from,
+        to,
         step_secs,
-    };
+    );
     let samples = match bounded(SERIES_TIMEOUT, app.metrics.query_range(&range)).await {
         Ok(samples) => samples,
         Err(e @ MetricsError::Unavailable(_)) => {
@@ -626,7 +549,6 @@ async fn series(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use axum::http::StatusCode;
@@ -641,30 +563,9 @@ mod tests {
     };
     use crate::api::ui::testing::*;
     use crate::auth::Role;
-    use crate::gitops::{EffectiveHost, EffectiveTrigger};
-    use crate::metrics::{
-        LatestQuery, LatestSample, MetricsError, MetricsStore as _, RangeQuery, Sample,
-    };
+    use crate::metrics::MetricsStore as _;
 
     const T0_MS: i64 = 1_800_000_000_000;
-
-    /// Loads the example repository: `web-01` and `db-01`.
-    async fn apply_example(fx: &Fixture) {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/config-repo");
-        let compiled =
-            crate::gitops::compile(&crate::gitops::read_tree(&dir, "c1").unwrap()).unwrap();
-        fx.store
-            .apply_config(
-                "c1",
-                &compiled,
-                OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap(),
-                50,
-                false,
-            )
-            .await
-            .unwrap();
-    }
 
     async fn get(fx: &Fixture, uri: &str) -> Reply {
         let token = fx.session(Role::Viewer).await;
@@ -704,7 +605,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn hosts_list_shape(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         fx.store.create_host("zz-bare").await.unwrap();
         open_problem(&fx, "web-01", "Disk almost full", Severity::High).await;
 
@@ -778,7 +679,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn host_detail_shape(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         let host = fx.store.host_by_name("web-01").await.unwrap().unwrap();
         fx.store.bind_credential(host.id).await.unwrap();
 
@@ -1018,7 +919,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn hosts_list_has_cpu_and_memory(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         fx.store.create_host("zz-bare").await.unwrap();
         let now = now_ms();
         fx.metrics
@@ -1071,7 +972,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn hosts_list_survives_metrics_outage(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         fx.metrics
             .write("web-01", &[mv("cpu.usage", &[], now_ms() - 5_000, 12.5)])
             .await
@@ -1099,7 +1000,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn hosts_list_does_not_wait_for_a_slow_metrics_store(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         fx.metrics.set_delay(std::time::Duration::from_secs(120));
         let started = std::time::Instant::now();
         let reply = get(&fx, "/api/v1/hosts").await;
@@ -1114,37 +1015,10 @@ mod tests {
         );
     }
 
-    /// A store whose every query is refused.
-    struct Refusing;
-
-    #[async_trait::async_trait]
-    impl crate::metrics::MetricsStore for Refusing {
-        async fn write(&self, _: &str, _: &[MetricValue]) -> Result<(), MetricsError> {
-            Ok(())
-        }
-        async fn query_range(&self, _: &RangeQuery) -> Result<Vec<Sample>, MetricsError> {
-            Err(MetricsError::Rejected("no".into()))
-        }
-        async fn latest(&self, _: &LatestQuery) -> Result<Vec<LatestSample>, MetricsError> {
-            Err(MetricsError::Rejected("no".into()))
-        }
-    }
-
-    /// The fixture's router on top of another metrics store.
-    fn with_store(fx: &mut Fixture, metrics: Arc<dyn crate::metrics::MetricsStore>) {
-        fx.router = crate::api::router(crate::api::AppState {
-            store: fx.store.clone(),
-            metrics,
-            config: config(true, None),
-            warnings: Arc::default(),
-            queue_mail: false,
-        });
-    }
-
     #[sqlx::test(migrations = "./migrations")]
     async fn a_refusing_metrics_store_is_an_error_only_for_the_series(pool: PgPool) {
         let mut fx = Fixture::new(pool).await;
-        with_store(&mut fx, Arc::new(Refusing));
+        fx.use_metrics(Arc::new(Refusing));
         let reply = get(&fx, "/api/v1/hosts").await;
         assert_eq!(reply.status, StatusCode::OK);
         assert_eq!(reply.json()["metrics_available"], false);
@@ -1164,7 +1038,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn values_shape_and_order(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         let now = now_ms() / 1000 * 1000;
         fx.metrics
             .write(
@@ -1250,7 +1124,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn series_returns_points_and_thresholds(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         let now = now_ms();
         fx.metrics
             .write(
@@ -1353,7 +1227,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn series_step_per_range(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         for (range, step, secs) in [
             ("1h", 15, 3_600),
             ("6h", 90, 21_600),
@@ -1382,7 +1256,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn series_unknown_item_is_invalid(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         for item in [
             "disk.usedpercent",
             // Valid built-in key that web-01 does not collect.
@@ -1426,7 +1300,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn series_bad_range_is_invalid(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         for range in ["", "2h", "1H", "30d", "1h%20", "1h&range=6h", "-1h"] {
             let reply = get(
                 &fx,
@@ -1443,7 +1317,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn series_needs_the_items_parameter(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         // Without the mount the selector would match every mount and mix their points.
         let reply = get(
             &fx,
@@ -1471,7 +1345,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn series_rejects_a_parameter_the_item_does_not_have(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         let reply = get(
             &fx,
             "/api/v1/hosts/web-01/series?item=cpu.usage&range=1h&p_mount=/",
@@ -1485,7 +1359,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn series_bad_query_parameters_are_invalid(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         let long = "a".repeat(257);
         let many: String = (0..17).map(|i| format!("&p_k{i}=v")).collect();
         for extra in [
@@ -1531,7 +1405,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn series_metrics_outage_is_503(pool: PgPool) {
         let fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
+        fx.apply_example().await;
         fx.metrics.set_failing(true);
         let reply = get(&fx, "/api/v1/hosts/web-01/series?item=cpu.usage&range=1h").await;
         assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1556,11 +1430,10 @@ mod tests {
             .mount(&server)
             .await;
         let mut fx = Fixture::new(pool).await;
-        apply_example(&fx).await;
-        with_store(
-            &mut fx,
-            Arc::new(crate::metrics::VictoriaMetrics::new(&server.uri()).unwrap()),
-        );
+        fx.apply_example().await;
+        fx.use_metrics(Arc::new(
+            crate::metrics::VictoriaMetrics::new(&server.uri()).unwrap(),
+        ));
         // The value is `/"} or {__name__=~".+"} or x{a="`.
         let hostile = "%2F%22%7D%20or%20%7B__name__%3D~%22.%2B%22%7D%20or%20x%7Ba%3D%22";
         let reply = get(
@@ -1583,94 +1456,5 @@ mod tests {
             query,
             r#"cerbrix_disk_used_percent{host="web-01",p_mount="/\"} or {__name__=~\".+\"} or x{a=\""}"#
         );
-    }
-
-    #[test]
-    fn thresholds_match_item_and_parameters() {
-        use cerbrix_common::config::Severity;
-
-        let trigger = |name: &str, expression: &str, severity| EffectiveTrigger {
-            name: name.into(),
-            expression: expression.into(),
-            severity,
-            origin: "host".into(),
-        };
-        let config = EffectiveHost {
-            templates: vec![],
-            items: vec![],
-            triggers: vec![
-                trigger("any mount", "disk.used_percent > 90", Severity::High),
-                trigger(
-                    "root",
-                    "disk.used_percent{mount=/} >= 80 for 5m",
-                    Severity::Warning,
-                ),
-                trigger("data", "disk.used_percent{mount=/data} < 5", Severity::Info),
-                trigger("other item", "cpu.usage > 50", Severity::High),
-                trigger("silent", "no data for 3m", Severity::Critical),
-                trigger("broken", "disk.used_percent >> 1", Severity::High),
-                trigger("eq", "disk.used_percent == 1.5", Severity::High),
-                trigger("ne", "disk.used_percent != 2", Severity::High),
-                trigger("le", "disk.used_percent <= 3", Severity::High),
-                trigger("both", "disk.used_percent{mount=/,x=y} > 1", Severity::High),
-            ],
-        };
-        let params = |p: &[(&str, &str)]| -> BTreeMap<String, String> {
-            p.iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect()
-        };
-        let names = |p: &[(&str, &str)]| -> Vec<(String, &'static str)> {
-            super::thresholds(&config, "disk.used_percent", &params(p))
-                .into_iter()
-                .map(|t| (t.trigger, t.op))
-                .collect()
-        };
-        let any = |op: &'static str| ("any mount".to_owned(), op);
-        let tail = [
-            ("eq".to_owned(), "=="),
-            ("ne".to_owned(), "!="),
-            ("le".to_owned(), "<="),
-        ];
-        let mut root = vec![any(">"), ("root".to_owned(), ">=")];
-        root.extend(tail.clone());
-        assert_eq!(names(&[("mount", "/")]), root);
-        let mut data = vec![any(">"), ("data".to_owned(), "<")];
-        data.extend(tail.clone());
-        assert_eq!(names(&[("mount", "/data")]), data);
-        // A selector with parameters needs them in the request.
-        let mut bare = vec![any(">")];
-        bare.extend(tail.clone());
-        assert_eq!(names(&[]), bare);
-        let mut both = vec![any(">"), ("root".to_owned(), ">=")];
-        both.extend(tail);
-        both.push(("both".to_owned(), ">"));
-        assert_eq!(names(&[("mount", "/"), ("x", "y")]), both);
-        assert_eq!(
-            super::thresholds(&config, "cpu.usage", &BTreeMap::new())[0].trigger,
-            "other item"
-        );
-        assert!(super::thresholds(&config, "memory.used_percent", &BTreeMap::new()).is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_metrics_call_is_bounded() {
-        use std::time::Duration;
-        let slow = super::bounded(Duration::from_millis(50), async {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            Ok(1)
-        })
-        .await;
-        assert!(
-            matches!(slow, Err(MetricsError::Unavailable(_))),
-            "{slow:?}"
-        );
-        let fast = super::bounded(Duration::from_secs(5), async { Ok(1) }).await;
-        assert_eq!(fast.unwrap(), 1);
-        let failed: Result<i32, _> = super::bounded(Duration::from_secs(5), async {
-            Err(MetricsError::Rejected("x".into()))
-        })
-        .await;
-        assert!(matches!(failed, Err(MetricsError::Rejected(_))));
     }
 }

@@ -15,8 +15,8 @@ pub use alerting::{
 };
 pub use enrollment::{EnrollmentKey, UnknownAgent};
 pub use read::{
-    HostCounts, HostDetail, HostQuery, HostRow, HostStateFilter, ProblemCounts, ProblemQuery,
-    ProblemStateFilter, SeverityCount,
+    BoardInputs, DashboardHosts, HostCounts, HostDetail, HostQuery, HostRow, HostStateFilter,
+    ProblemCounts, ProblemQuery, ProblemStateFilter, SeverityCount,
 };
 pub use sync::{
     Applied, ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock,

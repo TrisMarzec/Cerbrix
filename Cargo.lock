@@ -476,6 +476,7 @@ dependencies = [
  "cerbrix-common",
  "clap",
  "figment",
+ "futures",
  "http-body-util",
  "lettre",
  "rand",

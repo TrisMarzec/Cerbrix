@@ -197,7 +197,9 @@ must not overlap, so a dashboard has at most 72 panels. Panel types:
 | `value` | `host`, `item`, `params` | The latest value. |
 
 For `graph` and `value`, the host must exist, be selected by the dashboard's `hosts`, and
-collect the item.
+collect the item. An item that takes a parameter (`disk.*` items take `mount`, `net.*` items
+take `interface`) needs exactly that parameter in `params`: a panel shows one series, and
+without the parameter it would match every mount or interface.
 
 A dashboard that only selects hosts and uses the standard layout. Save it as
 `dashboards/web.json`: its id is then `web`, which the display example below refers to.
@@ -304,7 +306,8 @@ checks are:
 - Notifications have at least one valid address.
 - Dashboards: at most 72 panels, panels inside the grid, no overlap (the first overlapping pair
   is reported), graph and value panels refer to existing hosts
-  that the dashboard selects and that collect the item.
+  that the dashboard selects and that collect the item, and give the parameter of an item that
+  takes one (`mount` or `interface`).
 - Displays: every referenced dashboard exists; rotation has at least one dashboard and an `every`
   from 5 s to 1 h.
 - The [limits](#layout) on file size, file count and total size.

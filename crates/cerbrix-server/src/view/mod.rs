@@ -3,6 +3,9 @@
 //! The one rule for a host's state lives here: the main list, the dashboards and the wall
 //! displays all show [`host_state`].
 
+pub mod dashboard;
+pub mod series;
+
 use std::cmp::Reverse;
 
 use cerbrix_common::config::Severity;
