@@ -66,6 +66,8 @@ pub(crate) const ROUTES: &[(&str, &str, Access)] = &[
     ("GET", "/api/v1/hosts", Access::Viewer),
     ("GET", "/api/v1/host-groups", Access::Viewer),
     ("GET", "/api/v1/hosts/{name}", Access::Viewer),
+    ("GET", "/api/v1/hosts/{name}/values", Access::Viewer),
+    ("GET", "/api/v1/hosts/{name}/series", Access::Viewer),
     ("GET", "/api/v1/users", Access::Admin),
     ("POST", "/api/v1/users", Access::Admin),
     ("PATCH", "/api/v1/users/{id}", Access::Admin),
@@ -475,6 +477,8 @@ pub(crate) mod testing {
         #[allow(dead_code)] // for the tests of later tasks
         pub store: StateStore,
         pub pool: PgPool,
+        /// The metrics store the router reads from.
+        pub metrics: Arc<MemoryMetrics>,
         /// The fixture users, one per role.
         pub viewer: Uuid,
         pub operator: Uuid,
@@ -509,9 +513,10 @@ pub(crate) mod testing {
                 Ok(_) | Err(crate::state::StateError::Conflict(_)) => {}
                 Err(e) => panic!("creating the fixture host failed: {e}"),
             }
+            let metrics = Arc::new(MemoryMetrics::new());
             let router = crate::api::router(crate::api::AppState {
                 store: store.clone(),
-                metrics: Arc::new(MemoryMetrics::new()),
+                metrics: metrics.clone(),
                 config,
                 warnings: Arc::default(),
                 queue_mail: false,
@@ -520,6 +525,7 @@ pub(crate) mod testing {
                 router,
                 store,
                 pool,
+                metrics,
                 viewer: ids[0],
                 operator: ids[1],
                 admin: ids[2],

@@ -46,6 +46,20 @@ pub fn builtin_item(key: &str) -> Option<&'static ItemSpec> {
     BUILTIN_ITEMS.iter().find(|s| s.key == key)
 }
 
+/// The name of the series that stores an item: `disk.used_percent` becomes
+/// `cerbrix_disk_used_percent`.
+pub fn metric_name(key: &str) -> String {
+    format!("cerbrix_{}", key.replace('.', "_"))
+}
+
+/// The built-in item stored in the series `name`, if there is one.
+pub fn key_for_metric(name: &str) -> Option<&'static str> {
+    BUILTIN_ITEMS
+        .iter()
+        .map(|s| s.key)
+        .find(|key| metric_name(key) == name)
+}
+
 /// Every built-in item without parameters, at the M1 default intervals
 /// (30 s for cpu, load, memory and net; 300 s for uptime and disk).
 pub fn default_agent_items() -> Vec<ConfiguredItem> {
@@ -77,6 +91,38 @@ mod tests {
         assert!(builtin_item("disk.usedpercent").is_none());
         for s in BUILTIN_ITEMS {
             assert_eq!(validate_item_key(s.key), Ok(()), "{}", s.key);
+        }
+    }
+
+    #[test]
+    fn metric_name_round_trips_for_every_builtin_item() {
+        assert_eq!(metric_name("cpu.usage"), "cerbrix_cpu_usage");
+        assert_eq!(
+            metric_name("disk.used_percent"),
+            "cerbrix_disk_used_percent"
+        );
+        for s in BUILTIN_ITEMS {
+            assert_eq!(
+                key_for_metric(&metric_name(s.key)),
+                Some(s.key),
+                "{}",
+                s.key
+            );
+        }
+    }
+
+    #[test]
+    fn key_for_unknown_metric_is_none() {
+        for name in [
+            "",
+            "cpu_usage",
+            "cerbrix_",
+            "cerbrix_cpu_usag",
+            "cerbrix_cpu_usage_x",
+            "up",
+            "Cerbrix_cpu_usage",
+        ] {
+            assert_eq!(key_for_metric(name), None, "{name}");
         }
     }
 

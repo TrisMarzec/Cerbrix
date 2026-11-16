@@ -19,6 +19,10 @@ pub trait MetricsStore: Send + Sync {
     async fn write(&self, host: &str, values: &[MetricValue]) -> Result<(), MetricsError>;
     /// Returns the samples of one series within the time range, in time order.
     async fn query_range(&self, query: &RangeQuery) -> Result<Vec<Sample>, MetricsError>;
+    /// Returns the newest sample of every series that matches `query` and is not older
+    /// than `query.max_age_secs`, in no particular order. Series that are not a built-in
+    /// item are skipped. A query with neither host nor key is `MetricsError::Rejected`.
+    async fn latest(&self, query: &LatestQuery) -> Result<Vec<LatestSample>, MetricsError>;
 }
 
 /// A range query for one series (host, item key and item parameters).
@@ -33,6 +37,29 @@ pub struct RangeQuery {
     pub to_ms: i64,
     /// Resolution step in seconds.
     pub step_secs: u32,
+}
+
+/// A query for the newest sample of every matching series.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestQuery {
+    /// Only the series of this host.
+    pub host: Option<String>,
+    /// Only the series of this item key.
+    pub key: Option<String>,
+    /// Samples older than this many seconds are ignored. The store may hide its newest
+    /// seconds from queries (VictoriaMetrics: 30 s), so the window can end that long ago.
+    pub max_age_secs: u32,
+}
+
+/// The newest sample of one series.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatestSample {
+    pub host: String,
+    pub key: String,
+    pub params: BTreeMap<String, String>,
+    /// Measurement time of the sample in Unix milliseconds.
+    pub ts_ms: i64,
+    pub value: f64,
 }
 
 /// One stored data point.

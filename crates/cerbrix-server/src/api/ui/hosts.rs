@@ -1,25 +1,36 @@
 //! The hosts list, the groups and the detail of one host.
 
+use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::time::Duration;
+
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use cerbrix_common::config::Severity;
-use cerbrix_common::validate_host_name;
+use cerbrix_common::{
+    Comparison, MAX_PARAMS, TriggerExpr, default_agent_items, validate_host_name,
+    validate_item_key, validate_param_name,
+};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{ApiError, Entry, Listed, Page, invalid, query_text};
+use super::{ApiError, Entry, Page, invalid, query_text};
+use crate::alerting::active_triggers;
 use crate::api::AppState;
 use crate::auth::Viewer;
 use crate::gitops::{EffectiveHost, EffectiveItem, EffectiveTrigger};
+use crate::metrics::{LatestQuery, MetricsError, MetricsStore, RangeQuery};
 use crate::state::{HostDetail, HostQuery, HostStateFilter, Problem, StateError};
-use crate::view::{HostState, host_state, serialize_time_opt};
+use crate::view::{HostState, host_state, rfc3339, serialize_time_opt};
 
 pub(super) fn entries() -> Vec<Entry> {
     vec![
         Entry::new("GET", "/api/v1/hosts", list),
         Entry::new("GET", "/api/v1/host-groups", groups),
         Entry::new("GET", "/api/v1/hosts/{name}", detail),
+        Entry::new("GET", "/api/v1/hosts/{name}/values", values),
+        Entry::new("GET", "/api/v1/hosts/{name}/series", series),
     ]
 }
 
@@ -28,6 +39,41 @@ const MAX_SEARCH_CHARS: usize = 200;
 
 /// The longest group name (the length of a valid one).
 const MAX_GROUP_CHARS: usize = 63;
+
+/// How long the hosts list and the values of a host wait for the metrics store.
+const CURRENT_VALUES_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long a history series waits for the metrics store.
+const SERIES_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The newest value shown in the hosts list is at most this old.
+const LIST_MAX_AGE_SECS: u32 = 600;
+
+/// The current values of a host are at most this old.
+const VALUES_MAX_AGE_SECS: u32 = 3600;
+
+/// The longest parameter value taken in a series request.
+const MAX_PARAM_VALUE_CHARS: usize = 256;
+
+/// Runs a call to the metrics store for at most `limit`; running out of time is the same
+/// as the store being unavailable.
+async fn bounded<T>(
+    limit: Duration,
+    call: impl Future<Output = Result<T, MetricsError>>,
+) -> Result<T, MetricsError> {
+    tokio::time::timeout(limit, call)
+        .await
+        .unwrap_or_else(|_| Err(MetricsError::Unavailable("timed out".into())))
+}
+
+/// Logs a failed call to the metrics store: an outage is expected now and then, a refused
+/// query is a bug.
+fn log_metrics_failure(what: &str, e: &MetricsError) {
+    match e {
+        MetricsError::Unavailable(_) => tracing::warn!(error = %e, "{what}: metrics unavailable"),
+        MetricsError::Rejected(_) => tracing::error!(error = %e, "{what}: query refused"),
+    }
+}
 
 fn store_failed(what: &str, e: &StateError) -> ApiError {
     tracing::error!(error = %e, "{what}");
@@ -44,6 +90,40 @@ struct HostOut {
     #[serde(serialize_with = "serialize_time_opt")]
     last_seen_at: Option<OffsetDateTime>,
     managed_by_git: bool,
+    /// `cpu.usage`, `null` without a recent value or when the metrics store is down.
+    cpu: Option<f64>,
+    /// `memory.used_percent`, as `cpu`.
+    memory: Option<f64>,
+}
+
+/// The answer of the hosts list.
+#[derive(Serialize)]
+struct HostsListed {
+    items: Vec<HostOut>,
+    total: i64,
+    /// False when a current value could not be read from the metrics store.
+    metrics_available: bool,
+}
+
+/// The newest value of the item `key` of every host that has one, one call to the store.
+async fn newest_by_host(
+    metrics: &dyn MetricsStore,
+    key: &str,
+) -> Result<HashMap<String, f64>, MetricsError> {
+    let query = LatestQuery {
+        host: None,
+        key: Some(key.to_owned()),
+        max_age_secs: LIST_MAX_AGE_SECS,
+    };
+    let samples = bounded(CURRENT_VALUES_TIMEOUT, metrics.latest(&query)).await?;
+    let mut newest: HashMap<String, (i64, f64)> = HashMap::new();
+    for s in samples.into_iter().filter(|s| s.params.is_empty()) {
+        let entry = newest.entry(s.host).or_insert((s.ts_ms, s.value));
+        if entry.0 < s.ts_ms {
+            *entry = (s.ts_ms, s.value);
+        }
+    }
+    Ok(newest.into_iter().map(|(host, (_, v))| (host, v)).collect())
 }
 
 #[derive(Deserialize)]
@@ -58,7 +138,7 @@ async fn list(
     Viewer(_): Viewer,
     page: Page,
     params: Result<Query<HostsParams>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Listed<HostOut>>, ApiError> {
+) -> Result<Json<HostsListed>, ApiError> {
     let Query(params) = params.map_err(|_| invalid("the query parameters are malformed"))?;
     for (value, max, message) in [
         (
@@ -97,11 +177,32 @@ async fn list(
         .await
         .map_err(|e| store_failed("listing hosts failed", &e))?;
     let managed_by_git = app.config.gitops.enabled;
-    Ok(Json(Listed {
+    // Both calls run at once and give up after the same time; a store that is down or slow
+    // empties the column, never the list.
+    let (cpu, memory) = tokio::join!(
+        newest_by_host(app.metrics.as_ref(), "cpu.usage"),
+        newest_by_host(app.metrics.as_ref(), "memory.used_percent"),
+    );
+    let mut metrics_available = true;
+    let mut column = |what: &str, result: Result<HashMap<String, f64>, MetricsError>| match result {
+        Ok(values) => values,
+        Err(e) => {
+            log_metrics_failure(what, &e);
+            metrics_available = false;
+            HashMap::new()
+        }
+    };
+    let (cpu, memory) = (
+        column("hosts list: cpu", cpu),
+        column("hosts list: memory", memory),
+    );
+    Ok(Json(HostsListed {
         items: rows
             .into_iter()
             .map(|row| HostOut {
                 state: host_state(&row.open),
+                cpu: cpu.get(&row.name).copied(),
+                memory: memory.get(&row.name).copied(),
                 name: row.name,
                 address: row.address,
                 groups: row.groups,
@@ -110,6 +211,7 @@ async fn list(
             })
             .collect(),
         total,
+        metrics_available,
     }))
 }
 
@@ -207,8 +309,292 @@ async fn detail(
     }))
 }
 
+/// One current value of a host.
+#[derive(Serialize)]
+struct ValueOut {
+    key: String,
+    params: BTreeMap<String, String>,
+    value: f64,
+    /// When the value was measured, RFC 3339.
+    at: String,
+}
+
+#[derive(Serialize)]
+struct ValuesOut {
+    items: Vec<ValueOut>,
+    /// False when the metrics store could not be read; `items` is then empty.
+    metrics_available: bool,
+}
+
+/// An active host by name, or 404.
+async fn active_host(app: &AppState, name: &str) -> Result<(), ApiError> {
+    let not_found = || ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such host");
+    // A name that cannot be a host name names no host.
+    if validate_host_name(name).is_err() {
+        return Err(not_found());
+    }
+    match app
+        .store
+        .host_by_name(name)
+        .await
+        .map_err(|e| store_failed("reading a host failed", &e))?
+    {
+        Some(host) if host.active => Ok(()),
+        _ => Err(not_found()),
+    }
+}
+
+/// The newest value of every series of a host. A store that is down or slow gives an empty
+/// list, not an error: the page can still show the rest of the host.
+async fn values(
+    State(app): State<AppState>,
+    Viewer(_): Viewer,
+    Path(name): Path<String>,
+) -> Result<Json<ValuesOut>, ApiError> {
+    active_host(&app, &name).await?;
+    let query = LatestQuery {
+        host: Some(name),
+        key: None,
+        max_age_secs: VALUES_MAX_AGE_SECS,
+    };
+    let samples = match bounded(CURRENT_VALUES_TIMEOUT, app.metrics.latest(&query)).await {
+        Ok(samples) => samples,
+        Err(e) => {
+            log_metrics_failure("host values", &e);
+            return Ok(Json(ValuesOut {
+                items: Vec::new(),
+                metrics_available: false,
+            }));
+        }
+    };
+    let mut items: Vec<ValueOut> = samples
+        .into_iter()
+        .filter_map(|s| {
+            let at =
+                OffsetDateTime::from_unix_timestamp_nanos(i128::from(s.ts_ms) * 1_000_000).ok()?;
+            Some(ValueOut {
+                key: s.key,
+                params: s.params,
+                value: s.value,
+                at: rfc3339(at),
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| (&a.key, &a.params).cmp(&(&b.key, &b.params)));
+    Ok(Json(ValuesOut {
+        items,
+        metrics_available: true,
+    }))
+}
+
+/// The ranges of a series with the resolution used for each: seconds and step.
+fn series_range(range: &str) -> Option<(i64, u32)> {
+    match range {
+        "1h" => Some((3_600, 15)),
+        "6h" => Some((21_600, 90)),
+        "24h" => Some((86_400, 300)),
+        "7d" => Some((604_800, 1_800)),
+        _ => None,
+    }
+}
+
+/// What a series request names: the item, the range and the item's parameters.
+struct SeriesRequest {
+    item: String,
+    range: String,
+    params: BTreeMap<String, String>,
+}
+
+/// Reads the query of a series request. Every parameter is known and given once: `item`,
+/// `range` and `p_<name>` for a parameter of the item; anything else is refused.
+fn series_request(pairs: Vec<(String, String)>) -> Result<SeriesRequest, ApiError> {
+    let mut item = None;
+    let mut range = None;
+    let mut params = BTreeMap::new();
+    let twice = || invalid("a query parameter is given more than once");
+    for (name, value) in pairs {
+        match name.as_str() {
+            "item" if item.is_none() => item = Some(value),
+            "range" if range.is_none() => range = Some(value),
+            "item" | "range" => return Err(twice()),
+            _ => {
+                let param = name
+                    .strip_prefix("p_")
+                    .ok_or_else(|| invalid("unknown query parameter"))?;
+                validate_param_name(param)
+                    .map_err(|_| invalid("a parameter name must be p_ and a valid name"))?;
+                query_text(
+                    &value,
+                    MAX_PARAM_VALUE_CHARS,
+                    "a parameter value must have 1 to 256 characters and no control character",
+                )?;
+                if value.is_empty() {
+                    return Err(invalid(
+                        "a parameter value must have 1 to 256 characters and no control character",
+                    ));
+                }
+                if params.insert(param.to_owned(), value).is_some() {
+                    return Err(twice());
+                }
+            }
+        }
+    }
+    if params.len() > MAX_PARAMS {
+        return Err(invalid("too many item parameters"));
+    }
+    let item = item.ok_or_else(|| invalid("item is required"))?;
+    validate_item_key(&item).map_err(|_| invalid("item is not a valid item key"))?;
+    let range = range.ok_or_else(|| invalid("range is required"))?;
+    if series_range(&range).is_none() {
+        return Err(invalid("range must be 1h, 6h, 24h or 7d"));
+    }
+    Ok(SeriesRequest {
+        item,
+        range,
+        params,
+    })
+}
+
+/// A trigger limit drawn into the graph of its item.
+#[derive(Debug, Serialize)]
+struct Threshold {
+    trigger: String,
+    severity: Severity,
+    op: &'static str,
+    value: f64,
+}
+
+fn op_text(op: Comparison) -> &'static str {
+    match op {
+        Comparison::Gt => ">",
+        Comparison::Ge => ">=",
+        Comparison::Lt => "<",
+        Comparison::Le => "<=",
+        Comparison::Eq => "==",
+        Comparison::Ne => "!=",
+    }
+}
+
+/// The comparison triggers of the host on `key` whose selector fits the requested
+/// parameters: every parameter of the selector is requested with the same value. A selector
+/// without parameters fits every request.
+fn thresholds(
+    config: &EffectiveHost,
+    key: &str,
+    params: &BTreeMap<String, String>,
+) -> Vec<Threshold> {
+    active_triggers(config)
+        .into_iter()
+        .filter_map(|t| match t.expr {
+            TriggerExpr::Compare {
+                selector,
+                op,
+                threshold,
+                ..
+            } if selector.key == key
+                && selector
+                    .params
+                    .iter()
+                    .all(|(name, want)| params.get(name) == Some(want)) =>
+            {
+                Some(Threshold {
+                    trigger: t.name,
+                    severity: t.severity,
+                    op: op_text(op),
+                    value: threshold,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Serialize)]
+struct SeriesOut {
+    key: String,
+    params: BTreeMap<String, String>,
+    from: String,
+    to: String,
+    step_secs: u32,
+    /// `[ts_ms, value]` pairs in time order.
+    points: Vec<(i64, f64)>,
+    thresholds: Vec<Threshold>,
+}
+
+/// The history of one series of a host for a graph, with the limits of the triggers on it.
+async fn series(
+    State(app): State<AppState>,
+    Viewer(_): Viewer,
+    Path(name): Path<String>,
+    query: Result<Query<Vec<(String, String)>>, axum::extract::rejection::QueryRejection>,
+) -> Result<Json<SeriesOut>, ApiError> {
+    let Query(pairs) = query.map_err(|_| invalid("the query parameters are malformed"))?;
+    let request = series_request(pairs)?;
+    let not_found = || ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such host");
+    if validate_host_name(&name).is_err() {
+        return Err(not_found());
+    }
+    let detail = app
+        .store
+        .host_detail(&name)
+        .await
+        .map_err(|e| store_failed("reading a host failed", &e))?
+        .ok_or_else(not_found)?;
+    // A host created by hand has no stored configuration: it collects the default items.
+    let known = match &detail.config {
+        Some(config) => config.items.iter().any(|i| i.key == request.item),
+        None => default_agent_items().iter().any(|i| i.key == request.item),
+    };
+    if !known {
+        return Err(invalid("item is not an item of this host"));
+    }
+    let thresholds = detail
+        .config
+        .as_ref()
+        .map(|config| thresholds(config, &request.item, &request.params))
+        .unwrap_or_default();
+
+    let (secs, step_secs) = series_range(&request.range).unwrap_or((3_600, 15));
+    let to = OffsetDateTime::now_utc();
+    let from = to - time::Duration::seconds(secs);
+    let range = RangeQuery {
+        host: name,
+        key: request.item.clone(),
+        params: request.params.clone(),
+        from_ms: (from.unix_timestamp_nanos() / 1_000_000) as i64,
+        to_ms: (to.unix_timestamp_nanos() / 1_000_000) as i64,
+        step_secs,
+    };
+    let samples = match bounded(SERIES_TIMEOUT, app.metrics.query_range(&range)).await {
+        Ok(samples) => samples,
+        Err(e @ MetricsError::Unavailable(_)) => {
+            log_metrics_failure("host series", &e);
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "metrics_unavailable",
+                "the metrics store is not available",
+            ));
+        }
+        // The input was checked, so the store refusing it is a bug of ours.
+        Err(e) => {
+            log_metrics_failure("host series", &e);
+            return Err(ApiError::internal());
+        }
+    };
+    Ok(Json(SeriesOut {
+        key: request.item,
+        params: request.params,
+        from: rfc3339(from),
+        to: rfc3339(to),
+        step_secs,
+        points: samples.into_iter().map(|s| (s.ts_ms, s.value)).collect(),
+        thresholds,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use axum::http::StatusCode;
@@ -223,6 +609,10 @@ mod tests {
     };
     use crate::api::ui::testing::*;
     use crate::auth::Role;
+    use crate::gitops::{EffectiveHost, EffectiveTrigger};
+    use crate::metrics::{
+        LatestQuery, LatestSample, MetricsError, MetricsStore as _, RangeQuery, Sample,
+    };
 
     const T0_MS: i64 = 1_800_000_000_000;
 
@@ -289,7 +679,8 @@ mod tests {
         let reply = get(&fx, "/api/v1/hosts").await;
         assert_eq!(reply.status, StatusCode::OK);
         let body = reply.json();
-        assert_eq!(keys(&body), ["items", "total"]);
+        assert_eq!(keys(&body), ["items", "metrics_available", "total"]);
+        assert_eq!(body["metrics_available"], true);
         assert_eq!(body["total"], 3);
         let items = body["items"].as_array().unwrap();
         let names: Vec<_> = items.iter().map(|h| h["name"].as_str().unwrap()).collect();
@@ -300,9 +691,11 @@ mod tests {
             keys(web),
             [
                 "address",
+                "cpu",
                 "groups",
                 "last_seen_at",
                 "managed_by_git",
+                "memory",
                 "name",
                 "state"
             ]
@@ -568,5 +961,632 @@ mod tests {
         assert_eq!(reply.json()["total"], 1);
         let reply = get(&fx, "/api/v1/hosts?search=%25").await;
         assert_eq!(reply.json()["total"], 0);
+    }
+
+    // ---- current values and series ----
+
+    fn now_ms() -> i64 {
+        (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+    }
+
+    fn mv(key: &str, params: &[(&str, &str)], ts_ms: i64, value: f64) -> MetricValue {
+        MetricValue {
+            key: key.into(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ts_ms,
+            value,
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn hosts_list_has_cpu_and_memory(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        fx.store.create_host("zz-bare").await.unwrap();
+        let now = now_ms();
+        fx.metrics
+            .write(
+                "web-01",
+                &[
+                    mv("cpu.usage", &[], now - 20_000, 11.0),
+                    mv("cpu.usage", &[], now - 5_000, 12.5),
+                    mv("memory.used_percent", &[], now - 5_000, 60.0),
+                ],
+            )
+            .await
+            .unwrap();
+        // Too old for the list (600 s), and a host that is not on the page.
+        fx.metrics
+            .write("db-01", &[mv("cpu.usage", &[], now - 700_000, 99.0)])
+            .await
+            .unwrap();
+        fx.metrics
+            .write(
+                "zz-bare",
+                &[mv("memory.used_percent", &[], now - 5_000, 33.0)],
+            )
+            .await
+            .unwrap();
+        fx.metrics
+            .write("ghost", &[mv("cpu.usage", &[], now - 5_000, 1.0)])
+            .await
+            .unwrap();
+
+        let body = get(&fx, "/api/v1/hosts").await.json();
+        assert_eq!(body["metrics_available"], true);
+        let items = body["items"].as_array().unwrap();
+        let names: Vec<_> = items.iter().map(|h| h["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["db-01", "web-01", "zz-bare"]);
+        assert_eq!(items[1]["cpu"], 12.5);
+        assert_eq!(items[1]["memory"], 60.0);
+        assert!(items[0]["cpu"].is_null() && items[0]["memory"].is_null());
+        assert!(items[2]["cpu"].is_null());
+        assert_eq!(items[2]["memory"], 33.0);
+
+        // Only the hosts of the page are in the answer.
+        let body = get(&fx, "/api/v1/hosts?limit=1&offset=1").await.json();
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["name"], "web-01");
+        assert_eq!(body["items"][0]["cpu"], 12.5);
+        assert!(!String::from_utf8_lossy(&get(&fx, "/api/v1/hosts").await.body).contains("ghost"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn hosts_list_survives_metrics_outage(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        fx.metrics
+            .write("web-01", &[mv("cpu.usage", &[], now_ms() - 5_000, 12.5)])
+            .await
+            .unwrap();
+        fx.metrics.set_failing(true);
+        let reply = get(&fx, "/api/v1/hosts").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let body = reply.json();
+        assert_eq!(body["metrics_available"], false);
+        assert_eq!(body["total"], 2);
+        for host in body["items"].as_array().unwrap() {
+            assert!(host["cpu"].is_null() && host["memory"].is_null(), "{host}");
+        }
+        fx.metrics.set_failing(false);
+        let body = get(&fx, "/api/v1/hosts").await.json();
+        assert_eq!(body["metrics_available"], true);
+        let web = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["name"] == "web-01");
+        assert_eq!(web.unwrap()["cpu"], 12.5);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn hosts_list_does_not_wait_for_a_slow_metrics_store(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        fx.metrics.set_delay(std::time::Duration::from_secs(120));
+        let started = std::time::Instant::now();
+        let reply = get(&fx, "/api/v1/hosts").await;
+        let took = started.elapsed();
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json()["metrics_available"], false);
+        assert!(reply.json()["items"][0]["cpu"].is_null());
+        // The two calls run concurrently, each with a 3 s limit.
+        assert!(
+            took >= std::time::Duration::from_secs(3) && took < std::time::Duration::from_secs(6),
+            "{took:?}"
+        );
+    }
+
+    /// A store whose every query is refused.
+    struct Refusing;
+
+    #[async_trait::async_trait]
+    impl crate::metrics::MetricsStore for Refusing {
+        async fn write(&self, _: &str, _: &[MetricValue]) -> Result<(), MetricsError> {
+            Ok(())
+        }
+        async fn query_range(&self, _: &RangeQuery) -> Result<Vec<Sample>, MetricsError> {
+            Err(MetricsError::Rejected("no".into()))
+        }
+        async fn latest(&self, _: &LatestQuery) -> Result<Vec<LatestSample>, MetricsError> {
+            Err(MetricsError::Rejected("no".into()))
+        }
+    }
+
+    /// The fixture's router on top of another metrics store.
+    fn with_store(fx: &mut Fixture, metrics: Arc<dyn crate::metrics::MetricsStore>) {
+        fx.router = crate::api::router(crate::api::AppState {
+            store: fx.store.clone(),
+            metrics,
+            config: config(true, None),
+            warnings: Arc::default(),
+            queue_mail: false,
+        });
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_refusing_metrics_store_is_an_error_only_for_the_series(pool: PgPool) {
+        let mut fx = Fixture::new(pool).await;
+        with_store(&mut fx, Arc::new(Refusing));
+        let reply = get(&fx, "/api/v1/hosts").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json()["metrics_available"], false);
+        let reply = get(&fx, "/api/v1/hosts/fixture-host/values").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json()["metrics_available"], false);
+        let reply = get(
+            &fx,
+            "/api/v1/hosts/fixture-host/series?item=cpu.usage&range=1h",
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(reply.error_code(), "internal");
+        assert!(!String::from_utf8_lossy(&reply.body).contains("no\""));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn values_shape_and_order(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        let now = now_ms() / 1000 * 1000;
+        fx.metrics
+            .write(
+                "web-01",
+                &[
+                    mv("memory.used_percent", &[], now - 9_000, 61.0),
+                    mv(
+                        "disk.used_percent",
+                        &[("mount", "/data")],
+                        now - 8_000,
+                        70.0,
+                    ),
+                    mv("disk.used_percent", &[("mount", "/")], now - 7_000, 50.0),
+                    mv("disk.used_percent", &[("mount", "/")], now - 6_000, 51.0),
+                    mv("cpu.usage", &[], now - 5_000, 12.5),
+                    // Older than an hour, and not a built-in item: not shown.
+                    mv("system.load1", &[], now - 3_700_000, 1.0),
+                    mv("custom.thing", &[], now - 5_000, 1.0),
+                ],
+            )
+            .await
+            .unwrap();
+        fx.metrics
+            .write("db-01", &[mv("cpu.usage", &[], now - 5_000, 99.0)])
+            .await
+            .unwrap();
+
+        let reply = get(&fx, "/api/v1/hosts/web-01/values").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let body = reply.json();
+        assert_eq!(keys(&body), ["items", "metrics_available"]);
+        assert_eq!(body["metrics_available"], true);
+        let items = body["items"].as_array().unwrap();
+        let shape: Vec<_> = items
+            .iter()
+            .map(|i| (i["key"].as_str().unwrap(), i["params"].clone()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("cpu.usage", json!({})),
+                ("disk.used_percent", json!({"mount": "/"})),
+                ("disk.used_percent", json!({"mount": "/data"})),
+                ("memory.used_percent", json!({})),
+            ]
+        );
+        assert_eq!(keys(&items[0]), ["at", "key", "params", "value"]);
+        assert_eq!(items[0]["value"], 12.5);
+        assert_eq!(items[1]["value"], 51.0, "the newest sample of the series");
+        let at =
+            |ms: i64| crate::view::rfc3339(OffsetDateTime::from_unix_timestamp(ms / 1000).unwrap());
+        assert_eq!(items[0]["at"], at(now - 5_000));
+        assert_eq!(items[1]["at"], at(now - 6_000));
+
+        // A store outage still answers, with no values.
+        fx.metrics.set_failing(true);
+        let reply = get(&fx, "/api/v1/hosts/web-01/values").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(
+            reply.json(),
+            json!({"items": [], "metrics_available": false})
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn values_of_an_unknown_host_are_not_found(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        for name in ["nope", "bad%20name", "..", "-x"] {
+            for what in ["values", "series?item=cpu.usage&range=1h"] {
+                let reply = get(&fx, &format!("/api/v1/hosts/{name}/{what}")).await;
+                assert_eq!(reply.status, StatusCode::NOT_FOUND, "{name} {what}");
+                assert_eq!(reply.error_code(), "not_found");
+            }
+        }
+        // A host without values has none to show.
+        let reply = get(&fx, "/api/v1/hosts/fixture-host/values").await;
+        assert_eq!(
+            reply.json(),
+            json!({"items": [], "metrics_available": true})
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_returns_points_and_thresholds(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        let now = now_ms();
+        fx.metrics
+            .write(
+                "web-01",
+                &[
+                    mv("disk.used_percent", &[("mount", "/")], now - 600_000, 52.0),
+                    mv(
+                        "disk.used_percent",
+                        &[("mount", "/")],
+                        now - 1_200_000,
+                        51.0,
+                    ),
+                    mv(
+                        "disk.used_percent",
+                        &[("mount", "/")],
+                        now - 4 * 3_600_000,
+                        40.0,
+                    ),
+                    mv(
+                        "disk.used_percent",
+                        &[("mount", "/data")],
+                        now - 600_000,
+                        99.0,
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+        let reply = get(
+            &fx,
+            "/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h&p_mount=/",
+        )
+        .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        let body = reply.json();
+        assert_eq!(
+            keys(&body),
+            [
+                "from",
+                "key",
+                "params",
+                "points",
+                "step_secs",
+                "thresholds",
+                "to"
+            ]
+        );
+        assert_eq!(body["key"], "disk.used_percent");
+        assert_eq!(body["params"], json!({"mount": "/"}));
+        assert_eq!(body["step_secs"], 15);
+        let points = body["points"].as_array().unwrap();
+        assert_eq!(points.len(), 2, "{points:?}");
+        assert!(points[0][0].as_i64().unwrap() < points[1][0].as_i64().unwrap());
+        assert_eq!(points[0][1], 51.0);
+        assert_eq!(points[1][1], 52.0);
+        let thresholds = body["thresholds"].as_array().unwrap();
+        assert_eq!(thresholds.len(), 1, "{thresholds:?}");
+        let t = &thresholds[0];
+        assert_eq!(keys(t), ["op", "severity", "trigger", "value"]);
+        assert_eq!(t["trigger"], "Disk almost full");
+        assert_eq!(t["severity"], "high");
+        assert_eq!(t["op"], ">");
+        assert_eq!(t["value"].as_f64(), Some(90.0));
+
+        // `from` and `to` are RFC 3339 in UTC, `to` is now and `from` an hour before.
+        let parse = |v: &Value| {
+            OffsetDateTime::parse(
+                v.as_str().unwrap(),
+                &time::format_description::well_known::Rfc3339,
+            )
+            .unwrap()
+        };
+        assert!(body["to"].as_str().unwrap().ends_with('Z'));
+        let (from, to) = (parse(&body["from"]), parse(&body["to"]));
+        assert_eq!((to - from).whole_seconds(), 3600);
+        assert!((OffsetDateTime::now_utc() - to).whole_seconds().abs() < 30);
+
+        // An item without a trigger has no thresholds; a series without data has no points.
+        let body = get(&fx, "/api/v1/hosts/web-01/series?item=cpu.usage&range=1h")
+            .await
+            .json();
+        assert_eq!(body["points"], json!([]));
+        assert_eq!(body["thresholds"], json!([]));
+        assert_eq!(body["params"], json!({}));
+        // Another mount is another series.
+        let body = get(
+            &fx,
+            "/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h&p_mount=/data",
+        )
+        .await
+        .json();
+        assert_eq!(body["points"].as_array().unwrap().len(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_step_per_range(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        for (range, step, secs) in [
+            ("1h", 15, 3_600),
+            ("6h", 90, 21_600),
+            ("24h", 300, 86_400),
+            ("7d", 1_800, 604_800),
+        ] {
+            let body = get(
+                &fx,
+                &format!("/api/v1/hosts/web-01/series?item=cpu.usage&range={range}"),
+            )
+            .await
+            .json();
+            assert_eq!(body["step_secs"], step, "{range}");
+            let parse = |v: &Value| {
+                OffsetDateTime::parse(
+                    v.as_str().unwrap(),
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .unwrap()
+            };
+            let span = parse(&body["to"]) - parse(&body["from"]);
+            assert_eq!(span.whole_seconds(), secs, "{range}");
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_unknown_item_is_invalid(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        for item in [
+            "disk.usedpercent",
+            // Valid built-in key that web-01 does not collect.
+            "net.rx_bytes_per_sec",
+            "",
+            "CPU.usage",
+            "cpu.usage%7B",
+            "cpu.usage%00",
+        ] {
+            let reply = get(
+                &fx,
+                &format!("/api/v1/hosts/web-01/series?item={item}&range=1h"),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{item}");
+            assert_eq!(reply.error_code(), "invalid", "{item}");
+        }
+        let reply = get(&fx, "/api/v1/hosts/web-01/series?range=1h").await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_host_without_configuration_has_the_default_items(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        // Known by the default items, with no trigger to draw.
+        let reply = get(
+            &fx,
+            "/api/v1/hosts/fixture-host/series?item=net.rx_bytes_per_sec&range=1h",
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.json()["thresholds"], json!([]));
+        let reply = get(
+            &fx,
+            "/api/v1/hosts/fixture-host/series?item=not.a.default&range=1h",
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_bad_range_is_invalid(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        for range in ["", "2h", "1H", "30d", "1h%20", "1h&range=6h", "-1h"] {
+            let reply = get(
+                &fx,
+                &format!("/api/v1/hosts/web-01/series?item=cpu.usage&range={range}"),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{range}");
+            assert_eq!(reply.error_code(), "invalid", "{range}");
+        }
+        let reply = get(&fx, "/api/v1/hosts/web-01/series?item=cpu.usage").await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_bad_query_parameters_are_invalid(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        let long = "a".repeat(257);
+        let many: String = (0..17).map(|i| format!("&p_k{i}=v")).collect();
+        for extra in [
+            "&unknown=1".to_owned(),
+            "&mount=/".to_owned(),
+            "&p_=x".to_owned(),
+            "&p_Mount=x".to_owned(),
+            "&p_mo-unt=x".to_owned(),
+            "&p_mo%7Bunt=x".to_owned(),
+            "&p_mount=%00".to_owned(),
+            "&p_mount=a%0Ab".to_owned(),
+            "&p_mount=".to_owned(),
+            format!("&p_mount={long}"),
+            "&p_mount=/&p_mount=/data".to_owned(),
+            "&item=cpu.usage".to_owned(),
+            many,
+        ] {
+            let reply = get(
+                &fx,
+                &format!("/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h{extra}"),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{extra}");
+            assert_eq!(reply.error_code(), "invalid", "{extra}");
+        }
+        let exact = "a".repeat(256);
+        let reply = get(
+            &fx,
+            &format!("/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h&p_mount={exact}"),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn series_metrics_outage_is_503(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        fx.metrics.set_failing(true);
+        let reply = get(&fx, "/api/v1/hosts/web-01/series?item=cpu.usage&range=1h").await;
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.error_code(), "metrics_unavailable");
+        // Input is still checked first.
+        let reply = get(&fx, "/api/v1/hosts/web-01/series?item=nope&range=1h").await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_hostile_parameter_value_stays_a_value_in_the_query(pool: PgPool) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query_range"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": {"resultType": "matrix", "result": []}
+            })))
+            .mount(&server)
+            .await;
+        let mut fx = Fixture::new(pool).await;
+        apply_example(&fx).await;
+        with_store(
+            &mut fx,
+            Arc::new(crate::metrics::VictoriaMetrics::new(&server.uri()).unwrap()),
+        );
+        // The value is `/"} or {__name__=~".+"} or x{a="`.
+        let hostile = "%2F%22%7D%20or%20%7B__name__%3D~%22.%2B%22%7D%20or%20x%7Ba%3D%22";
+        let reply = get(
+            &fx,
+            &format!(
+                "/api/v1/hosts/web-01/series?item=disk.used_percent&range=1h&p_mount={hostile}"
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let query = requests[0]
+            .url
+            .query_pairs()
+            .find(|(k, _)| k == "query")
+            .map(|(_, v)| v.into_owned())
+            .unwrap();
+        assert_eq!(
+            query,
+            r#"cerbrix_disk_used_percent{host="web-01",p_mount="/\"} or {__name__=~\".+\"} or x{a=\""}"#
+        );
+    }
+
+    #[test]
+    fn thresholds_match_item_and_parameters() {
+        use cerbrix_common::config::Severity;
+
+        let trigger = |name: &str, expression: &str, severity| EffectiveTrigger {
+            name: name.into(),
+            expression: expression.into(),
+            severity,
+            origin: "host".into(),
+        };
+        let config = EffectiveHost {
+            templates: vec![],
+            items: vec![],
+            triggers: vec![
+                trigger("any mount", "disk.used_percent > 90", Severity::High),
+                trigger(
+                    "root",
+                    "disk.used_percent{mount=/} >= 80 for 5m",
+                    Severity::Warning,
+                ),
+                trigger("data", "disk.used_percent{mount=/data} < 5", Severity::Info),
+                trigger("other item", "cpu.usage > 50", Severity::High),
+                trigger("silent", "no data for 3m", Severity::Critical),
+                trigger("broken", "disk.used_percent >> 1", Severity::High),
+                trigger("eq", "disk.used_percent == 1.5", Severity::High),
+                trigger("ne", "disk.used_percent != 2", Severity::High),
+                trigger("le", "disk.used_percent <= 3", Severity::High),
+                trigger("both", "disk.used_percent{mount=/,x=y} > 1", Severity::High),
+            ],
+        };
+        let params = |p: &[(&str, &str)]| -> BTreeMap<String, String> {
+            p.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let names = |p: &[(&str, &str)]| -> Vec<(String, &'static str)> {
+            super::thresholds(&config, "disk.used_percent", &params(p))
+                .into_iter()
+                .map(|t| (t.trigger, t.op))
+                .collect()
+        };
+        let any = |op: &'static str| ("any mount".to_owned(), op);
+        let tail = [
+            ("eq".to_owned(), "=="),
+            ("ne".to_owned(), "!="),
+            ("le".to_owned(), "<="),
+        ];
+        let mut root = vec![any(">"), ("root".to_owned(), ">=")];
+        root.extend(tail.clone());
+        assert_eq!(names(&[("mount", "/")]), root);
+        let mut data = vec![any(">"), ("data".to_owned(), "<")];
+        data.extend(tail.clone());
+        assert_eq!(names(&[("mount", "/data")]), data);
+        // A selector with parameters needs them in the request.
+        let mut bare = vec![any(">")];
+        bare.extend(tail.clone());
+        assert_eq!(names(&[]), bare);
+        let mut both = vec![any(">"), ("root".to_owned(), ">=")];
+        both.extend(tail);
+        both.push(("both".to_owned(), ">"));
+        assert_eq!(names(&[("mount", "/"), ("x", "y")]), both);
+        assert_eq!(
+            super::thresholds(&config, "cpu.usage", &BTreeMap::new())[0].trigger,
+            "other item"
+        );
+        assert!(super::thresholds(&config, "memory.used_percent", &BTreeMap::new()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_metrics_call_is_bounded() {
+        use std::time::Duration;
+        let slow = super::bounded(Duration::from_millis(50), async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(1)
+        })
+        .await;
+        assert!(
+            matches!(slow, Err(MetricsError::Unavailable(_))),
+            "{slow:?}"
+        );
+        let fast = super::bounded(Duration::from_secs(5), async { Ok(1) }).await;
+        assert_eq!(fast.unwrap(), 1);
+        let failed: Result<i32, _> = super::bounded(Duration::from_secs(5), async {
+            Err(MetricsError::Rejected("x".into()))
+        })
+        .await;
+        assert!(matches!(failed, Err(MetricsError::Rejected(_))));
     }
 }
