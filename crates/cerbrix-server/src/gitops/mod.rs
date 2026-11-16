@@ -137,3 +137,10 @@ pub(crate) fn replace_control(text: &str) -> String {
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
 }
+
+/// Replaces every control character by a space (for text that is stored).
+pub(crate) fn replace_control_by_space(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}

@@ -175,7 +175,7 @@ pub(super) type ProblemRow = (
 /// The problem query with a WHERE/ORDER BY tail appended; a macro so the result stays a
 /// literal SQL string.
 macro_rules! problem_query {
-    ($tail:literal) => {
+    ($tail:expr) => {
         concat!(
             "SELECT p.id, p.host_id, h.name, p.trigger_name, p.instance, \
              p.severity, p.summary, p.started_at, p.resolved_at, p.resolve_reason, \

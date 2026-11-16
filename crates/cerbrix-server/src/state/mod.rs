@@ -14,7 +14,10 @@ pub use alerting::{
     ProblemFilter,
 };
 pub use enrollment::UnknownAgent;
-pub use read::{HostDetail, HostQuery, HostRow, HostStateFilter};
+pub use read::{
+    HostDetail, HostQuery, HostRow, HostStateFilter, ProblemCounts, ProblemQuery,
+    ProblemStateFilter, SeverityCount,
+};
 pub use sync::{
     Applied, ApplyError, ChangeSet, HostDetails, SyncChanges, SyncHistoryEntry, SyncLock,
     SyncState, SyncStatus,

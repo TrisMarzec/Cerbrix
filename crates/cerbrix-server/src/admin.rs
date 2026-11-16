@@ -14,7 +14,7 @@ use crate::alerting::message::{reason_text, rfc3339, severity_word};
 use crate::alerting::{EventKind, Notification};
 use crate::auth::{Role, generate_password, hash_password, validate_password, validate_user_name};
 use crate::config::{Config, SmtpConfig};
-use crate::gitops::{format_issue, replace_control};
+use crate::gitops::{format_issue, replace_control, replace_control_by_space};
 use crate::state::{Problem, ProblemFilter, StateError, StateStore, SyncChanges, SyncStatus};
 
 #[derive(Debug, Subcommand)]
@@ -538,13 +538,6 @@ pub async fn run_user(
             Ok(format!("user {name} deleted"))
         }
     }
-}
-
-/// Control characters become spaces (for text that is stored).
-fn replace_control_by_space(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
 }
 
 /// `--comment` and `--by` with control characters replaced and trimmed; neither may be empty.

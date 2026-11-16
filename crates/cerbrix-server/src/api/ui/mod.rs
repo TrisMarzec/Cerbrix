@@ -23,6 +23,7 @@ use super::{ApiError, AppState};
 use crate::auth::{AuthError, AuthedUser, Role, authenticate, require};
 
 mod hosts;
+mod problems;
 mod session;
 mod users;
 
@@ -68,6 +69,11 @@ pub(crate) const ROUTES: &[(&str, &str, Access)] = &[
     ("GET", "/api/v1/hosts/{name}", Access::Viewer),
     ("GET", "/api/v1/hosts/{name}/values", Access::Viewer),
     ("GET", "/api/v1/hosts/{name}/series", Access::Viewer),
+    ("GET", "/api/v1/problems", Access::Viewer),
+    ("GET", "/api/v1/problems/{id}", Access::Viewer),
+    ("POST", "/api/v1/problems/{id}/ack", Access::Operator),
+    // Closing comes after acknowledging: the matrix resolves the fixture problem here.
+    ("POST", "/api/v1/problems/{id}/close", Access::Operator),
     ("GET", "/api/v1/users", Access::Admin),
     ("POST", "/api/v1/users", Access::Admin),
     ("PATCH", "/api/v1/users/{id}", Access::Admin),
@@ -111,6 +117,7 @@ fn entries() -> Vec<Entry> {
     let mut all = Vec::new();
     all.extend(session::entries());
     all.extend(hosts::entries());
+    all.extend(problems::entries());
     all.extend(users::entries());
     all
 }
@@ -488,14 +495,22 @@ pub(crate) mod testing {
         pub subject: Uuid,
         /// An active host without configuration that `fill` puts into `{name}`.
         pub host: &'static str,
+        /// The id `fill` puts into `{id}` of the problems routes. The problem exists only after
+        /// `ensure_problem`: hosts lists and the like see no problem unless a test asks.
+        pub problem: Uuid,
     }
 
     impl Fixture {
         pub async fn new(pool: PgPool) -> Self {
-            Self::with_config(pool, config(true, None)).await
+            Self::with_options(pool, config(true, None), false).await
         }
 
         pub async fn with_config(pool: PgPool, config: Arc<Config>) -> Self {
+            Self::with_options(pool, config, false).await
+        }
+
+        /// A fixture of a server that queues e-mail (`queue_mail`) or not.
+        pub async fn with_options(pool: PgPool, config: Arc<Config>, queue_mail: bool) -> Self {
             let store = StateStore::from_pool(pool.clone());
             let hash = hash_password(PASSWORD.to_owned()).await.unwrap();
             let now = OffsetDateTime::now_utc();
@@ -519,7 +534,7 @@ pub(crate) mod testing {
                 metrics: metrics.clone(),
                 config,
                 warnings: Arc::default(),
-                queue_mail: false,
+                queue_mail,
             });
             Self {
                 router,
@@ -531,6 +546,7 @@ pub(crate) mod testing {
                 admin: ids[2],
                 subject: ids[3],
                 host: FIXTURE_HOST,
+                problem: Uuid::new_v4(),
             }
         }
 
@@ -557,11 +573,38 @@ pub(crate) mod testing {
             token
         }
 
+        /// Creates the open problem `fill` puts into `{id}` of the problems routes: on the
+        /// fixture host, started long ago.
+        pub async fn ensure_problem(&self) {
+            let host = self
+                .store
+                .host_by_name(self.host)
+                .await
+                .unwrap()
+                .unwrap()
+                .id;
+            sqlx::query(
+                "INSERT INTO problems (id, host_id, trigger_name, instance, severity, summary, \
+                 started_at) VALUES ($1, $2, 'Fixture', '', 'high', 'fixture problem', $3)",
+            )
+            .bind(self.problem)
+            .bind(host)
+            .bind(OffsetDateTime::now_utc() - Duration::hours(1))
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        }
+
         /// Fills the path parameters of a route pattern with ids that exist in the fixture.
         /// A later task that adds a route with a parameter adds the parameter here.
         pub fn fill(&self, pattern: &str) -> String {
+            let id = if pattern.starts_with("/api/v1/problems/") {
+                self.problem
+            } else {
+                self.subject
+            };
             pattern
-                .replace("{id}", &self.subject.to_string())
+                .replace("{id}", &id.to_string())
                 .replace("{name}", self.host)
         }
 
@@ -772,6 +815,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn access_matrix(pool: PgPool) {
         let fx = Fixture::new(pool).await;
+        fx.ensure_problem().await;
         for (method, pattern, access) in ROUTES {
             let path = fx.fill(pattern);
             for caller in [
