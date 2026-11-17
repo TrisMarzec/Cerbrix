@@ -305,6 +305,16 @@ mod tests {
         assert_secured(&headers);
     }
 
+    #[test]
+    fn hidden_files_are_never_embedded() {
+        assert!(
+            ASSETS
+                .iter()
+                .all(|a| !a.path.split('/').any(|part| part.starts_with('.')))
+        );
+        assert!(find(".gitkeep").is_none());
+    }
+
     #[tokio::test]
     async fn assets_directory_itself_is_404() {
         for uri in ["/assets", "/assets/"] {

@@ -25,18 +25,27 @@ fn main() {
     let manifest =
         PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let dist = match std::env::var_os("CERBRIX_UI_DIST").filter(|v| !v.is_empty()) {
+    let custom = std::env::var_os("CERBRIX_UI_DIST").filter(|v| !v.is_empty());
+    let dist = match &custom {
         Some(custom) => manifest.join(custom),
         None => manifest.join("../../ui/dist"),
     };
 
-    // Cargo scans a watched directory's whole tree, but treats a path that does not exist as
-    // always stale (a rebuild on every build). So watch the UI directory when it exists, and
-    // otherwise its parent: that changes when the directory appears.
-    if dist.is_dir() {
-        println!("cargo:rerun-if-changed={}", dist.display());
-    } else if let Some(parent) = dist.parent().filter(|p| p.is_dir()) {
-        println!("cargo:rerun-if-changed={}", parent.display());
+    if let Some(custom) = &custom {
+        println!(
+            "cargo:warning=CERBRIX_UI_DIST is set: the web UI is taken from {}",
+            custom.to_string_lossy()
+        );
+    }
+    // `ui/dist` always exists in a checkout (it holds a tracked, empty `.gitkeep`), so it is
+    // the only watched path: cargo scans its tree, whereas a path that does not exist is
+    // always stale. It is never created here.
+    println!("cargo:rerun-if-changed={}", dist.display());
+    if !dist.is_dir() {
+        println!(
+            "cargo:warning={} is missing, so cargo rebuilds the server on every call; restore it with `git checkout ui/dist/.gitkeep`",
+            dist.display()
+        );
     }
 
     let built = dist.join("index.html").is_file();
@@ -50,6 +59,11 @@ fn main() {
     if built {
         collect(&dist, "", &mut files);
         files.sort();
+        // The directory scan sees new and changed files but not a removed one; a watched file
+        // that is gone is stale, so every embedded file is watched too.
+        for (_, file) in &files {
+            println!("cargo:rerun-if-changed={}", file.display());
+        }
     } else {
         let placeholder = out_dir.join("placeholder.html");
         write_if_changed(&placeholder, PLACEHOLDER_HTML.as_bytes());

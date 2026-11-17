@@ -31,4 +31,5 @@ deploy/server.env
 
 # Web UI: installed packages and build output
 ui/node_modules
-ui/dist
+ui/dist/*
+!ui/dist/.gitkeep

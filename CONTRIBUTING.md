@@ -34,7 +34,11 @@ npm run build     # type check, production build in ui/dist, licence file, size 
 
 The server embeds `ui/dist` when it is compiled. A plain `cargo build` on a checkout without
 `ui/dist` works without Node and embeds a placeholder page that says how to build the UI; run
-`npm run build` and build the server again to embed the real one.
+`npm run build` and build the server again to embed the real one. `ui/dist` is
+ignored by git except for the empty `ui/dist/.gitkeep`, which keeps the directory (the one path
+the build script watches) in every checkout; `npm run build` re-creates it. Setting
+`CERBRIX_UI_DIST` to another directory makes the server embed the UI from there (the build
+prints a warning when it is set), and `CERBRIX_REQUIRE_UI=1` makes a missing UI fail the build.
 
 ## Development databases
 
