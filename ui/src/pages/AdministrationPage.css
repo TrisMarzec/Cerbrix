@@ -10,7 +10,7 @@
 
 .admin-table th,
 .admin-table td {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .admin-table tbody th {

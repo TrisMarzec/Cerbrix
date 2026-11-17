@@ -215,33 +215,40 @@ textarea {
 
 /* Severity: the class colours the text; the word is always written out as well. */
 .sev-critical {
-  --sev: var(--critical);
+  --sev-full: var(--critical);
+  --sev: var(--sev-full);
 }
 
 .sev-high {
-  --sev: var(--high);
+  --sev-full: var(--high);
+  --sev: var(--sev-full);
 }
 
 .sev-warning {
-  --sev: var(--warning);
+  --sev-full: var(--warning);
+  --sev: var(--sev-full);
 }
 
 .sev-info {
-  --sev: var(--dim);
+  --sev-full: var(--dim);
+  --sev: var(--sev-full);
+}
+
+/* Acknowledged (concept section 7): the severity colour at half strength, everywhere it is used (bars,
+   squares, state text, the host pill, host names); the word "acknowledged" is written out as well.
+   It follows the severity classes, so on the same element it wins. */
+.is-acknowledged {
+  --sev: color-mix(in srgb, var(--sev-full) 50%, transparent);
 }
 
 .state-text {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   color: var(--sev);
   font-weight: 600;
 }
 
 .state-text.is-ok {
   color: var(--healthy-text);
-}
-
-.state-text.is-acknowledged {
-  opacity: 0.6;
 }
 
 /* Problem row (concept section 7): bar on the left edge, host in the severity colour. */
@@ -263,11 +270,6 @@ textarea {
   bottom: 0;
   width: 6px;
   background: var(--sev);
-}
-
-.problem-row.is-acknowledged::before,
-.problem-row.is-acknowledged .problem-host {
-  opacity: 0.5;
 }
 
 .problem-row.is-acknowledged .problem-main {
@@ -310,7 +312,7 @@ textarea {
 .problem-meta {
   color: var(--dim);
   font-size: 14px;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .problem-severity {
@@ -345,10 +347,6 @@ textarea {
 
 .square.is-ok {
   background: var(--healthy-square);
-}
-
-.square.is-acknowledged {
-  opacity: 0.5;
 }
 
 .host-squares .more {

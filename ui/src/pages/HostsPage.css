@@ -23,14 +23,10 @@
   background: var(--sev);
 }
 
-.hosts-table tr.is-problem.is-acknowledged .cell-sev {
-  opacity: 0.5;
-}
-
 .hosts-table .host-name,
 .hosts-table .host-address,
 .hosts-table .host-groups {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .hosts-total {

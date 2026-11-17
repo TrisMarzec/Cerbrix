@@ -37,7 +37,7 @@
 
 .host-facts dd {
   margin: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .host-tools {
@@ -106,12 +106,12 @@
 .graph-frame h3 {
   font-size: 17px;
   font-weight: 600;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .host-item,
 .host-expression {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .host-expression {
@@ -124,7 +124,8 @@
   font-weight: 600;
 }
 
-@media (max-width: 860px) {
+/* Two columns need room: below 1200 px they stack, so words in the tables are not broken up. */
+@media (max-width: 1200px) {
   .host-columns {
     grid-template-columns: minmax(0, 1fr);
   }

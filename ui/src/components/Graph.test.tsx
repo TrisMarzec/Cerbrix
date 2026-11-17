@@ -3,7 +3,7 @@ import type uPlot from 'uplot';
 
 import type { Threshold } from '../api/types';
 import { NOW } from '../test/fixtures';
-import { Graph } from './Graph';
+import { Graph, tickLabels } from './Graph';
 
 interface Instance {
   opts: uPlot.Options;
@@ -88,15 +88,21 @@ afterEach(() => {
 
 function fakeCanvas(width = 400) {
   const calls: string[] = [];
+  const texts: { text: string; x: number; y: number; align: string; baseline: string }[] = [];
   const state = { dash: [] as number[], stroke: '', fill: '' };
   const ctx = {
+    textAlign: 'start',
+    textBaseline: 'alphabetic',
     save: () => calls.push('save'),
     restore: () => calls.push('restore'),
     beginPath: () => calls.push('beginPath'),
     moveTo: (x: number, y: number) => calls.push(`moveTo ${x} ${y}`),
     lineTo: (x: number, y: number) => calls.push(`lineTo ${x} ${y}`),
     stroke: () => calls.push(`stroke ${state.stroke} ${state.dash.join(',')}`),
-    fillText: (text: string) => calls.push(`fillText ${text} ${state.fill}`),
+    fillText: (text: string, x: number, y: number) => {
+      calls.push(`fillText ${text} ${state.fill}`);
+      texts.push({ text, x, y, align: ctx.textAlign, baseline: ctx.textBaseline });
+    },
     setLineDash: (d: number[]) => {
       state.dash = d;
     },
@@ -115,7 +121,7 @@ function fakeCanvas(width = 400) {
     valToPos: (v: number) => 105 - v,
     cursor: { idx: null as number | null },
   };
-  return { u, calls };
+  return { u, calls, texts };
 }
 
 describe('Graph', () => {
@@ -296,7 +302,7 @@ describe('Graph', () => {
   });
 
   it('formats x ticks as hours and minutes up to a day, as day and month beyond', () => {
-    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" />);
+    render(<Graph now={NOW} points={points([1, 2], 30 * MINUTE)} thresholds={[]} unitKey="x" />);
     const short = last().opts.axes?.[0]?.values as (u: unknown, splits: number[]) => string[];
     const noon = new Date(2026, 10, 17, 9, 5).getTime() / 1000;
     expect(short({}, [noon])).toEqual(['09:05']);
@@ -310,5 +316,61 @@ describe('Graph', () => {
     );
     const long = last().opts.axes?.[0]?.values as (u: unknown, splits: number[]) => string[];
     expect(long({}, [noon])).toEqual(['17 Nov']);
+  });
+});
+
+describe('Graph labels', () => {
+  function drawWith(thresholds: Threshold[], valToPos: (v: number) => number) {
+    render(<Graph now={NOW} points={points([50, 60])} thresholds={thresholds} unitKey="disk.used_percent" />);
+    const hooks = last().opts.hooks?.draw;
+    const draw = Array.isArray(hooks) ? hooks[0] : hooks;
+    const canvas = fakeCanvas(400);
+    canvas.u.valToPos = valToPos;
+    draw?.(canvas.u as unknown as uPlot);
+    return canvas.texts;
+  }
+
+  it('writes a threshold label inside the plot, right-aligned at the right edge, just above its line', () => {
+    const [label] = drawWith([THRESHOLDS[0] as Threshold], () => 60);
+    expect(label).toMatchObject({ text: 'Disk almost full', align: 'right', baseline: 'bottom' });
+    // The plot spans 10 to 410: the label ends a little before the right edge, above y = 60.
+    expect(label?.x).toBeLessThan(410);
+    expect(label?.x).toBeGreaterThan(400);
+    expect(label?.y).toBeLessThan(60);
+  });
+
+  it('writes the label below its line when the line is at the top of the plot', () => {
+    const [label] = drawWith([THRESHOLDS[0] as Threshold], () => 7);
+    expect(label).toMatchObject({ align: 'right', baseline: 'top' });
+    expect(label?.y).toBeGreaterThan(7);
+  });
+});
+
+describe('tickLabels', () => {
+  const at = (h: number, m: number, s = 0) => new Date(2026, 10, 17, h, m, s).getTime() / 1000;
+
+  it('includes the seconds when the span is under ten minutes', () => {
+    expect(tickLabels([at(21, 24, 0), at(21, 24, 30), at(21, 25, 0)], 4 * 60)).toEqual([
+      '21:24:00',
+      '21:24:30',
+      '21:25:00',
+    ]);
+  });
+
+  it('writes hours and minutes from ten minutes on', () => {
+    expect(tickLabels([at(21, 20), at(21, 30)], 10 * 60)).toEqual(['21:20', '21:30']);
+  });
+
+  it('never writes the same label twice in a row', () => {
+    expect(tickLabels([at(21, 24, 0), at(21, 24, 20), at(21, 24, 40), at(21, 25, 0)], 3600)).toEqual([
+      '21:24',
+      '',
+      '',
+      '21:25',
+    ]);
+  });
+
+  it('writes day and month beyond a day, also without repeating them', () => {
+    expect(tickLabels([at(0, 0), at(12, 0), at(23, 0)], 3 * 86_400)).toEqual(['17 Nov', '', '']);
   });
 });

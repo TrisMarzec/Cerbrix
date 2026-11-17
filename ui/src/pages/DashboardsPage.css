@@ -10,7 +10,7 @@
 
 .dashboard-name,
 .dashboard-file {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .displays {
@@ -24,7 +24,7 @@
 }
 
 .display-now {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .display-now > span {

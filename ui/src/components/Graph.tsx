@@ -18,6 +18,12 @@ export const GRAPH_HEIGHT = 160;
 const GAP_STEPS = 3;
 /** A span longer than this many seconds (a day and a little) labels the x axis with dates. */
 const DAY_SPAN_SECS = 25 * 3600;
+/** A span shorter than this many seconds labels the x axis with seconds too. */
+const SECONDS_SPAN_SECS = 10 * 60;
+/** The size of a threshold label and its distance from the line and the edge, in CSS pixels. */
+const LABEL_PX = 12;
+const LABEL_GAP_PX = 3;
+const LABEL_EDGE_PX = 4;
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 interface Props {
@@ -77,11 +83,26 @@ function two(n: number): string {
   return String(n).padStart(2, '0');
 }
 
-function tick(seconds: number, longSpan: boolean): string {
+function tick(seconds: number, spanSecs: number): string {
   const t = new Date(seconds * 1000);
-  return longSpan
-    ? `${t.getDate()} ${MONTHS[t.getMonth()] ?? ''}`
-    : `${two(t.getHours())}:${two(t.getMinutes())}`;
+  if (spanSecs > DAY_SPAN_SECS) return `${t.getDate()} ${MONTHS[t.getMonth()] ?? ''}`;
+  const time = `${two(t.getHours())}:${two(t.getMinutes())}`;
+  return spanSecs < SECONDS_SPAN_SECS ? `${time}:${two(t.getSeconds())}` : time;
+}
+
+/**
+ * The labels of the x axis for the tick positions `splits` (seconds) of a graph spanning
+ * `spanSecs`: day and month beyond a day, hours and minutes, with seconds under ten minutes. A
+ * label equal to the one before it is left empty, so no label repeats.
+ */
+export function tickLabels(splits: number[], spanSecs: number): string[] {
+  let previous: string | undefined;
+  return splits.map((s) => {
+    const label = tick(s, spanSecs);
+    if (label === previous) return '';
+    previous = label;
+    return label;
+  });
 }
 
 /** A y range that holds the data and every threshold, with a little air. */
@@ -164,7 +185,8 @@ export function Graph({
       axes: [
         {
           ...axisLook,
-          values: (_u, splits) => splits.map((s) => tick(s, span.current > DAY_SPAN_SECS)),
+          // The visible span is the span of the data: the plot cannot be zoomed.
+          values: (_u, splits) => tickLabels(splits, span.current),
         },
         { ...axisLook, values: (_u, splits) => splits.map((v) => value(unitKey, v)) },
       ],
@@ -177,7 +199,12 @@ export function Graph({
             ctx.save();
             ctx.lineWidth = ratio;
             ctx.setLineDash([6 * ratio, 4 * ratio]);
-            ctx.font = `${Math.round(12 * ratio)}px ${font}`;
+            const size = Math.round(LABEL_PX * ratio);
+            const gap = LABEL_GAP_PX * ratio;
+            ctx.font = `${size}px ${font}`;
+            // Labels sit inside the plot at its right edge, clear of the y axis and its values.
+            ctx.textAlign = 'right';
+            const right = bbox.left + bbox.width - LABEL_EDGE_PX * ratio;
             for (const limit of limits) {
               const y = u.valToPos(limit.value, 'y', true);
               if (y < bbox.top || y > bbox.top + bbox.height) continue;
@@ -187,7 +214,10 @@ export function Graph({
               ctx.moveTo(bbox.left, y);
               ctx.lineTo(bbox.left + bbox.width, y);
               ctx.stroke();
-              ctx.fillText(limit.trigger, bbox.left + 4 * ratio, y - 3 * ratio);
+              // Just above the line; below it when there is no room above (a line at the top).
+              const above = y - gap - size >= bbox.top;
+              ctx.textBaseline = above ? 'bottom' : 'top';
+              ctx.fillText(limit.trigger, right, above ? y - gap : y + gap);
             }
             ctx.restore();
           },
