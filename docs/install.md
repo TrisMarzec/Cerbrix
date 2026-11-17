@@ -70,6 +70,17 @@ Other commands: `admin user list`, `admin user set-role <name> <viewer|operator|
 disabling or deleting a user ends the user's sessions. The last enabled admin cannot be
 demoted, disabled or deleted.
 
+### Plain HTTP is for testing only
+
+The quick start serves the UI over plain HTTP. That is fine at `http://127.0.0.1:8443/` on the
+machine that runs the server, which browsers treat as secure. Opening the UI over plain HTTP
+under any other name (for example `http://monitoring.example.net:8443/`) is for testing only: the
+session cookie then has no `Secure` attribute, the browser offers the page no clipboard, so every
+"Copy" button asks you to select the text and press Ctrl+C instead, and the browser console shows
+a message that the `Cross-Origin-Opener-Policy` header is ignored. Put the server behind HTTPS for
+real use (see [Behind a reverse proxy](#behind-a-reverse-proxy) and
+[Making the server reachable for agents](#making-the-server-reachable-for-agents)).
+
 ### Login settings
 
 Sessions are kept in PostgreSQL, so they survive a restart of the server. Three settings
@@ -342,8 +353,9 @@ listens on port 443 and forwards to `127.0.0.1:8443`. Agents then use
 The Docker image builds everything. To build the server binary yourself with `cargo build --release`,
 the web UI must be built first, because the binary embeds it: install Node 22 or newer and run
 `npm ci && npm run build` in `ui/` before building the server. Without `ui/dist` the build still
-works, but the server then serves a placeholder page instead of the UI; `CERBRIX_REQUIRE_UI=1`
-makes a missing UI fail the build.
+works, but the server then serves a placeholder page instead of the UI (a release build prints a
+warning, and the server logs one when it starts); `CERBRIX_REQUIRE_UI=1` (or `true`) makes a
+missing UI fail the build.
 
 ## Agent installation
 

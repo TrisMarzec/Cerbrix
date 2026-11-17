@@ -6,7 +6,8 @@ what, and lets operators acknowledge problems. It is part of the server. Open
 default installation) and log in. There is nothing else to install.
 
 The UI uses the [JSON API](api.md) and nothing else; it makes no request to any other
-server, loads no font or script from the internet and stores nothing in the browser.
+server, loads no font or script from the internet and stores nothing in the browser except the
+session cookie.
 
 ## First login
 
@@ -18,9 +19,17 @@ days at the latest (both can be changed, see [Login settings](install.md#login-s
 UI then says that the session has ended and shows the login page. "Change password" and
 "Log out" are at the bottom of the navigation.
 
+If you log in as another user in a second tab of the same browser, every other tab switches to
+that user as soon as you look at it again: the browser has one session cookie, so all its tabs
+are one session.
+
+**Logging out.** If the server cannot be reached when you log out, the page says "Could not log
+out: the server did not answer. You are still logged in." The session is then still valid. Try
+again, or close the browser; do not leave a shared workstation in that state.
+
 ## The pages
 
-The navigation is on the left; on a narrow window it moves to the top. Every page keeps its
+The navigation is on the left; on a narrow window it moves to the top. The navigation shows the user and the role, for example "anna · Admin". Every page keeps its
 filters, tabs, search text and page number in the address, so you can bookmark a view or send
 the link to a colleague.
 
@@ -76,17 +85,33 @@ The pages ask the server again every 10 seconds, and the times ("3 min ago") mov
 same pace. Graphs are updated once a minute. The lists of groups and dashboards used in the
 filters are loaded when a page opens. Nothing is requested while the browser tab is hidden;
 when you come back, the page refreshes at once. A change you make yourself (an acknowledgement,
-a new token) is shown at once.
+closing a problem, a new token) is shown at once, including the count next to "Problems" in the
+navigation.
 
-The bar at the top of every page shows the state of the configuration, for example
-"In sync · 3f9c2ab · 2 min ago", and under it two kinds of banner:
+Times and durations follow the server's clock, not the clock of the desk computer, so a wrong
+clock on your computer does not make "3 min ago" wrong.
+
+A request that gets no answer within 15 seconds (30 seconds for a change) counts as a lost
+connection.
+
+## The bar at the top and the banners
+
+When the configuration comes from Git, the bar at the top of every page shows its state, for
+example "In sync · 3f9c2ab · 2 min ago", or "The configuration has not been synchronised yet"
+before the first synchronisation has finished. When the configuration is not taken from Git,
+the bar says "Configuration is managed on the server" instead. Under the bar there can be
+banners:
 
 - **Out of sync**: the last commit of the configuration repository was refused. The banner names
   the file and the reason and says which commit is still active. Monitoring continues with that
   configuration. Fix the file in Git; the next synchronisation clears the banner.
-- **No connection to the server since ...**: the UI could not reach the server (or the server
-  answered with an error) at the last attempts. What is on the screen is the last data it got.
-  The banner goes away when the server answers again.
+- **No connection to the server since ...**: the server cannot be reached at all. What is on the
+  screen is the last data the page got. The banner goes away when the server answers again.
+- **The server reported an error since ...**: the server answers, but with an error. The
+  banner goes away when it answers normally again.
+
+A page whose own data could not be refreshed, while the rest works, shows "Not updated since
+..." above that data.
 
 ## Secrets are shown once
 
@@ -98,12 +123,30 @@ the address.
 
 ## Browsers and appearance
 
-The UI works in the current versions of Firefox, Chrome, Edge and Safari. There is one dark
-theme; it follows no system setting. Everything can be used with the keyboard, and animations
+The automated check of the UI runs in Chromium only. The current versions of Firefox, Edge and
+Safari are expected to work, but nobody tests them automatically. There is one dark theme; it
+follows no system setting. Everything can be used with the keyboard, and animations
 are off when the system asks for reduced motion.
+
+## Plain HTTP
+
+Serving the UI over plain HTTP under a name other than `localhost` is for testing only. Over
+HTTP the browser treats the page as not secure, and that has three visible effects:
+
+- The session cookie has no `Secure` attribute (see `CERBRIX_AUTH__SECURE_COOKIE` in
+  [Login settings](install.md#login-settings)), so the browser would also send it over an
+  unencrypted connection.
+- The browser offers the page no clipboard, so every Copy button asks you to select the text
+  and press Ctrl+C instead.
+- The browser console shows a message that the `Cross-Origin-Opener-Policy` header is ignored.
+
+`http://localhost` and `http://127.0.0.1` count as secure by the browser and show none of this.
+For anything else use HTTPS, for example behind a reverse proxy (see
+[the install guide](install.md#behind-a-reverse-proxy)).
 
 ## Wall displays
 
 Wall displays, the full-screen dashboards for a monitor on the wall, follow in the next
 release. This release lists them, shows what they are set to show and manages their tokens;
-the display itself, with the panel grid of a dashboard, is not part of it.
+the display itself, with the panel grid of a dashboard, is not part of it. A display token is created here now; the wall display page that uses it comes with the next
+release.
