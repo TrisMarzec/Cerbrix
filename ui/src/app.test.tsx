@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/preact';
+import { fireEvent, render, screen } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
 
 import { App } from './app';
@@ -66,7 +66,7 @@ describe('App', () => {
     window.history.replaceState(null, '', '/problems?state=resolved');
     vi.useFakeTimers();
     mock = mockFetch({
-      'GET /session': { json: { name: 'anna', role: 'operator' } },
+      'GET /session': [{ json: { name: 'anna', role: 'operator' } }, UNAUTHORIZED],
       'GET /status': [{ json: statusFixture() }, UNAUTHORIZED],
       'POST /session': { json: { name: 'anna', role: 'operator' } },
     });
@@ -99,5 +99,41 @@ describe('App', () => {
     expect(await screen.findByLabelText('User name')).toBeInTheDocument();
     expect(window.location.pathname).toBe('/');
     expect(screen.queryByText('Your session has ended. Log in again.')).not.toBeInTheDocument();
+  });
+});
+
+describe('App after a password change', () => {
+  it('stays in the shell, with the notice, when a poll with the old cookie gets 401 but the session is alive', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 10, 17, 14, 30, 0));
+    mock = mockFetch({
+      'GET /session': { json: { name: 'anna', role: 'operator' } },
+      'GET /status': [{ json: statusFixture() }, UNAUTHORIZED, { json: statusFixture() }],
+      'PUT /session/password': { status: 204 },
+    });
+    render(<App />);
+    await advance(0);
+    await advance(0);
+    await advance(3000);
+    fireEvent.click(screen.getByRole('button', { name: 'Change password' }));
+    await advance(0);
+    const fields: Array<[string, string]> = [
+      ['Current password', 'old-password'],
+      ['New password', 'a-long-new-password'],
+      ['Repeat new password', 'a-long-new-password'],
+    ];
+    for (const [label, value] of fields) {
+      fireEvent.input(screen.getByLabelText(label), { target: { value } });
+    }
+    await advance(0);
+    fireEvent.submit(screen.getByLabelText('Current password').closest('form') as HTMLFormElement);
+    await advance(0);
+    expect(screen.getByText('Password changed')).toBeInTheDocument();
+    await advance(7000);
+    expect(mock.count('GET /status')).toBe(2);
+    expect(mock.count('GET /session')).toBe(2);
+    expect(screen.queryByText('Your session has ended. Log in again.')).not.toBeInTheDocument();
+    expect(screen.getByText('Password changed')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Dashboards' })).toBeInTheDocument();
   });
 });

@@ -6,6 +6,12 @@ interface Polled<T> {
   data: T | undefined;
   error: ApiError | undefined;
   staleSince: Date | undefined;
+  /**
+   * True from a change of `deps` until the first answer (success or failure) for the new deps has
+   * arrived. While it is true `data` is still the previous deps' data (a page may show it dimmed),
+   * and `error` and `staleSince` are cleared. Ordinary polls and `reload()` never set it.
+   */
+  pending: boolean;
   reload: () => void;
 }
 
@@ -13,28 +19,44 @@ interface State<T> {
   data: T | undefined;
   error: ApiError | undefined;
   staleSince: Date | undefined;
+  /** The deps generation the last answer belongs to. */
+  answered: number;
 }
 
 function asApiError(e: unknown): ApiError {
   return e instanceof ApiError ? e : new ApiError(0, 'internal', 'Unexpected error');
 }
 
+function sameDeps(a: unknown[], b: unknown[]): boolean {
+  return a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
+}
+
 /**
  * Loads at once and then `everyMs` after the previous answer arrived. No request and no timer while
  * the page is hidden; becoming visible loads at once. A request is aborted when the hook unmounts or
- * `deps` change (the data of the old deps stays until the new answer arrives). An error keeps the
- * last data and sets `staleSince` to the first failure; a 401 is not an error here (the client has
- * told `onUnauthorized`). It never throws.
+ * `deps` change. An error (also an exception thrown by `load` itself) keeps the last data and sets
+ * `staleSince` to the first failure, except for the first answer after a deps change: a failure
+ * there leaves no data. A 401 is not an error here (the client has told `onUnauthorized`).
+ * It never throws.
  */
 export function usePolled<T>(
   load: (signal: AbortSignal) => Promise<T>,
   deps: unknown[],
   everyMs = 10_000,
 ): Polled<T> {
+  const lastDeps = useRef(deps);
+  const generation = useRef(0);
+  if (!sameDeps(lastDeps.current, deps)) {
+    lastDeps.current = deps;
+    generation.current += 1;
+  }
+  const current = generation.current;
+
   const [state, setState] = useState<State<T>>({
     data: undefined,
     error: undefined,
     staleSince: undefined,
+    answered: 0,
   });
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -56,21 +78,32 @@ export function usePolled<T>(
       if (stopped || document.hidden) return;
       const mine = new AbortController();
       controller = mine;
-      loadRef.current(mine.signal).then(
+      let request: Promise<T>;
+      try {
+        request = loadRef.current(mine.signal);
+      } catch (e) {
+        request = Promise.reject(e);
+      }
+      request.then(
         (data) => {
           if (mine.signal.aborted) return;
-          setState({ data, error: undefined, staleSince: undefined });
+          setState({ data, error: undefined, staleSince: undefined, answered: current });
           schedule();
         },
         (e: unknown) => {
           if (mine.signal.aborted) return;
           const error = asApiError(e);
           if (error.status !== 401) {
-            setState((previous) => ({
-              data: previous.data,
-              error,
-              staleSince: previous.staleSince ?? new Date(),
-            }));
+            setState((previous) =>
+              previous.answered === current
+                ? {
+                    data: previous.data,
+                    error,
+                    staleSince: previous.staleSince ?? new Date(),
+                    answered: current,
+                  }
+                : { data: undefined, error, staleSince: new Date(), answered: current },
+            );
           }
           schedule();
         },
@@ -97,5 +130,12 @@ export function usePolled<T>(
     restart.current();
   }, []);
 
-  return { ...state, reload };
+  const pending = state.answered !== current;
+  return {
+    data: state.data,
+    error: pending ? undefined : state.error,
+    staleSince: pending ? undefined : state.staleSince,
+    pending,
+    reload,
+  };
 }

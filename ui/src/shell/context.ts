@@ -1,6 +1,7 @@
 import { createContext } from 'preact';
 import { useContext } from 'preact/hooks';
 
+import type { ApiError } from '../api/client';
 import type { Status } from '../api/types';
 
 export interface StatusValue {
@@ -8,6 +9,8 @@ export interface StatusValue {
   status: Status | undefined;
   /** Since when the status poll fails; undefined while it works. */
   staleSince: Date | undefined;
+  /** The last error of the status poll; undefined while it works. */
+  error?: ApiError | undefined;
 }
 
 export const StatusContext = createContext<StatusValue>({ status: undefined, staleSince: undefined });

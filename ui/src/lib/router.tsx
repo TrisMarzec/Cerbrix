@@ -49,8 +49,15 @@ interface LinkProps {
   children: ComponentChildren;
 }
 
+/** A path of this app: starts with one slash, not `//host` or `/\host`. */
+function isInternal(href: string): boolean {
+  return href.startsWith('/') && href[1] !== '/' && href[1] !== '\\';
+}
+
 /** An in-app link: a real `<a href>`, so a new tab works; a plain left click does not reload the page. */
 export function Link({ href, class: className, children, ...rest }: LinkProps) {
+  // Only a path of this app becomes a link; anything else (`javascript:`, `//host`) is plain text.
+  if (!isInternal(href)) return <span class={className}>{children}</span>;
   function onClick(e: MouseEvent) {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();

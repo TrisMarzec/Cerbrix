@@ -35,7 +35,8 @@ const ROUTES: RouteDef[] = [
     pattern: '/hosts/:name',
     nav: '/hosts',
     title: (p) => p['name'] ?? 'Host',
-    element: (p) => <Placeholder heading={p['name'] ?? 'Host'} />,
+    // Keyed by the name: another host is a fresh page, so no state or data carries over.
+    element: (p) => <Placeholder key={p['name']} heading={p['name'] ?? 'Host'} />,
   },
   {
     pattern: '/problems',

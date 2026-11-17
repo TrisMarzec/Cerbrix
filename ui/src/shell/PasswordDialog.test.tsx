@@ -80,3 +80,15 @@ describe('PasswordDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('PasswordDialog and password managers', () => {
+  it('holds the user name in a hidden read-only field and focuses the first real field', () => {
+    mock = mockFetch();
+    render(<PasswordDialog userName="anna" onClose={() => {}} onChanged={() => {}} />);
+    const hidden = screen.getByDisplayValue('anna');
+    expect(hidden).toHaveAttribute('autocomplete', 'username');
+    expect(hidden).toHaveAttribute('readonly');
+    expect(hidden).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByLabelText('Current password')).toHaveFocus();
+  });
+});

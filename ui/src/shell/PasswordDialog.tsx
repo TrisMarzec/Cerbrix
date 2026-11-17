@@ -4,6 +4,8 @@ import { api, ApiError } from '../api/client';
 import { Dialog } from '../components/Dialog';
 
 interface Props {
+  /** The account the password belongs to; password managers use it to pick the right entry. */
+  userName?: string;
   onClose: () => void;
   /** Called after the server accepted the new password; the dialog is closed by the caller. */
   onChanged: () => void;
@@ -21,7 +23,7 @@ function messageFor(e: unknown): string {
   return 'Could not reach the server';
 }
 
-export function PasswordDialog({ onClose, onChanged }: Props) {
+export function PasswordDialog({ userName, onClose, onChanged }: Props) {
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [repeat, setRepeat] = useState('');
@@ -93,6 +95,17 @@ export function PasswordDialog({ onClose, onChanged }: Props) {
             }}
           />
         </label>
+        {userName !== undefined && (
+          <input
+            type="text"
+            class="visually-hidden"
+            readOnly
+            tabIndex={-1}
+            aria-hidden="true"
+            autocomplete="username"
+            value={userName}
+          />
+        )}
         <p class="dim">
           <small>
             {MIN} to {MAX} characters.

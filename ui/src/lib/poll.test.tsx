@@ -24,11 +24,12 @@ afterEach(() => {
 type Loader = (signal: AbortSignal) => Promise<string>;
 
 function Probe({ load, dep = 0, every }: { load: Loader; dep?: number; every?: number }) {
-  const { data, error, staleSince, reload } = usePolled(load, [dep], every);
+  const { data, error, staleSince, pending, reload } = usePolled(load, [dep], every);
   return (
     <>
       <p>data={data ?? '-'}</p>
       <p>error={error?.code ?? '-'}</p>
+      <p>pending={String(pending)}</p>
       <p>stale={staleSince === undefined ? '-' : staleSince.toISOString()}</p>
       <button onClick={reload}>reload</button>
     </>
@@ -201,5 +202,104 @@ describe('usePolled', () => {
     await advance(0);
     await advance(2000);
     expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('turns an exception thrown by load itself into an error and keeps polling', async () => {
+    const load = vi
+      .fn<Loader>()
+      .mockImplementationOnce(() => {
+        throw new Error('sync boom');
+      })
+      .mockResolvedValue('fine');
+    render(<Probe load={load} />);
+    await advance(0);
+    expect(screen.getByText('error=internal')).toBeInTheDocument();
+    await advance(10000);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('data=fine')).toBeInTheDocument();
+    expect(screen.getByText('error=-')).toBeInTheDocument();
+  });
+});
+
+describe('usePolled pending', () => {
+  type Answerer = { resolve: (v: string) => void; reject: (e: unknown) => void };
+
+  function deferred() {
+    const calls: Answerer[] = [];
+    const load = vi.fn<Loader>(
+      () =>
+        new Promise<string>((resolve, reject) => {
+          calls.push({ resolve, reject });
+        }),
+    );
+    return { calls, load };
+  }
+
+  it('is false at mount and after the first answer, and not set by polls or reload', async () => {
+    const { calls, load } = deferred();
+    render(<Probe load={load} />);
+    await advance(0);
+    expect(screen.getByText('pending=false')).toBeInTheDocument();
+    await act(async () => {
+      calls[0]?.resolve('a');
+      await Promise.resolve();
+    });
+    expect(screen.getByText('pending=false')).toBeInTheDocument();
+    await advance(10000);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('pending=false')).toBeInTheDocument();
+    await act(async () => {
+      screen.getByText('reload').click();
+    });
+    await advance(0);
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('pending=false')).toBeInTheDocument();
+  });
+
+  it('is true after a deps change, clears error and staleSince at once, keeps the data', async () => {
+    const { calls, load } = deferred();
+    const view = render(<Probe load={load} dep={1} />);
+    await advance(0);
+    await act(async () => {
+      calls[0]?.resolve('host-a');
+      await Promise.resolve();
+    });
+    await advance(10000);
+    await act(async () => {
+      calls[1]?.reject(new ApiError(0, 'network', 'down'));
+      await Promise.resolve();
+    });
+    expect(screen.getByText('error=network')).toBeInTheDocument();
+    view.rerender(<Probe load={load} dep={2} />);
+    expect(screen.getByText('pending=true')).toBeInTheDocument();
+    expect(screen.getByText('error=-')).toBeInTheDocument();
+    expect(screen.getByText('stale=-')).toBeInTheDocument();
+    expect(screen.getByText('data=host-a')).toBeInTheDocument();
+    await advance(0);
+    await act(async () => {
+      calls[2]?.resolve('host-b');
+      await Promise.resolve();
+    });
+    expect(screen.getByText('pending=false')).toBeInTheDocument();
+    expect(screen.getByText('data=host-b')).toBeInTheDocument();
+  });
+
+  it('drops the old data when the first answer for the new deps is a failure', async () => {
+    const { calls, load } = deferred();
+    const view = render(<Probe load={load} dep={1} />);
+    await advance(0);
+    await act(async () => {
+      calls[0]?.resolve('host-a');
+      await Promise.resolve();
+    });
+    view.rerender(<Probe load={load} dep={2} />);
+    await advance(0);
+    await act(async () => {
+      calls[1]?.reject(new ApiError(404, 'not_found', 'no such host'));
+      await Promise.resolve();
+    });
+    expect(screen.getByText('pending=false')).toBeInTheDocument();
+    expect(screen.getByText('data=-')).toBeInTheDocument();
+    expect(screen.getByText('error=not_found')).toBeInTheDocument();
   });
 });

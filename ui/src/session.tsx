@@ -1,8 +1,14 @@
 import type { ComponentChildren } from 'preact';
 import { createContext } from 'preact';
-import { useCallback, useContext, useEffect, useMemo, useState } from 'preact/hooks';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import { api, onUnauthorized } from './api/client';
+import {
+  api,
+  ApiError,
+  currentSessionGeneration,
+  newSessionGeneration,
+  onUnauthorized,
+} from './api/client';
 import type { Role, SessionUser } from './api/types';
 import { navigate } from './lib/router';
 import { LoginPage } from './shell/LoginPage';
@@ -52,15 +58,41 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
     );
   }, []);
 
+  // A 401 may only mean that the cookie was replaced while a request was in flight (a password
+  // change). So the session asks once more who is logged in; concurrent 401s share that one check.
+  const rechecking = useRef(false);
+  const recheck = useCallback(() => {
+    if (rechecking.current) return;
+    rechecking.current = true;
+    const generation = currentSessionGeneration();
+    api.probe<SessionUser>('/session').then(
+      (fresh) => {
+        rechecking.current = false;
+        if (generation !== currentSessionGeneration()) return;
+        setState((current) => {
+          if (current.kind !== 'in') return current;
+          const same = current.user.name === fresh.name && current.user.role === fresh.role;
+          return same ? current : { kind: 'in', user: fresh };
+        });
+      },
+      (e: unknown) => {
+        rechecking.current = false;
+        if (generation !== currentSessionGeneration()) return;
+        // Only a 401 here ends the session; a network failure keeps the user in (the polls show it).
+        if (e instanceof ApiError && e.status === 401) {
+          setState((current) => (current.kind === 'in' ? { kind: 'out', expired: true } : current));
+        }
+      },
+    );
+  }, []);
+
   useEffect(() => {
-    onUnauthorized(() => {
-      setState((current) => (current.kind === 'in' ? { kind: 'out', expired: true } : current));
-    });
+    onUnauthorized(recheck);
     check();
     return () => {
       onUnauthorized(() => {});
     };
-  }, [check]);
+  }, [check, recheck]);
 
   const user = state.kind === 'in' ? state.user : undefined;
   const session = useMemo<Session | undefined>(() => {
@@ -76,6 +108,7 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
         }
         // The next person must not land on the page of the one who left.
         navigate('/', { replace: true });
+        newSessionGeneration();
         setState({ kind: 'out', expired: false });
       },
     };
@@ -97,6 +130,7 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
       <LoginPage
         expired={state.kind === 'out' && state.expired}
         onLoggedIn={(loggedIn) => {
+          newSessionGeneration();
           setState({ kind: 'in', user: loggedIn });
         }}
       />

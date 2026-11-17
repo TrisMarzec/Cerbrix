@@ -21,7 +21,7 @@ function unacknowledged(status: Status | undefined): number {
 export function Shell() {
   const { user, can, logout } = useSession();
   const { path } = useRoute();
-  const { data: status, staleSince } = usePolled(
+  const { data: status, staleSince, error } = usePolled(
     (signal) => api.get<Status>('/status', undefined, signal),
     [],
   );
@@ -79,7 +79,7 @@ export function Shell() {
 
   return (
     <NowContext.Provider value={now}>
-      <StatusContext.Provider value={{ status, staleSince }}>
+      <StatusContext.Provider value={{ status, staleSince, error }}>
         <div class="shell">
           <nav class="nav" aria-label="Main">
             <div class="brand">Cerbrix</div>
@@ -133,6 +133,7 @@ export function Shell() {
         </div>
         {passwordOpen && (
           <PasswordDialog
+            userName={user.name}
             onClose={() => {
               setPasswordOpen(false);
             }}

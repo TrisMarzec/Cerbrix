@@ -114,6 +114,73 @@ describe('role gating', () => {
   });
 });
 
+const OUT_OF_SYNC = {
+  status: 'out_of_sync' as const,
+  active_commit: '253a2994b13aca387e272ff08db9eb858b436b66',
+  last_success_at: new Date(2026, 10, 17, 14, 5, 0).toISOString(),
+  last_attempt_at: null,
+  issues: [] as Status['sync']['issues'],
+};
+
+describe('top bar texts for missing data', () => {
+  it('says no configuration is active when out of sync without a commit', async () => {
+    await open('/hosts', 'viewer', {
+      json: statusFixture({ sync: { ...OUT_OF_SYNC, active_commit: null } }),
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Out of sync since 14:05, no configuration is active',
+    );
+    expect(screen.getByRole('alert')).not.toHaveTextContent('from commit');
+  });
+
+  it('leaves out never and since when nothing was ever applied', async () => {
+    await open('/hosts', 'viewer', {
+      json: statusFixture({
+        sync: { ...OUT_OF_SYNC, active_commit: null, last_success_at: null },
+      }),
+    });
+    expect(screen.getByRole('banner')).toHaveTextContent(/^Out of sync(?! ·)/);
+    expect(screen.getByRole('banner')).not.toHaveTextContent('never');
+    const banner = screen.getByRole('alert');
+    expect(banner).toHaveTextContent('Out of sync, no configuration is active');
+    expect(banner).not.toHaveTextContent('since');
+  });
+
+  it('shows the first issue and the link for never with issues', async () => {
+    await open('/hosts', 'viewer', {
+      json: statusFixture({
+        sync: {
+          status: 'never',
+          active_commit: null,
+          last_success_at: null,
+          last_attempt_at: null,
+          issues: [
+            { file: 'a.json', line: 1, column: 2, reason: 'bad' },
+            { file: null, line: null, column: null, reason: 'worse' },
+          ],
+        },
+      }),
+    });
+    expect(screen.getByText('The configuration has not been synchronised yet')).toBeInTheDocument();
+    const banner = screen.getByRole('alert');
+    expect(banner).toHaveTextContent('a.json:1:2 — bad');
+    expect(within(banner).getByRole('link', { name: 'and 1 more' })).toHaveAttribute(
+      'href',
+      '/configuration',
+    );
+  });
+
+  it('says the server reported an error when the status poll fails with another error', async () => {
+    await open('/hosts', 'viewer', [
+      { json: statusFixture() },
+      { status: 500, json: { error: 'internal', message: 'boom' } },
+    ]);
+    await advance(10000);
+    expect(screen.getByRole('alert')).toHaveTextContent('The server reported an error since 14:30');
+    expect(screen.queryByText(/No connection/)).not.toBeInTheDocument();
+  });
+});
+
 describe('top bar', () => {
   it('shows the sync state with commit and age, and the note about Git', async () => {
     await open('/hosts', 'viewer', { json: statusFixture() });

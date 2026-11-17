@@ -31,6 +31,23 @@ describe('match', () => {
   });
 });
 
+describe('Link with a target that is not a path of this app', () => {
+  it('renders plain text, not a link', () => {
+    render(
+      <>
+        <Link href="javascript:alert(1)">script</Link>
+        <Link href="//evil.example">scheme-less</Link>
+        <Link href={'/\\evil.example'}>backslash</Link>
+        <Link href="https://evil.example">absolute</Link>
+      </>,
+    );
+    expect(screen.queryAllByRole('link')).toHaveLength(0);
+    expect(screen.getByText('script')).toBeInTheDocument();
+    expect(screen.getByText('scheme-less')).toBeInTheDocument();
+    expect(screen.getByText('backslash')).toBeInTheDocument();
+  });
+});
+
 describe('Link', () => {
   it('navigates on a plain click and prevents the page load', () => {
     render(<Link href="/hosts?state=problem">Hosts</Link>);

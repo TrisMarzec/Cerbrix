@@ -1,4 +1,4 @@
-import { api, ApiError, onUnauthorized, seg } from './client';
+import { api, ApiError, newSessionGeneration, onUnauthorized, seg } from './client';
 import { mockFetch, type FetchMock } from '../test/mockFetch';
 
 let mock: FetchMock;
@@ -93,5 +93,41 @@ describe('401', () => {
 describe('seg', () => {
   it('encodes a path segment', () => {
     expect(seg('a/b c?')).toBe('a%2Fb%20c%3F');
+  });
+
+  it('encodes dot segments so a path cannot climb a level', () => {
+    expect(seg('.')).toBe('%2E');
+    expect(seg('..')).toBe('%2E%2E');
+    expect(seg('a.b')).toBe('a.b');
+  });
+});
+
+describe('session generation', () => {
+  it('does not report a 401 of a request that started in an earlier generation', async () => {
+    let answer: (a: { status: number; json: unknown }) => void = () => {};
+    mock = mockFetch({
+      'GET /slow': () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    const handler = vi.fn();
+    onUnauthorized(handler);
+    const pending = api.get('/slow').catch((e: unknown) => e);
+    await vi.waitFor(() => {
+      expect(mock.requests).toHaveLength(1);
+    });
+    newSessionGeneration();
+    answer({ status: 401, json: { error: 'unauthorized', message: 'old' } });
+    await expect(pending).resolves.toMatchObject({ status: 401 });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('does not report a 401 of probe', async () => {
+    mock = mockFetch({ 'GET /session': { status: 401, json: { error: 'unauthorized', message: 'x' } } });
+    const handler = vi.fn();
+    onUnauthorized(handler);
+    await expect(api.probe('/session')).rejects.toMatchObject({ status: 401 });
+    expect(handler).not.toHaveBeenCalled();
   });
 });

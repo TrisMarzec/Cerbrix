@@ -20,8 +20,25 @@ export function onUnauthorized(handler: () => void): void {
   unauthorized = handler;
 }
 
-/** Encodes one path segment (a host name, an id) for use in a request path. */
+let generation = 0;
+
+/**
+ * Starts a new session generation (a login or a logout). A `401` that belongs to a request started
+ * in an earlier generation says nothing about the current session and is not reported.
+ */
+export function newSessionGeneration(): number {
+  generation += 1;
+  return generation;
+}
+
+export function currentSessionGeneration(): number {
+  return generation;
+}
+
+/** Encodes one path segment (a host name, an id); dot segments are encoded too so a path cannot climb. */
 export function seg(value: string): string {
+  if (value === '.') return '%2E';
+  if (value === '..') return '%2E%2E';
   return encodeURIComponent(value);
 }
 
@@ -53,7 +70,14 @@ async function errorFrom(response: Response): Promise<ApiError> {
   return new ApiError(response.status, code, message);
 }
 
-async function request<T>(method: string, path: string, init: RequestInit, signal?: AbortSignal): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+  notify = true,
+): Promise<T> {
+  const started = generation;
   let response: Response;
   try {
     response = await fetch(path, {
@@ -69,7 +93,9 @@ async function request<T>(method: string, path: string, init: RequestInit, signa
   if (!response.ok) {
     // The login request answers 401 for a wrong password: that is not a lost session.
     const isLogin = method === 'POST' && path === `${BASE}/session`;
-    if (response.status === 401 && !isLogin && signal?.aborted !== true) unauthorized();
+    if (response.status === 401 && notify && !isLogin && signal?.aborted !== true && started === generation) {
+      unauthorized();
+    }
     throw await errorFrom(response);
   }
   if (response.status === 204) return undefined as T;
@@ -83,6 +109,11 @@ async function request<T>(method: string, path: string, init: RequestInit, signa
 export const api = {
   get<T>(path: string, query?: Query, signal?: AbortSignal): Promise<T> {
     return request<T>('GET', withQuery(path, query), {}, signal);
+  },
+
+  /** Like `get`, but a 401 is not reported to the `onUnauthorized` handler (the session check itself). */
+  probe<T>(path: string): Promise<T> {
+    return request<T>('GET', BASE + path, {}, undefined, false);
   },
 
   send<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
