@@ -1,0 +1,87 @@
+.admin-section h2 {
+  margin-bottom: 10px;
+}
+
+.admin-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.admin-result.is-busy {
+  opacity: 0.6;
+}
+
+.admin-table th,
+.admin-table td {
+  overflow-wrap: anywhere;
+}
+
+.admin-table tbody th {
+  font-weight: normal;
+  text-align: left;
+}
+
+.admin-you {
+  margin-left: 8px;
+  color: var(--dim);
+}
+
+.admin-dim-row {
+  color: var(--dim);
+}
+
+.admin-table .admin-actions {
+  text-align: right;
+}
+
+.admin-table .admin-actions .btn {
+  margin: 0 0 4px 8px;
+}
+
+.admin-error {
+  color: var(--warning);
+}
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.admin-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--dim);
+}
+
+.admin-form label.admin-radio {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: inherit;
+}
+
+.admin-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.admin-choice legend {
+  color: var(--dim);
+  padding: 0 4px;
+}
+
+.admin-table .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

@@ -268,3 +268,13 @@ export interface EnrollmentKey {
   revoked_at: string | null;
   state: EnrollmentKeyState;
 }
+
+/** A user of the server (`GET /users`); the answers never carry a password. */
+export interface User {
+  id: string;
+  name: string;
+  role: Role;
+  disabled: boolean;
+  created_at: string;
+  password_changed_at: string;
+}
