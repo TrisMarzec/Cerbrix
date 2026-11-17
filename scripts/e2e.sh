@@ -27,12 +27,14 @@
 # the pages, acknowledging the open problem, a display token, logout. It runs in the Playwright
 # Docker image (the version of @playwright/test in ui/package-lock.json) on the network of the
 # stack and talks to the server by its service name, so Docker is all it needs. The admin
-# password reaches it as a read-only file under this script's private work directory. On a
-# failure its output is printed with tokens masked. It leaves an acknowledged problem behind
-# and nothing else is checked afterwards.
+# password reaches it as a read-only file under this script's private work directory. The spec
+# never hands the password to Playwright's `fill` (whose error log echoes the value), and on a
+# failure the output is printed with tokens and the exact password masked. It leaves an
+# acknowledged problem behind and nothing else is checked afterwards.
 #
 # Environment variables (defaults in parentheses):
-#   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e)
+#   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e); lower-cased, because compose
+#                             lower-cases it for the network name the smoke run joins
 #   CERBRIX_SERVER_PORT       host port of the server (18443)
 #   CERBRIX_VM_PORT           host port of VictoriaMetrics (18428)
 #   CERBRIX_E2E_TIMEOUT       seconds to wait for both series (120)
@@ -42,14 +44,15 @@
 #   CERBRIX_E2E_NODATA_TIMEOUT seconds to wait for the no-data problem after the agent stopped (240)
 #   CERBRIX_E2E_KEEP_STACK    set to 1 to leave the stack running (for debugging)
 #   CERBRIX_E2E_SKIP_UI       set to 1 to skip the browser smoke run (it pulls a large image)
-#   CERBRIX_UI_SMOKE_FAIL     set to 1 to make the smoke run fail on purpose, to see how a
-#                             failure is reported (passed on to the smoke run)
+#   CERBRIX_UI_SMOKE_FAIL     1 makes the smoke run fail on purpose in its first step, login
+#                             makes its login fail after the password was typed; to see how a
+#                             failure is reported and that the password is masked (passed on)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ROOT=$(pwd)
 
-PROJECT=${CERBRIX_E2E_PROJECT:-cerbrix-e2e}
+PROJECT=$(printf '%s' "${CERBRIX_E2E_PROJECT:-cerbrix-e2e}" | tr '[:upper:]' '[:lower:]')
 export CERBRIX_SERVER_PORT=${CERBRIX_SERVER_PORT:-18443}
 export CERBRIX_VM_PORT=${CERBRIX_VM_PORT:-18428}
 TIMEOUT=${CERBRIX_E2E_TIMEOUT:-120}
@@ -161,6 +164,18 @@ LAST_STATUS=""
 LAST_BODY=""
 # Masks session and display tokens in the text on standard input.
 mask_tokens() { sed -E 's/cbx_(se|dt|ek|ac)_[A-Za-z0-9_-]+/cbx_\1_<masked>/g'; }
+# Masks the exact admin password as well, in the text on standard input. The password is read
+# from its file into a variable with a shell builtin (never onto a command line) and replaced
+# with bash string replacement; the text is kept in a variable, so nothing is printed before.
+mask_secrets() {
+    local text secret=""
+    text=$(mask_tokens)
+    [ ! -f "$WORK/ui-password" ] || secret=$(<"$WORK/ui-password")
+    if [ -n "$secret" ]; then
+        text=${text//"$secret"/'<masked password>'}
+    fi
+    printf '%s\n' "$text"
+}
 
 cleanup() {
     status=$?
@@ -694,10 +709,10 @@ npx playwright test'
         -e CERBRIX_UI_SMOKE_FAIL="${CERBRIX_UI_SMOKE_FAIL:-0}" \
         -e CI=1 \
         "$image" sh -c "$inner" >"$WORK/ui-smoke.log" 2>&1; then
-        mask_tokens <"$WORK/ui-smoke.log" >&2
+        mask_secrets <"$WORK/ui-smoke.log" >&2
     else
         echo "e2e: UI: output of the browser smoke run:" >&2
-        mask_tokens <"$WORK/ui-smoke.log" >&2
+        mask_secrets <"$WORK/ui-smoke.log" >&2
         fail "the browser smoke run failed"
     fi
 }
