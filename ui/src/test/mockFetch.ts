@@ -12,8 +12,10 @@ export interface RecordedRequest {
   init: RequestInit;
 }
 
-/** An answer: a status with a JSON or text body, or `'network'` for a fetch that fails. */
-export type Answer = { status?: number; json?: unknown; text?: string } | 'network';
+/** An answer: a status with a JSON or text body (and headers), or `'network'` for a fetch that fails. */
+export type Answer =
+  | { status?: number; json?: unknown; text?: string; headers?: Record<string, string> }
+  | 'network';
 export type Responder = Answer | ((request: RecordedRequest) => Answer | Promise<Answer>);
 
 export interface FetchMock {
@@ -39,6 +41,7 @@ function responseFor(answer: Exclude<Answer, 'network'>): Response {
   const fake = {
     ok: status >= 200 && status < 300,
     status,
+    headers: new Headers(answer.headers),
     json: () => Promise.resolve().then(() => JSON.parse(text) as unknown),
   };
   return fake as unknown as Response;

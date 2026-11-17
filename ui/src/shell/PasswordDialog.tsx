@@ -59,8 +59,13 @@ export function PasswordDialog({ userName, onClose, onChanged }: Props) {
     }
   }
 
+  // While the request runs the dialog cannot be dismissed, so its answer is never dropped unseen.
+  const close = () => {
+    if (!busy) onClose();
+  };
+
   return (
-    <Dialog title="Change password" onClose={onClose}>
+    <Dialog title="Change password" closeOnBackdrop={!busy} onClose={close}>
       <form class="dialog-form" onSubmit={(e) => void submit(e)}>
         <label class="field">
           Current password
@@ -117,7 +122,7 @@ export function PasswordDialog({ userName, onClose, onChanged }: Props) {
           </p>
         )}
         <div class="dialog-actions">
-          <button type="button" class="btn" onClick={onClose}>
+          <button type="button" class="btn" disabled={busy} onClick={close}>
             Cancel
           </button>
           <button type="submit" class="btn" disabled={busy}>

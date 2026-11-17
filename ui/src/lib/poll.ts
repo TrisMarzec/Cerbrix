@@ -31,18 +31,24 @@ function sameDeps(a: unknown[], b: unknown[]): boolean {
   return a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
 }
 
+/** Load once per mount (and on `reload()`) instead of polling: for lists that rarely change. */
+export const ONCE = 'once';
+
 /**
- * Loads at once and then `everyMs` after the previous answer arrived. No request and no timer while
- * the page is hidden; becoming visible loads at once. A request is aborted when the hook unmounts or
- * `deps` change. An error (also an exception thrown by `load` itself) keeps the last data and sets
+ * Loads at once and then `every` milliseconds after the previous answer arrived. No request and no
+ * timer while the page is hidden; becoming visible loads at once. With `every = 'once'` there is no
+ * interval: it loads at mount and on `reload()`, and becoming visible loads again only when the
+ * last load failed (or none was made). A request is aborted when the hook unmounts or `deps`
+ * change. An error (also an exception thrown by `load` itself) keeps the last data and sets
  * `staleSince` to the first failure, except for the first answer after a deps change: a failure
- * there leaves no data. A 401 is not an error here (the client has told `onUnauthorized`).
- * It never throws.
+ * there leaves no data. A `403` drops the data as well, on any poll: a role that may no longer read
+ * something must not keep seeing the last answer. A 401 is not an error here (the client has told
+ * `onUnauthorized`). It never throws.
  */
 export function usePolled<T>(
   load: (signal: AbortSignal) => Promise<T>,
   deps: unknown[],
-  everyMs = 10_000,
+  every: number | typeof ONCE = 10_000,
 ): Polled<T> {
   const lastDeps = useRef(deps);
   const generation = useRef(0);
@@ -66,10 +72,12 @@ export function usePolled<T>(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | undefined;
     let stopped = false;
+    /** For `once`: true until a load succeeded. */
+    let needed = true;
 
     const schedule = () => {
-      if (stopped || document.hidden) return;
-      timer = setTimeout(run, everyMs);
+      if (stopped || document.hidden || every === ONCE) return;
+      timer = setTimeout(run, every);
     };
 
     function run() {
@@ -87,6 +95,7 @@ export function usePolled<T>(
       request.then(
         (data) => {
           if (mine.signal.aborted) return;
+          needed = false;
           setState({ data, error: undefined, staleSince: undefined, answered: current });
           schedule();
         },
@@ -94,10 +103,12 @@ export function usePolled<T>(
           if (mine.signal.aborted) return;
           const error = asApiError(e);
           if (error.status !== 401) {
+            needed = true;
+            const keep = error.status !== 403;
             setState((previous) =>
               previous.answered === current
                 ? {
-                    data: previous.data,
+                    data: keep ? previous.data : undefined,
                     error,
                     staleSince: previous.staleSince ?? new Date(),
                     answered: current,
@@ -112,7 +123,7 @@ export function usePolled<T>(
 
     const onVisibility = () => {
       if (document.hidden) clearTimeout(timer);
-      else run();
+      else if (every !== ONCE || needed) run();
     };
 
     restart.current = run;
@@ -124,7 +135,7 @@ export function usePolled<T>(
       controller?.abort();
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [...deps, everyMs]);
+  }, [...deps, every]);
 
   const reload = useCallback(() => {
     restart.current();

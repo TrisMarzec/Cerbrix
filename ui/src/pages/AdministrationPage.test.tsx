@@ -8,6 +8,7 @@ import { NowContext, StatusContext } from '../shell/context';
 import { NOW, statusFixture, userFixture } from '../test/fixtures';
 import { mockFetch, type FetchMock, type Responder } from '../test/mockFetch';
 import { advance } from '../test/timers';
+import { expectStaleAbove, staleNotes } from '../test/stale';
 import { AdministrationPage } from './AdministrationPage';
 
 let mock: FetchMock;
@@ -650,5 +651,14 @@ describe('AdministrationPage', () => {
     expect(screen.getByText('Not allowed for your role')).toBeTruthy();
     expect(screen.queryByRole('table')).toBeNull();
     expect(mock.requests.filter((r) => r.path !== '/session')).toHaveLength(0);
+  });
+});
+
+describe('users that are not up to date', () => {
+  it('says since when the list is old when a later poll fails', async () => {
+    await open({ routes: { 'GET /users': [{ json: { items: [ME, BOB], total: 2 } }, 'network'] } });
+    expect(staleNotes()).toHaveLength(0);
+    await advance(10_000);
+    expectStaleAbove(screen.getByRole('table', { name: 'Users' }), '14:30');
   });
 });

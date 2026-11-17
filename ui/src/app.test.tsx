@@ -37,9 +37,13 @@ describe('App', () => {
     });
     const user = userEvent.setup();
     render(<App />);
+    expect(await screen.findByLabelText('User name')).toBeInTheDocument();
+    // A cold load without a session asks once: the 401 of the first check starts no re-check.
+    expect(mock.count('GET /session')).toBe(1);
     await logIn(user);
     expect(await screen.findByRole('heading', { level: 1, name: 'Problems' })).toBeInTheDocument();
     expect(window.location.pathname + window.location.search).toBe('/problems?state=resolved');
+    expect(mock.count('GET /session')).toBe(1);
   });
 
   it('shows the shell at once for a valid session', async () => {

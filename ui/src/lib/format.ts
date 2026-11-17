@@ -1,4 +1,4 @@
-import type { Severity } from '../api/types';
+import type { Role, Severity } from '../api/types';
 
 const WORDS: Record<Severity, string> = {
   critical: 'Critical',
@@ -11,7 +11,15 @@ export function severityWord(s: Severity): string {
   return WORDS[s];
 }
 
-const DASH = '–';
+/** What is shown where a value is missing. */
+export const DASH = '–';
+
+const ROLE_WORDS: Record<Role, string> = { viewer: 'Viewer', operator: 'Operator', admin: 'Admin' };
+
+export function roleWord(role: Role): string {
+  return ROLE_WORDS[role];
+}
+
 const MINUTE = 60;
 const HOUR = 3600;
 const DAY = 86400;

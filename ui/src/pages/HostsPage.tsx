@@ -7,6 +7,7 @@ import type { HostRow, HostsAnswer } from '../api/types';
 import { Banner } from '../components/Banner';
 import { Empty } from '../components/Empty';
 import { Pager } from '../components/Pager';
+import { StaleNote } from '../components/StaleNote';
 import { StateText } from '../components/StateText';
 import { age, value } from '../lib/format';
 import { usePolled } from '../lib/poll';
@@ -302,6 +303,7 @@ export function HostsPage() {
           class={hosts.pending ? 'hosts-result is-busy' : 'hosts-result'}
           aria-busy={hosts.pending}
         >
+          <StaleNote of={hosts} />
           {!answer.metrics_available && (
             <Banner kind="warning">Current values are not available right now.</Banner>
           )}

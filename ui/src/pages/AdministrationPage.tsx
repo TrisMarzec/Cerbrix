@@ -10,6 +10,7 @@ import { Dialog } from '../components/Dialog';
 import { Empty } from '../components/Empty';
 import { Pager } from '../components/Pager';
 import { SecretDialog } from '../components/SecretDialog';
+import { StaleNote } from '../components/StaleNote';
 import { TimeText } from '../components/TimeText';
 import { usePolled } from '../lib/poll';
 import { useQueryState } from '../lib/query';
@@ -558,6 +559,7 @@ export function AdministrationPage() {
             class={users.pending ? 'admin-result is-busy' : 'admin-result'}
             aria-busy={users.pending}
           >
+            <StaleNote of={users} />
             {answer.total === 0 ? (
               !users.pending && <Empty>No users.</Empty>
             ) : beyond ? null : (

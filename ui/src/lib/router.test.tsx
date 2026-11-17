@@ -46,6 +46,19 @@ describe('Link with a target that is not a path of this app', () => {
     expect(screen.getByText('scheme-less')).toBeInTheDocument();
     expect(screen.getByText('backslash')).toBeInTheDocument();
   });
+
+  it('renders a path with a control character as plain text', () => {
+    render(
+      <>
+        <Link href={'/hosts\tx'}>tab</Link>
+        <Link href={'/\n/evil.example'}>newline</Link>
+        <Link href={'/hosts\u0000'}>nul</Link>
+        <Link href={'/hosts\u007f'}>delete</Link>
+      </>,
+    );
+    expect(screen.queryAllByRole('link')).toHaveLength(0);
+    expect(screen.getByText('newline')).toBeInTheDocument();
+  });
 });
 
 describe('Link', () => {

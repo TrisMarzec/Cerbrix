@@ -49,9 +49,12 @@ interface LinkProps {
   children: ComponentChildren;
 }
 
-/** A path of this app: starts with one slash, not `//host` or `/\host`. */
+/** A control character: a browser drops a tab or newline from a URL, so `/\t/host` becomes `//host`. */
+const CONTROL = /[\u0000-\u001f\u007f]/;
+
+/** A path of this app: starts with one slash, not `//host` or `/\host`, and has no control character. */
 function isInternal(href: string): boolean {
-  return href.startsWith('/') && href[1] !== '/' && href[1] !== '\\';
+  return href.startsWith('/') && href[1] !== '/' && href[1] !== '\\' && !CONTROL.test(href);
 }
 
 /** An in-app link: a real `<a href>`, so a new tab works; a plain left click does not reload the page. */

@@ -4,6 +4,7 @@ import { api } from '../api/client';
 import type { DashboardSummary, Display, HostsByState, Severity } from '../api/types';
 import { Banner } from '../components/Banner';
 import { Empty } from '../components/Empty';
+import { StaleNote } from '../components/StaleNote';
 import { severityWord } from '../lib/format';
 import { usePolled } from '../lib/poll';
 import { Link } from '../lib/router';
@@ -224,6 +225,7 @@ export function DashboardsPage() {
           </button>
         </Banner>
       )}
+      <StaleNote of={dashboards} />
       {dashboards.data !== undefined &&
         (dashboards.data.items.length === 0 ? (
           <Empty>
@@ -244,6 +246,7 @@ export function DashboardsPage() {
               </button>
             </Banner>
           )}
+          <StaleNote of={displays} />
           {displays.data !== undefined &&
             (displays.data.items.length === 0 ? (
               <Empty>No wall displays configured.</Empty>

@@ -1,8 +1,9 @@
-import { render, screen, waitFor } from '@testing-library/preact';
+import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
 
 import { criticalProblem } from '../test/fixtures';
 import { mockFetch, type FetchMock, type Responder } from '../test/mockFetch';
+import { advance } from '../test/timers';
 import { AckDialog } from './AckDialog';
 
 let mock: FetchMock;
@@ -121,5 +122,26 @@ describe('AckDialog', () => {
     await user.keyboard('{Escape}');
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+describe('AckDialog and a request that never answers', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('says it could not reach the server after the time limit and can be dismissed again', async () => {
+    vi.useFakeTimers();
+    const { onClose } = setup(() => new Promise(() => {}));
+    fireEvent.click(screen.getByRole('button', { name: 'Acknowledge' }));
+    await advance(0);
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    await advance(30_000);
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not reach the server.');
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

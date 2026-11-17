@@ -1,5 +1,5 @@
 import type { ComponentChildren } from 'preact';
-import { createContext } from 'preact';
+import { createContext, Fragment } from 'preact';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import {
@@ -7,6 +7,7 @@ import {
   ApiError,
   currentSessionGeneration,
   newSessionGeneration,
+  onSessionDoubt,
   onUnauthorized,
 } from './api/client';
 import type { Role, SessionUser } from './api/types';
@@ -21,7 +22,12 @@ interface Session {
   user: SessionUser;
   /** True when the user's role is `role` or higher. For hiding buttons only: the server decides. */
   can: (role: Role) => boolean;
-  logout: () => Promise<void>;
+  /**
+   * Ends the session. Resolves true when the server confirmed it (`204`, or `401`: it was gone
+   * already) and the login page is shown; false when the server did not answer, and the user is
+   * still logged in.
+   */
+  logout: () => Promise<boolean>;
 }
 
 const SessionContext = createContext<Session | undefined>(undefined);
@@ -38,48 +44,58 @@ type State =
   | { kind: 'out'; expired: boolean }
   | { kind: 'in'; user: SessionUser };
 
+function isStatus(e: unknown, status: number): boolean {
+  return e instanceof ApiError && e.status === status;
+}
+
 /**
  * Asks who is logged in and renders `children` for a user, the login page otherwise. The login page
  * takes the place of the page in the same URL, so after a login the user is where they were.
+ * Everything below is keyed by the user's name and role: when the cookie turns out to belong to
+ * someone else, nothing of the previous user survives.
  */
 export function SessionProvider({ children }: { children: ComponentChildren }) {
   const [state, setState] = useState<State>({ kind: 'loading' });
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
+  // The first check is a probe: its 401 means "not logged in", not "the session ended".
   const check = useCallback(() => {
     setState({ kind: 'loading' });
-    api.get<SessionUser>('/session').then(
+    api.probe<SessionUser>('/session').then(
       (user) => {
         setState({ kind: 'in', user });
       },
       (e: unknown) => {
-        const unauthorized = typeof e === 'object' && e !== null && 'status' in e && e.status === 401;
-        setState(unauthorized ? { kind: 'out', expired: false } : { kind: 'unreachable' });
+        setState(isStatus(e, 401) ? { kind: 'out', expired: false } : { kind: 'unreachable' });
       },
     );
   }, []);
 
   // A 401 may only mean that the cookie was replaced while a request was in flight (a password
-  // change). So the session asks once more who is logged in; concurrent 401s share that one check.
+  // change); a 403 or a tab that becomes visible again may mean that another user has logged in in
+  // another tab. So the session asks once more who is logged in; concurrent triggers share it.
   const rechecking = useRef(false);
   const recheck = useCallback(() => {
-    if (rechecking.current) return;
+    if (rechecking.current || stateRef.current.kind !== 'in') return;
     rechecking.current = true;
     const generation = currentSessionGeneration();
     api.probe<SessionUser>('/session').then(
       (fresh) => {
         rechecking.current = false;
         if (generation !== currentSessionGeneration()) return;
-        setState((current) => {
-          if (current.kind !== 'in') return current;
-          const same = current.user.name === fresh.name && current.user.role === fresh.role;
-          return same ? current : { kind: 'in', user: fresh };
-        });
+        const current = stateRef.current;
+        if (current.kind !== 'in') return;
+        if (current.user.name === fresh.name && current.user.role === fresh.role) return;
+        // Requests of the previous user say nothing about this one.
+        newSessionGeneration();
+        setState({ kind: 'in', user: fresh });
       },
       (e: unknown) => {
         rechecking.current = false;
         if (generation !== currentSessionGeneration()) return;
         // Only a 401 here ends the session; a network failure keeps the user in (the polls show it).
-        if (e instanceof ApiError && e.status === 401) {
+        if (isStatus(e, 401)) {
           setState((current) => (current.kind === 'in' ? { kind: 'out', expired: true } : current));
         }
       },
@@ -88,9 +104,16 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
 
   useEffect(() => {
     onUnauthorized(recheck);
+    onSessionDoubt(recheck);
+    const onVisibility = () => {
+      if (!document.hidden) recheck();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     check();
     return () => {
       onUnauthorized(() => {});
+      onSessionDoubt(() => {});
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [check, recheck]);
 
@@ -103,13 +126,15 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
       logout: async () => {
         try {
           await api.send('DELETE', '/session');
-        } catch {
-          // The session is gone on this side either way.
+        } catch (e) {
+          // A 401 says the session is gone already; anything else leaves it alive on the server.
+          if (!isStatus(e, 401)) return false;
         }
         // The next person must not land on the page of the one who left.
         navigate('/', { replace: true });
         newSessionGeneration();
         setState({ kind: 'out', expired: false });
+        return true;
       },
     };
   }, [user]);
@@ -136,5 +161,9 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
       />
     );
   }
-  return <SessionContext.Provider value={session}>{children}</SessionContext.Provider>;
+  return (
+    <SessionContext.Provider value={session}>
+      <Fragment key={`${session.user.role}:${session.user.name}`}>{children}</Fragment>
+    </SessionContext.Provider>
+  );
 }

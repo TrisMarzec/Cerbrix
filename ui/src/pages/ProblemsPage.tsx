@@ -14,6 +14,7 @@ import { Banner } from "../components/Banner";
 import { CloseDialog } from "../components/CloseDialog";
 import { Empty } from "../components/Empty";
 import { Pager } from "../components/Pager";
+import { StaleNote } from "../components/StaleNote";
 import { TimeText } from "../components/TimeText";
 import { clock, duration, severityWord } from "../lib/format";
 import { usePolled } from "../lib/poll";
@@ -576,6 +577,7 @@ export function ProblemsPage() {
           }
           aria-busy={problems.pending}
         >
+          <StaleNote of={problems} />
           {answer.total === 0 ? (
             !problems.pending && (
               <Empty>

@@ -18,6 +18,7 @@ import {
 } from "../test/fixtures";
 import { mockFetch, type FetchMock, type Responder } from "../test/mockFetch";
 import { advance } from "../test/timers";
+import { expectStaleAbove, staleNotes } from "../test/stale";
 import { ProblemsPage } from "./ProblemsPage";
 
 let mock: FetchMock;
@@ -827,5 +828,14 @@ describe("hostile host names and missing data", () => {
     const row = rows()[0] as HTMLElement;
     expect(within(row).getByText(/acknowledged by anna/)).toBeInTheDocument();
     expect(within(row).getByText(/watching/)).toBeInTheDocument();
+  });
+});
+
+describe("problems that are not up to date", () => {
+  it("says since when the list is old when a later poll fails", async () => {
+    await open("/problems", { problems: [answer([criticalProblem]), "network"] });
+    expect(staleNotes()).toHaveLength(0);
+    await advance(10_000);
+    expectStaleAbove(screen.getByRole("table", { name: "Problems" }), "14:30");
   });
 });

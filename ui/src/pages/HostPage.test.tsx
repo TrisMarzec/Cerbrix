@@ -17,6 +17,7 @@ import {
 } from '../test/fixtures';
 import { mockFetch, type FetchMock, type Responder } from '../test/mockFetch';
 import { advance } from '../test/timers';
+import { expectStaleAbove, staleNotes } from '../test/stale';
 import { HostPage } from './HostPage';
 
 const plots: { data: uPlot.AlignedData; destroy: ReturnType<typeof vi.fn>; destroyed: () => boolean }[] = [];
@@ -765,7 +766,7 @@ describe('series errors', () => {
     });
     expect(screen.queryByText(/Not updated since/)).not.toBeInTheDocument();
     await advance(60_000);
-    expect(screen.getByText(/^Not updated since \d\d:\d\d$/)).toBeInTheDocument();
+    expect(screen.getByText(/^Not updated since/)).toHaveTextContent(/^Not updated since \d\d:\d\d$/);
     expect(plots).toHaveLength(1);
   });
 });
@@ -870,5 +871,28 @@ describe('release', () => {
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
     await user.keyboard('{Escape}');
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+});
+
+describe('host data that is not up to date', () => {
+  it('says since when the host is old when a later poll fails', async () => {
+    await open({ detail: [{ json: hostDetailFixture({ name: 'web-01' }) }, 'network'] });
+    expect(staleNotes()).toHaveLength(0);
+    await advance(10_000);
+    const head = document.querySelector<HTMLElement>('.host-head');
+    if (head === null) throw new Error('no host head');
+    expectStaleAbove(head, '14:30');
+  });
+
+  it('says since when the current values are old when a later poll fails', async () => {
+    await open({ values: [values([cpuValue]), 'network'] });
+    await advance(10_000);
+    expectStaleAbove(screen.getByRole('table', { name: 'Current values' }), '14:30');
+  });
+
+  it('puts the note of a graph above the graph', async () => {
+    await open({ routes: { 'GET /hosts/web-01/series': [{ json: series() }, 'network'] } });
+    await advance(60_000);
+    expectStaleAbove(screen.getByRole('img', { name: /cpu\.usage/ }), '14:31');
   });
 });

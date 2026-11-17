@@ -1,10 +1,12 @@
-import { api, ApiError, newSessionGeneration, onUnauthorized, seg } from './client';
+import { api, ApiError, newSessionGeneration, onSessionDoubt, onUnauthorized, seg } from './client';
 import { mockFetch, type FetchMock } from '../test/mockFetch';
 
 let mock: FetchMock;
 afterEach(() => {
   mock.restore();
   onUnauthorized(() => {});
+  onSessionDoubt(() => {});
+  vi.useRealTimers();
 });
 
 describe('api.get', () => {
@@ -95,10 +97,11 @@ describe('seg', () => {
     expect(seg('a/b c?')).toBe('a%2Fb%20c%3F');
   });
 
-  it('encodes dot segments so a path cannot climb a level', () => {
-    expect(seg('.')).toBe('%2E');
-    expect(seg('..')).toBe('%2E%2E');
+  it('refuses the dot segments, which a browser resolves even when encoded', () => {
+    expect(() => seg('.')).toThrow();
+    expect(() => seg('..')).toThrow();
     expect(seg('a.b')).toBe('a.b');
+    expect(seg('...')).toBe('...');
   });
 });
 
@@ -129,5 +132,104 @@ describe('session generation', () => {
     onUnauthorized(handler);
     await expect(api.probe('/session')).rejects.toMatchObject({ status: 401 });
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('403', () => {
+  it('reports a 403 as a doubt about the session and still rejects', async () => {
+    mock = mockFetch({ 'GET /users': { status: 403, json: { error: 'forbidden', message: 'no' } } });
+    const doubt = vi.fn();
+    const unauthorized = vi.fn();
+    onSessionDoubt(doubt);
+    onUnauthorized(unauthorized);
+    await expect(api.get('/users')).rejects.toMatchObject({ status: 403 });
+    expect(doubt).toHaveBeenCalledTimes(1);
+    expect(unauthorized).not.toHaveBeenCalled();
+  });
+});
+
+describe('time limit', () => {
+  const hang = () => new Promise<never>(() => {});
+
+  it('gives up a GET after 15 s with the code network and aborts the request', async () => {
+    vi.useFakeTimers();
+    mock = mockFetch({ 'GET /status': hang });
+    let failure: unknown;
+    void api.get('/status').catch((e: unknown) => {
+      failure = e;
+    });
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(failure).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure).toMatchObject({ status: 0, code: 'network' });
+    expect(mock.requests[0]?.init.signal?.aborted).toBe(true);
+  });
+
+  it('gives up a probe after 15 s', async () => {
+    vi.useFakeTimers();
+    mock = mockFetch({ 'GET /session': hang });
+    let failure: unknown;
+    void api.probe('/session').catch((e: unknown) => {
+      failure = e;
+    });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failure).toMatchObject({ status: 0, code: 'network' });
+  });
+
+  it('gives a send 30 s', async () => {
+    vi.useFakeTimers();
+    mock = mockFetch({ 'POST /thing': hang });
+    let failure: unknown;
+    void api.send('POST', '/thing').catch((e: unknown) => {
+      failure = e;
+    });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(failure).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(failure).toMatchObject({ status: 0, code: 'network' });
+  });
+
+  it('also limits an answer whose body never arrives', async () => {
+    vi.useFakeTimers();
+    mock = mockFetch();
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: hang } as unknown as Response),
+    );
+    let failure: unknown;
+    void api.get('/status').catch((e: unknown) => {
+      failure = e;
+    });
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failure).toMatchObject({ status: 0, code: 'network' });
+  });
+
+  it("still follows the caller's abort signal", async () => {
+    mock = mockFetch({ 'GET /status': hang });
+    const controller = new AbortController();
+    const result = api.get('/status', undefined, controller.signal).catch((e: unknown) => e);
+    await vi.waitFor(() => {
+      expect(mock.requests).toHaveLength(1);
+    });
+    controller.abort();
+    await expect(result).resolves.toMatchObject({ status: 0, code: 'network' });
+    expect(mock.requests[0]?.init.signal?.aborted).toBe(true);
+  });
+});
+
+describe('server date', () => {
+  it('gives the Date header of the answer with the data', async () => {
+    mock = mockFetch({
+      'GET /status': { json: { ok: 1 }, headers: { Date: 'Tue, 17 Nov 2026 13:30:00 GMT' } },
+    });
+    const answer = await api.getDated<{ ok: number }>('/status');
+    expect(answer.data).toEqual({ ok: 1 });
+    expect(answer.serverDate?.toISOString()).toBe('2026-11-17T13:30:00.000Z');
+  });
+
+  it('gives no date when the header is missing or not a date', async () => {
+    mock = mockFetch({ 'GET /status': [{ json: {} }, { json: {}, headers: { Date: 'soon' } }] });
+    expect((await api.getDated('/status')).serverDate).toBeUndefined();
+    expect((await api.getDated('/status')).serverDate).toBeUndefined();
   });
 });

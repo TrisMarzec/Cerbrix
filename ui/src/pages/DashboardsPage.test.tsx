@@ -3,6 +3,7 @@ import { fireEvent, render, screen, within } from '@testing-library/preact';
 import { dashboardFixture, displayFixture } from '../test/fixtures';
 import { mockFetch, type FetchMock } from '../test/mockFetch';
 import { advance } from '../test/timers';
+import { expectStaleAbove, staleNotes } from '../test/stale';
 import { DashboardsPage } from './DashboardsPage';
 
 let mock: FetchMock;
@@ -451,5 +452,26 @@ describe('wall displays', () => {
       'GET /displays': { json: { items: [displayFixture({ target: 'b', causes: [] })] } },
     });
     expect(screen.getByText('Showing Kunde B because of an alarm')).toBeInTheDocument();
+  });
+});
+
+describe('dashboards that are not up to date', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 10, 17, 14, 30, 0));
+  });
+
+  it('says since when each list is old when its later poll fails', async () => {
+    await open({
+      'GET /dashboards': [{ json: { items: [dashboardFixture()] } }, 'network'],
+      'GET /displays': [{ json: { items: [displayFixture()] } }, { json: { items: [displayFixture()] } }, 'network'],
+    });
+    expect(staleNotes()).toHaveLength(0);
+    await advance(10_000);
+    expect(staleNotes()).toHaveLength(1);
+    expectStaleAbove(screen.getByRole('table', { name: 'Dashboards' }), '14:30');
+    await advance(10_000);
+    expect(staleNotes()).toHaveLength(2);
+    expectStaleAbove(screen.getByRole('table', { name: 'Wall displays' }), '14:30');
   });
 });

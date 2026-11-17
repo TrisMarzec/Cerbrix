@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { api } from '../api/client';
 import type { Status } from '../api/types';
+import { Banner } from '../components/Banner';
+import { roleWord } from '../lib/format';
 import { Link, navigate, useRoute } from '../lib/router';
 import { usePolled } from '../lib/poll';
 import { useSession } from '../session';
@@ -28,6 +30,7 @@ export function Shell() {
   const [now, setNow] = useState(() => new Date());
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [notice, setNotice] = useState<string>();
+  const [logoutFailed, setLogoutFailed] = useState(false);
   const main = useRef<HTMLElement>(null);
   const shownPath = useRef(path);
 
@@ -50,10 +53,12 @@ export function Shell() {
     document.title = `${page.title} · Cerbrix`;
   }, [page.title]);
 
-  // After a navigation, keyboard and screen-reader users land on the new page.
+  // After a navigation, keyboard and screen-reader users land on the new page; an old warning about
+  // a failed logout is gone.
   useEffect(() => {
     if (shownPath.current !== path) {
       shownPath.current = path;
+      setLogoutFailed(false);
       main.current?.focus();
     }
   }, [path]);
@@ -100,9 +105,7 @@ export function Shell() {
                 </Link>
               ))}
             <div class="who">
-              <p>
-                {user.name}, {user.role}
-              </p>
+              <p>{`${user.name} · ${roleWord(user.role)}`}</p>
               <button
                 type="button"
                 class="nav-action"
@@ -116,7 +119,10 @@ export function Shell() {
                 type="button"
                 class="nav-action"
                 onClick={() => {
-                  void logout();
+                  setLogoutFailed(false);
+                  void logout().then((out) => {
+                    if (!out) setLogoutFailed(true);
+                  });
                 }}
               >
                 Log out
@@ -126,6 +132,11 @@ export function Shell() {
           </nav>
           <div class="content">
             <TopBar />
+            {logoutFailed && (
+              <Banner kind="warning">
+                Could not log out: the server did not answer. You are still logged in.
+              </Banner>
+            )}
             <main id="main" tabIndex={-1} ref={main}>
               {page.element}
             </main>

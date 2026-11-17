@@ -23,7 +23,7 @@ afterEach(() => {
 
 type Loader = (signal: AbortSignal) => Promise<string>;
 
-function Probe({ load, dep = 0, every }: { load: Loader; dep?: number; every?: number }) {
+function Probe({ load, dep = 0, every }: { load: Loader; dep?: number; every?: number | 'once' }) {
   const { data, error, staleSince, pending, reload } = usePolled(load, [dep], every);
   return (
     <>
@@ -122,6 +122,21 @@ describe('usePolled', () => {
     expect(screen.getByText('data=again')).toBeInTheDocument();
     expect(screen.getByText('error=-')).toBeInTheDocument();
     expect(screen.getByText('stale=-')).toBeInTheDocument();
+  });
+
+  it('drops the data on a 403, also on a later poll', async () => {
+    const forbidden = new ApiError(403, 'forbidden', 'no');
+    const load = vi.fn<Loader>().mockResolvedValueOnce('secret').mockRejectedValue(forbidden);
+    render(<Probe load={load} />);
+    await advance(0);
+    expect(screen.getByText('data=secret')).toBeInTheDocument();
+    await advance(10000);
+    expect(screen.getByText('data=-')).toBeInTheDocument();
+    expect(screen.getByText('error=forbidden')).toBeInTheDocument();
+    // It keeps asking: the role may be given back.
+    await advance(10000);
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('data=-')).toBeInTheDocument();
   });
 
   it('does not put a 401 into error', async () => {
@@ -301,5 +316,68 @@ describe('usePolled pending', () => {
     expect(screen.getByText('pending=false')).toBeInTheDocument();
     expect(screen.getByText('data=-')).toBeInTheDocument();
     expect(screen.getByText('error=not_found')).toBeInTheDocument();
+  });
+});
+
+describe('usePolled once', () => {
+  it('loads once and never again by itself', async () => {
+    const load = vi.fn<Loader>().mockResolvedValue('list');
+    render(<Probe load={load} every="once" />);
+    await advance(0);
+    expect(screen.getByText('data=list')).toBeInTheDocument();
+    await advance(3_600_000);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads again on reload', async () => {
+    const load = vi.fn<Loader>().mockResolvedValueOnce('one').mockResolvedValue('two');
+    render(<Probe load={load} every="once" />);
+    await advance(0);
+    await act(async () => {
+      screen.getByText('reload').click();
+    });
+    await advance(0);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('data=two')).toBeInTheDocument();
+    await advance(60_000);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries once when the tab becomes visible, only after a failure', async () => {
+    const load = vi
+      .fn<Loader>()
+      .mockRejectedValueOnce(new ApiError(0, 'network', 'down'))
+      .mockResolvedValue('list');
+    render(<Probe load={load} every="once" />);
+    await advance(0);
+    expect(screen.getByText('error=network')).toBeInTheDocument();
+    await advance(60_000);
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      setHidden(true);
+      setHidden(false);
+    });
+    await advance(0);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('data=list')).toBeInTheDocument();
+    await act(async () => {
+      setHidden(true);
+      setHidden(false);
+    });
+    await advance(0);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not load while hidden and loads when it becomes visible', async () => {
+    hidden = true;
+    const load = vi.fn<Loader>().mockResolvedValue('list');
+    render(<Probe load={load} every="once" />);
+    await advance(0);
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => {
+      setHidden(false);
+    });
+    await advance(0);
+    expect(load).toHaveBeenCalledTimes(1);
   });
 });

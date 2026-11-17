@@ -74,7 +74,7 @@ describe('navigation', () => {
 
   it('shows the user name and role', async () => {
     await open('/hosts', 'operator', { json: statusFixture() });
-    expect(screen.getByText('anna, operator')).toBeInTheDocument();
+    expect(screen.getByText('anna · Operator')).toBeInTheDocument();
   });
 
   it('moves focus to the main region and sets the title on navigation', async () => {
@@ -266,5 +266,118 @@ describe('top bar', () => {
     expect(screen.getByText(/No connection to the server since/)).toHaveTextContent(
       'No connection to the server since 14:30',
     );
+  });
+});
+
+const BOB_USER = {
+  id: 'id-bob',
+  name: 'bob',
+  role: 'viewer' as const,
+  disabled: false,
+  created_at: new Date(2026, 10, 16, 21, 54).toISOString(),
+  password_changed_at: new Date(2026, 10, 17, 12, 0).toISOString(),
+};
+
+describe('time limit of the status poll', () => {
+  it('shows the connection banner for a status poll that never answers, and keeps polling', async () => {
+    await open('/hosts', 'viewer', [{ json: statusFixture() }, () => new Promise(() => {}), { json: statusFixture() }]);
+    await advance(10_000);
+    expect(mock.count('GET /status')).toBe(2);
+    expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
+    await advance(15_000);
+    expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
+    await advance(10_000);
+    expect(mock.count('GET /status')).toBe(3);
+    expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
+  });
+});
+
+describe('log out', () => {
+  const WARNING = 'Could not log out: the server did not answer. You are still logged in.';
+
+  it.each([
+    ['a network failure', 'network' as const],
+    ['a 500', { status: 500, json: { error: 'internal', message: 'boom' } }],
+  ])('stays in the shell with a warning after %s, until the next navigation', async (_what, answer) => {
+    await open('/hosts', 'viewer', { json: statusFixture() });
+    mock.on('DELETE /session', answer);
+    screen.getByRole('button', { name: 'Log out' }).click();
+    await advance(0);
+    expect(screen.getByRole('alert')).toHaveTextContent(WARNING);
+    expect(screen.getByRole('heading', { level: 1, name: 'Hosts' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/hosts');
+    screen.getByRole('link', { name: 'Dashboards' }).click();
+    await advance(0);
+    expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
+  });
+
+  it('shows the warning for a logout that never answers, after the time limit', async () => {
+    await open('/hosts', 'viewer', { json: statusFixture() });
+    mock.on('DELETE /session', () => new Promise(() => {}));
+    screen.getByRole('button', { name: 'Log out' }).click();
+    await advance(30_000);
+    expect(screen.getByText(WARNING)).toBeInTheDocument();
+  });
+
+  it('shows the login page for 204', async () => {
+    await open('/hosts', 'viewer', { json: statusFixture() });
+    mock.on('DELETE /session', { status: 204 });
+    screen.getByRole('button', { name: 'Log out' }).click();
+    await advance(0);
+    expect(screen.getByLabelText('User name')).toBeInTheDocument();
+    expect(screen.queryByText(WARNING)).not.toBeInTheDocument();
+  });
+});
+
+describe('another user behind the cookie', () => {
+  it('leaves nothing of the old user on screen after a 403 when /session names someone else', async () => {
+    await open('/administration', 'admin', { json: statusFixture() });
+    mock.on('GET /users', [
+      { json: { items: [BOB_USER], total: 1 } },
+      { status: 403, json: { error: 'forbidden', message: 'admin only' } },
+    ]);
+    screen.getByRole('link', { name: 'Hosts' }).click();
+    await advance(0);
+    screen.getByRole('link', { name: 'Administration' }).click();
+    await advance(0);
+    await advance(0);
+    expect(screen.getByRole('table', { name: 'Users' })).toBeInTheDocument();
+    mock.on('GET /session', { json: { name: 'bert', role: 'viewer' } });
+    await advance(10_000);
+    await advance(0);
+    expect(screen.queryByRole('table', { name: 'Users' })).not.toBeInTheDocument();
+    expect(screen.queryByText('bob')).not.toBeInTheDocument();
+    expect(screen.getByText('Not allowed for your role')).toBeInTheDocument();
+    expect(screen.getByText('bert · Viewer')).toBeInTheDocument();
+    expect(screen.queryByText(/anna/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Administration' })).not.toBeInTheDocument();
+    expect(window.location.pathname).toBe('/administration');
+  });
+
+  it('keeps the page as it is when the tab becomes visible and the user is the same', async () => {
+    await open('/hosts', 'viewer', { json: statusFixture() });
+    const input = screen.getByRole('searchbox', { name: 'Search' });
+    input.focus();
+    (input as HTMLInputElement).value = 'db';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const before = mock.count('GET /session');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await advance(0);
+    expect(mock.count('GET /session')).toBe(before + 1);
+    expect(screen.getByRole('searchbox', { name: 'Search' })).toHaveValue('db');
+  });
+});
+
+describe('the note of a page and the banner of the shell', () => {
+  it('shows the page note only while the status poll works', async () => {
+    await open('/hosts', 'viewer', { json: statusFixture() });
+    mock.on('GET /hosts', 'network');
+    await advance(10_000);
+    expect(screen.getByText(/^Not updated since/)).toHaveTextContent('Not updated since 14:30');
+    expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
+    mock.on('GET /status', 'network');
+    await advance(10_000);
+    expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Not updated since/)).not.toBeInTheDocument();
   });
 });

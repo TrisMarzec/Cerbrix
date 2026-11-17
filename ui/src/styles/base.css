@@ -146,6 +146,13 @@ textarea {
   padding: 18px 4px;
 }
 
+/* "Not updated since …" above a region whose own poll fails while the shell's status poll works. */
+.stale-note {
+  color: var(--dim);
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
 .pager {
   display: flex;
   align-items: center;

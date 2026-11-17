@@ -13,6 +13,7 @@ import {
 } from '../test/fixtures';
 import { mockFetch, type FetchMock, type Responder } from '../test/mockFetch';
 import { advance } from '../test/timers';
+import { expectStaleAbove, staleNotes } from '../test/stale';
 import { ConfigurationPage } from './ConfigurationPage';
 
 let mock: FetchMock;
@@ -762,5 +763,28 @@ describe('display tokens', () => {
     await u.click(within(dialog()).getByRole('button', { name: 'Revoke token' }));
     await advance(0);
     expect(within(dialog()).getByRole('alert')).toHaveTextContent('Your role may not do this.');
+  });
+});
+
+describe('sections that are not up to date', () => {
+  it('says since when each section is old when its later poll fails', async () => {
+    await open({
+      role: 'admin',
+      routes: {
+        'GET /sync/history': [{ json: { items: [syncEntryFixture()], total: 1 } }, 'network'],
+        'GET /unknown-agents': [
+          { json: { items: [{ host_name: 'stray', first_seen: NOW.toISOString(), last_seen: NOW.toISOString(), attempts: 2 }] } },
+          'network',
+        ],
+        'GET /enrollment-keys': [{ json: { items: [keyFixture()] } }, 'network'],
+        'GET /displays': [{ json: { items: [displayFixture()] } }, 'network'],
+      },
+    });
+    expect(staleNotes()).toHaveLength(0);
+    await advance(10_000);
+    expect(staleNotes()).toHaveLength(4);
+    for (const name of ['Sync history', 'Unknown agents', 'Enrolment keys', 'Display tokens']) {
+      expectStaleAbove(screen.getByRole('table', { name }), '14:30');
+    }
   });
 });

@@ -11,6 +11,7 @@ import {
 } from '../test/fixtures';
 import { mockFetch, type FetchMock, type Responder } from '../test/mockFetch';
 import { advance } from '../test/timers';
+import { expectStaleAbove, staleNotes } from '../test/stale';
 import { HostsPage } from './HostsPage';
 
 let mock: FetchMock;
@@ -597,5 +598,14 @@ describe('other details', () => {
     await advance(30_000);
     expect(hostRequests().length).toBeGreaterThan(1);
     expect(mock.count('GET /host-groups')).toBe(1);
+  });
+});
+
+describe('hosts that are not up to date', () => {
+  it('says since when the list is old when a later poll fails', async () => {
+    await open('/hosts', [hostsAnswer([hostRowFixture()]), 'network']);
+    expect(staleNotes()).toHaveLength(0);
+    await advance(10_000);
+    expectStaleAbove(screen.getByRole('table', { name: 'Hosts' }), '14:30');
   });
 });

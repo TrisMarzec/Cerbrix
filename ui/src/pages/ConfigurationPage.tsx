@@ -21,6 +21,7 @@ import { Dialog } from '../components/Dialog';
 import { Empty } from '../components/Empty';
 import { Pager } from '../components/Pager';
 import { SecretDialog } from '../components/SecretDialog';
+import { StaleNote } from '../components/StaleNote';
 import { TimeText } from '../components/TimeText';
 import { usePolled } from '../lib/poll';
 import { useQueryState } from '../lib/query';
@@ -377,6 +378,7 @@ function HistorySection({ now }: { now: Date }) {
           class={history.pending ? 'config-result is-busy' : 'config-result'}
           aria-busy={history.pending}
         >
+          <StaleNote of={history} />
           {answer.total === 0 ? (
             !history.pending && <Empty>No revision has been applied yet.</Empty>
           ) : beyond ? null : (
@@ -432,6 +434,7 @@ function UnknownAgentsSection({ now }: { now: Date }) {
       {answer !== undefined && (
         <>
           <p class="config-note">Agents that tried to enrol under a name that is not a registered host.</p>
+          <StaleNote of={agents} />
           {answer.items.length === 0 ? (
             <Empty>No unknown agents.</Empty>
           ) : (
@@ -601,6 +604,7 @@ function KeysSection({ now, onSecret, track, locked }: SecretSectionProps) {
       {keys.error !== undefined && answer === undefined && (
         <LoadFailed what="the enrolment keys" onRetry={keys.reload} />
       )}
+      <StaleNote of={keys} />
       {answer !== undefined && (
         <div class="config-toolbar">
           <button
@@ -760,6 +764,7 @@ function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
       {displays.error !== undefined && answer === undefined && (
         <LoadFailed what="the displays" onRetry={displays.reload} />
       )}
+      <StaleNote of={displays} />
       {answer !== undefined &&
         (answer.items.length === 0 ? (
           <Empty>No wall displays configured.</Empty>

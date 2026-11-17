@@ -18,6 +18,7 @@ import { CloseDialog } from '../components/CloseDialog';
 import { Dialog } from '../components/Dialog';
 import { Empty } from '../components/Empty';
 import { ProblemRow } from '../components/ProblemRow';
+import { StaleNote } from '../components/StaleNote';
 import { age, clock, severityWord, value } from '../lib/format';
 import { usePolled } from '../lib/poll';
 import { useQueryState } from '../lib/query';
@@ -266,6 +267,7 @@ export function HostPage({ name }: { name: string }) {
     <>
       <h1>{name}</h1>
       {released && <Banner kind="info">Agent binding released.</Banner>}
+      <StaleNote of={detail} />
       <Head host={host} problems={openProblems} now={now} />
       <div class="host-tools">
         <Link href={`/problems?state=resolved&host=${encodeURIComponent(name)}`}>
@@ -383,6 +385,7 @@ export function HostPage({ name }: { name: string }) {
         <div class="host-right">
           <section>
             <h2>Current values</h2>
+            <StaleNote of={values} />
             {values.data?.metrics_available === false ? (
               <Empty>Current values are not available right now.</Empty>
             ) : values.data === undefined ? (

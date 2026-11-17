@@ -4,7 +4,7 @@ import { api, seg } from '../api/client';
 import type { HostItem, HostValue, Series } from '../api/types';
 import { Banner } from '../components/Banner';
 import { Graph } from '../components/Graph';
-import { clock } from '../lib/format';
+import { StaleNote } from '../components/StaleNote';
 import { usePolled } from '../lib/poll';
 
 export type Range = '1h' | '6h' | '24h' | '7d';
@@ -139,6 +139,7 @@ function LoadedGraph({ host, spec, range, now, valuesHaveKey }: LoadedProps) {
   }
   return (
     <div class={series.pending ? 'graph-busy is-busy' : 'graph-busy'} aria-busy={series.pending}>
+      <StaleNote of={series} />
       <Graph
         points={answer.points}
         thresholds={answer.thresholds}
@@ -147,9 +148,6 @@ function LoadedGraph({ host, spec, range, now, valuesHaveKey }: LoadedProps) {
         now={now}
         label={`${spec.title} over the last ${RANGE_WORDS[range]}`}
       />
-      {series.staleSince !== undefined && (
-        <p class="graph-stale dim">{`Not updated since ${clock(series.staleSince.toISOString(), now)}`}</p>
-      )}
     </div>
   );
 }

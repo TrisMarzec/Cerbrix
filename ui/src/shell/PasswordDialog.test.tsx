@@ -1,7 +1,7 @@
-import { render, screen } from '@testing-library/preact';
+import { fireEvent, render, screen } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
 
-import { mockFetch, type FetchMock } from '../test/mockFetch';
+import { mockFetch, type Answer, type FetchMock } from '../test/mockFetch';
 import { PasswordDialog } from './PasswordDialog';
 
 let mock: FetchMock;
@@ -77,6 +77,32 @@ describe('PasswordDialog', () => {
     const user = userEvent.setup();
     render(<PasswordDialog onClose={onClose} onChanged={() => {}} />);
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PasswordDialog while the request runs', () => {
+  it('cannot be dismissed until the answer arrives', async () => {
+    let finish: (a: Answer) => void = () => {};
+    mock = mockFetch({
+      'PUT /session/password': () =>
+        new Promise<Answer>((resolve) => {
+          finish = resolve;
+        }),
+    });
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(<PasswordDialog onClose={onClose} onChanged={() => {}} />);
+    await fill(user, {});
+    await user.click(screen.getByRole('button', { name: 'Change password' }));
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    await user.keyboard('{Escape}');
+    const backdrop = screen.getByRole('dialog').parentElement as HTMLElement;
+    fireEvent.mouseDown(backdrop);
+    expect(onClose).not.toHaveBeenCalled();
+    finish({ status: 500, json: { error: 'internal', message: 'The server failed.' } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('The server failed.');
+    await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
