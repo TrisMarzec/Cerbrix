@@ -1,10 +1,11 @@
 // Fails the build when the bundle is over budget or index.html needs a policy exception.
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
-const dist = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+// The directory to check is the first argument (default: dist next to this script's parent).
+const dist = resolve(process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'dist'));
 const assets = join(dist, 'assets');
 const BUDGET = { '.js': 150 * 1000, '.css': 30 * 1000 };
 
@@ -28,15 +29,20 @@ for (const [ext, size] of Object.entries(totals)) {
 
 const html = readFileSync(join(dist, 'index.html'), 'utf8');
 if (/<script(?![^>]*\ssrc=)[^>]*>/i.test(html)) {
-  console.error('dist/index.html contains an inline <script>');
+  console.error(`${dist}/index.html contains an inline <script>`);
   failed = true;
 }
 if (/<style[\s>]/i.test(html)) {
-  console.error('dist/index.html contains a <style> element');
+  console.error(`${dist}/index.html contains a <style> element`);
   failed = true;
 }
 if (/\sstyle\s*=/i.test(html)) {
-  console.error('dist/index.html contains a style attribute');
+  console.error(`${dist}/index.html contains a style attribute`);
+  failed = true;
+}
+// An inline event handler (onclick=...) is script and would need 'unsafe-inline' like a script element.
+if (/<[^>]*\son[a-z]+\s*=/i.test(html)) {
+  console.error(`${dist}/index.html contains an inline event-handler attribute`);
   failed = true;
 }
 process.exit(failed ? 1 : 0);

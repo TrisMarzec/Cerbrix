@@ -1,7 +1,7 @@
 // Writes dist/licenses.txt: the licence text of every production dependency in the
 // lockfile's tree. Fails on a missing licence file or a licence outside the allow-list.
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -68,9 +68,11 @@ const rule = '\n\n' + '-'.repeat(72) + '\n\n';
 const header =
   'Cerbrix is licensed under the Apache License 2.0.\n' +
   'The web UI bundles the following third-party packages under their own licences.';
-const out = join(root, 'dist', 'licenses.txt');
+// The directory that receives licenses.txt is the first argument (default: dist).
+const target = resolvePath(process.argv[2] ?? join(root, 'dist'));
+const out = join(target, 'licenses.txt');
 if (!existsSync(dirname(out))) {
-  console.error('dist/ does not exist: run vite build first');
+  console.error(`${target} does not exist: run vite build first`);
   process.exit(1);
 }
 writeFileSync(out, `${header}${rule}${sections.join(rule)}\n`);
