@@ -34,15 +34,13 @@ function squareTitle(kind: SquareClass): string {
 function HostStrip({ dashboard }: { dashboard: DashboardSummary }) {
   const counts = dashboard.hosts_by_state;
   const squares: SquareClass[] = [];
-  let total = 0;
   let withProblems = 0;
   for (const kind of SQUARE_ORDER) {
     const n = Math.max(0, counts[kind]);
-    total += n;
     if (kind !== 'ok') withProblems += n;
     for (let i = 0; i < n && squares.length < MAX_SQUARES; i += 1) squares.push(kind);
   }
-  const left = total - squares.length;
+  const left = Math.max(0, dashboard.host_count - squares.length);
   const hosts = `${dashboard.host_count} ${dashboard.host_count === 1 ? 'host' : 'hosts'}`;
   const problems =
     withProblems === 0
@@ -89,12 +87,14 @@ function ProblemsInWords({ dashboard }: { dashboard: DashboardSummary }) {
   );
 }
 
-/** "30s" → "30 s", "5m" → "5 min", "1h" → "1 h"; anything else as given. */
+const UNIT_WORDS: Record<string, string> = { s: 's', m: 'min', h: 'h', d: 'd' };
+
+/** "90s" → "90 s", "1m30s" → "1 min 30 s", "1d" → "1 d"; anything else as given. */
 function every(text: string): string {
-  const m = /^(\d+)([smh])$/.exec(text);
-  if (m === null) return text;
-  const unit = m[2] === 's' ? 's' : m[2] === 'm' ? 'min' : 'h';
-  return `${m[1] ?? ''} ${unit}`;
+  if (!/^(\d+[smhd])+$/.test(text)) return text;
+  return [...text.matchAll(/(\d+)([smhd])/g)]
+    .map((m) => `${m[1] ?? ''} ${UNIT_WORDS[m[2] ?? ''] ?? ''}`)
+    .join(' ');
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -146,10 +146,9 @@ function settingSentence(display: Display, nameOf: (id: string) => string): stri
     'dashboard' in show
       ? `Shows ${nameOf(show.dashboard)}`
       : `Rotates through ${plural(show.rotate.length, 'dashboard', 'dashboards')} every ${every(show.every)}`;
-  text +=
-    display.switch_on_alarm === null
-      ? ', never switches'
-      : `, switches on alarms from ${severityWord(display.switch_on_alarm.min_severity)}`;
+  if (display.switch_on_alarm === null) return `${text}, never switches`;
+  text += `, switches on alarms from ${severityWord(display.switch_on_alarm.min_severity)}`;
+  // The list of dashboards only matters for switching.
   if (display.dashboards !== null) {
     text += ` (limited to ${plural(display.dashboards.length, 'dashboard', 'dashboards')})`;
   }
@@ -163,7 +162,7 @@ function NowShowing({ display, nameOf }: { display: Display; nameOf: (id: string
   return (
     <span class="display-now">
       <span class="state-text sev-critical">
-        {`Showing ${nameOf(display.target)} because of ${plural(display.causes.length, 'alarm', 'alarms')}`}
+        {`Showing ${nameOf(display.target)} because of ${display.causes.length === 0 ? 'an alarm' : plural(display.causes.length, 'alarm', 'alarms')}`}
       </span>
       {display.waiting.length > 0 && (
         <span class="dim">{`Waiting: ${display.waiting.map(nameOf).join(', ')}`}</span>
@@ -248,9 +247,11 @@ export function DashboardsPage() {
           {displays.data !== undefined &&
             (displays.data.items.length === 0 ? (
               <Empty>No wall displays configured.</Empty>
-            ) : (
+            ) : dashboards.data !== undefined ? (
               <DisplayTable items={displays.data.items} nameOf={nameOf} />
-            ))}
+            ) : dashboardsFailed ? (
+              <Empty>Wall displays are shown once the dashboards could be loaded.</Empty>
+            ) : null)}
         </section>
       )}
     </>

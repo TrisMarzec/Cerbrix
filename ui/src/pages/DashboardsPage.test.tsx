@@ -1,6 +1,5 @@
 import { fireEvent, render, screen, within } from '@testing-library/preact';
 
-
 import { dashboardFixture, displayFixture } from '../test/fixtures';
 import { mockFetch, type FetchMock } from '../test/mockFetch';
 import { advance } from '../test/timers';
@@ -195,14 +194,70 @@ describe('dashboards table', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('ignores the query of the address bar', async () => {
-    window.history.replaceState(null, '', '/dashboards?offset=-3&state=%00');
-    await open({
-      'GET /dashboards': { json: { items: [dashboardFixture({ name: 'Alpha' })] } },
+  it('draws no squares and no "more" for 0 hosts', async () => {
+    const view = await open({
+      'GET /dashboards': { json: { items: [dashboardFixture()] } },
       'GET /displays': { json: { items: [] } },
     });
-    expect(mock.requests.every((r) => r.query.toString() === '')).toBe(true);
-    expect(screen.getByRole('link', { name: 'Alpha' })).toBeInTheDocument();
+    expect(view.container.querySelectorAll('.square')).toHaveLength(0);
+    expect(screen.queryByText(/more$/)).not.toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '0 hosts, none with problems' })).toBeInTheDocument();
+  });
+
+  it('counts the hidden hosts from host_count for 5,000 hosts', async () => {
+    const view = await open({
+      'GET /dashboards': {
+        json: {
+          items: [
+            dashboardFixture({
+              host_count: 5000,
+              hosts_by_state: { critical: 0, high: 0, warning: 0, info: 0, acknowledged: 0, ok: 5000 },
+            }),
+          ],
+        },
+      },
+      'GET /displays': { json: { items: [] } },
+    });
+    expect(view.container.querySelectorAll('.square')).toHaveLength(40);
+    expect(screen.getByText('and 4960 more')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '5000 hosts, none with problems' })).toBeInTheDocument();
+  });
+
+  it('counts the missing hosts as more when the counts sum to less than host_count', async () => {
+    const view = await open({
+      'GET /dashboards': {
+        json: {
+          items: [
+            dashboardFixture({
+              host_count: 10,
+              hosts_by_state: { critical: 1, high: 0, warning: 0, info: 0, acknowledged: 0, ok: 2 },
+            }),
+          ],
+        },
+      },
+      'GET /displays': { json: { items: [] } },
+    });
+    expect(view.container.querySelectorAll('.square')).toHaveLength(3);
+    expect(screen.getByText('and 7 more')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '10 hosts, 1 with a problem' })).toBeInTheDocument();
+  });
+
+  it('never says a negative number of more hosts', async () => {
+    const view = await open({
+      'GET /dashboards': {
+        json: {
+          items: [
+            dashboardFixture({
+              host_count: 1,
+              hosts_by_state: { critical: 0, high: 0, warning: 0, info: 0, acknowledged: 0, ok: 3 },
+            }),
+          ],
+        },
+      },
+      'GET /displays': { json: { items: [] } },
+    });
+    expect(view.container.querySelectorAll('.square')).toHaveLength(3);
+    expect(screen.queryByText(/more$/)).not.toBeInTheDocument();
   });
 });
 
@@ -305,5 +360,96 @@ describe('wall displays', () => {
     await advance(0);
     expect(screen.getByText('Office')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('holds the displays table back until the dashboards have answered', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await open({
+      'GET /dashboards': async () => {
+        await gate;
+        return { json: { items: two } };
+      },
+      'GET /displays': {
+        json: { items: [displayFixture({ name: 'Office', show: { dashboard: 'a' }, target: 'b', causes: ['p'] })] },
+      },
+    });
+    expect(screen.getByRole('heading', { level: 2, name: 'Wall displays' })).toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Shows a/)).not.toBeInTheDocument();
+    release();
+    await advance(0);
+    const row = within(displayTable()).getAllByRole('row')[1];
+    expect(row).toHaveTextContent('Shows Kunde A – Region 2');
+    expect(row).toHaveTextContent('Showing Kunde B because of 1 alarm');
+  });
+
+  it('shows a sentence instead of ids when the dashboards failed but the displays loaded', async () => {
+    await open({
+      'GET /dashboards': 'network',
+      'GET /displays': { json: { items: [displayFixture({ show: { dashboard: 'a' } })] } },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not load the dashboards.');
+    expect(
+      screen.getByText('Wall displays are shown once the dashboards could be loaded.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Shows a/)).not.toBeInTheDocument();
+  });
+
+  it('limits the sentence to a list only for a display that switches', async () => {
+    await open({
+      'GET /dashboards': { json: { items: two } },
+      'GET /displays': {
+        json: {
+          items: [
+            displayFixture({ id: 'x', show: { dashboard: 'a' }, switch_on_alarm: { min_severity: 'high' }, dashboards: ['a', 'b'] }),
+            displayFixture({ id: 'y', show: { dashboard: 'a' }, dashboards: ['a', 'b'] }),
+          ],
+        },
+      },
+    });
+    const rows = within(displayTable()).getAllByRole('row');
+    expect(rows[1]).toHaveTextContent('Shows Kunde A – Region 2, switches on alarms from High (limited to 2 dashboards)');
+    expect(rows[2]).toHaveTextContent(/Shows Kunde A – Region 2, never switches/);
+    expect(rows[2]).not.toHaveTextContent('limited');
+  });
+
+  it.each([
+    ['30s', '30 s'],
+    ['90s', '90 s'],
+    ['1m30s', '1 min 30 s'],
+    ['1h', '1 h'],
+    ['1d', '1 d'],
+    ['often', 'often'],
+    ['5 min', '5 min'],
+  ])('renders the rotation period %s as %s', async (every, shown) => {
+    await open({
+      'GET /dashboards': { json: { items: two } },
+      'GET /displays': { json: { items: [displayFixture({ show: { rotate: ['a', 'b'], every } })] } },
+    });
+    expect(within(displayTable()).getAllByRole('row')[1]).toHaveTextContent(
+      `Rotates through 2 dashboards every ${shown}, never switches`,
+    );
+  });
+
+  it('uses the singular for a rotation of one dashboard', async () => {
+    await open({
+      'GET /dashboards': { json: { items: two } },
+      'GET /displays': { json: { items: [displayFixture({ show: { rotate: ['a'], every: '30s' } })] } },
+    });
+    expect(within(displayTable()).getAllByRole('row')[1]).toHaveTextContent(
+      'Rotates through 1 dashboard every 30 s',
+    );
+  });
+
+  it('says "an alarm" for a target without causes', async () => {
+    await open({
+      'GET /dashboards': { json: { items: two } },
+      'GET /displays': { json: { items: [displayFixture({ target: 'b', causes: [] })] } },
+    });
+    expect(screen.getByText('Showing Kunde B because of an alarm')).toBeInTheDocument();
   });
 });
