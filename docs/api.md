@@ -1,6 +1,6 @@
 # The Cerbrix API
 
-The server has a JSON API under `/api/v1`. The web interface uses it, and so can scripts. This
+The server has a JSON API under `/api/v1`. The web UI, which the server serves at `/` (see [The web UI](web-ui.md)), uses it, and so can scripts. This
 page describes every route. For how to set up logins see [Installing the server](install.md#3-first-login).
 
 The examples were taken from a real run of the end-to-end check (`scripts/e2e.sh`) against a

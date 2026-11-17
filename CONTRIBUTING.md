@@ -60,3 +60,28 @@ export DATABASE_URL=postgres://cerbrix:cerbrix@localhost:5432/cerbrix
 `cerbrix-e2e`, host ports 18443 and 18428, configurable with `CERBRIX_SERVER_PORT` and
 `CERBRIX_VM_PORT`), runs an agent against it and checks that values arrive. It does not touch
 the development databases and removes its stack when done.
+
+At its end the script runs the browser smoke run (below) in the Playwright Docker image, on the
+network of the stack. The first run pulls that image, which is large; `CERBRIX_E2E_SKIP_UI=1`
+skips the smoke run. `CERBRIX_UI_SMOKE_FAIL=1` makes it fail on purpose, to see how a failure
+is reported (the output is printed with tokens masked and the stack is still removed).
+
+## Browser smoke run
+
+`ui/e2e/smoke.spec.ts` is one Playwright test (Chromium) that logs in, visits every page,
+acknowledges a problem, creates a display token and logs out. It fails on any console error,
+failed request to the server, status 500 or higher and content security policy violation. It
+needs a running server in the state `scripts/e2e.sh` leaves before this step: an admin user,
+the dashboard `e2e`, the display `e2e-wall` and the open problem "Agent silent" of the host
+`e2e-host`. `npm run check` does not run it. By hand, in `ui/`:
+
+```sh
+npx playwright install chromium     # once
+export CERBRIX_UI_URL=http://127.0.0.1:18443
+export CERBRIX_UI_USER=e2e-admin
+export CERBRIX_UI_PASSWORD_FILE=/path/to/file-with-the-password
+npm run smoke
+```
+
+Against a stack that was kept with `CERBRIX_E2E_KEEP_STACK=1` the run is not repeatable: it
+acknowledges the problem, so the second run does not find it unacknowledged.

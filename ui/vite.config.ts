@@ -21,6 +21,8 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
+    // The browser smoke run in e2e/ needs a running server and is not part of `npm run check`.
+    include: ['src/**/*.test.{ts,tsx}'],
     setupFiles: ['src/test/setup.ts'],
   },
 });

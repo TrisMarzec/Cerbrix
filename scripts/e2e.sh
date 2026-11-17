@@ -23,6 +23,14 @@
 # and body are printed with tokens masked; the admin password and the display token are never
 # printed.
 #
+# Last, a smoke run in a real browser (Chromium, Playwright) walks through the web UI: login,
+# the pages, acknowledging the open problem, a display token, logout. It runs in the Playwright
+# Docker image (the version of @playwright/test in ui/package-lock.json) on the network of the
+# stack and talks to the server by its service name, so Docker is all it needs. The admin
+# password reaches it as a read-only file under this script's private work directory. On a
+# failure its output is printed with tokens masked. It leaves an acknowledged problem behind
+# and nothing else is checked afterwards.
+#
 # Environment variables (defaults in parentheses):
 #   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e)
 #   CERBRIX_SERVER_PORT       host port of the server (18443)
@@ -33,6 +41,9 @@
 #   CERBRIX_E2E_ALERT_TIMEOUT seconds to wait for a problem or an e-mail (120)
 #   CERBRIX_E2E_NODATA_TIMEOUT seconds to wait for the no-data problem after the agent stopped (240)
 #   CERBRIX_E2E_KEEP_STACK    set to 1 to leave the stack running (for debugging)
+#   CERBRIX_E2E_SKIP_UI       set to 1 to skip the browser smoke run (it pulls a large image)
+#   CERBRIX_UI_SMOKE_FAIL     set to 1 to make the smoke run fail on purpose, to see how a
+#                             failure is reported (passed on to the smoke run)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -518,6 +529,8 @@ ADMIN_OUTPUT=$(compose exec -T server cerbrix-server admin user create e2e-admin
 ADMIN_PASSWORD=$(printf '%s\n' "$ADMIN_OUTPUT" | tr -d '\r' | sed -n 's/^password: //p')
 unset ADMIN_OUTPUT
 [ -n "$ADMIN_PASSWORD" ] || fail "no password found in the output of admin user create"
+# Kept in a file (private work directory) for the browser smoke run at the end.
+(umask 077 && printf '%s' "$ADMIN_PASSWORD" >"$WORK/ui-password")
 login "$ADMIN_JAR" e2e-admin "$ADMIN_PASSWORD"
 unset ADMIN_PASSWORD
 expect_status 200
@@ -645,4 +658,56 @@ expect_status 401
 rm -f "$ADMIN_JAR" "$VIEWER_JAR" "$WORK/admin.cookies.old" "$WORK/display.header" "$WORK/api.body"
 LAST_REQUEST=""
 
-echo "e2e: OK: configuration from Git, values kept arriving, problems opened and resolved with their e-mails, acknowledgement, no-data problem after the agent stopped, no duplicate message, API walk-through (login, status, hosts, series, problems, dashboard, display token, access rules)"
+# --- The web UI in a browser ------------------------------------------------------------
+# Runs ui/e2e/smoke.spec.ts in the Playwright image of the version that package-lock.json
+# pins. The container joins the compose network and addresses the server by its service
+# name. ui/ is mounted read-only; the few files that are needed are copied to /tmp/smoke in
+# the container, where @playwright/test is installed at the pinned version (nothing else of
+# the UI's dependencies is needed). Only the admin's name and the file with its password
+# are handed over. MSYS_NO_PATHCONV keeps Git Bash from rewriting the container paths.
+run_ui_smoke() {
+    local version image network
+    version=$(awk '/"node_modules\/@playwright\/test": \{/ { f = 1 } f && /"version"/ { gsub(/[",]/, "", $2); print $2; exit }' ui/package-lock.json)
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "no @playwright/test version found in ui/package-lock.json"
+    image="mcr.microsoft.com/playwright:v$version-noble"
+    network="${PROJECT}_default"
+    docker network inspect "$network" >/dev/null 2>&1 || fail "the compose network $network does not exist"
+
+    echo "e2e: UI: browser smoke run with Playwright $version ($image)"
+    docker pull -q "$image" >/dev/null || fail "cannot pull $image"
+    # shellcheck disable=SC2016 # the variable is expanded by the shell in the container
+    local inner='set -eu
+mkdir -p /tmp/smoke/e2e
+cp /ui/playwright.config.ts /tmp/smoke/
+cp /ui/e2e/smoke.spec.ts /tmp/smoke/e2e/
+cd /tmp/smoke
+printf "{\"private\":true}\n" > package.json
+npm install --no-save --ignore-scripts --no-audit --no-fund --cache /tmp/npm-cache "@playwright/test@$PLAYWRIGHT_VERSION"
+npx playwright test'
+    if MSYS_NO_PATHCONV=1 docker run --rm --init --ipc=host --network "$network" \
+        -v "$(native_path "$ROOT/ui"):/ui:ro" \
+        -v "$(native_path "$WORK/ui-password"):/run/ui-password:ro" \
+        -e PLAYWRIGHT_VERSION="$version" \
+        -e CERBRIX_UI_URL="http://server:8443" \
+        -e CERBRIX_UI_USER=e2e-admin \
+        -e CERBRIX_UI_PASSWORD_FILE=/run/ui-password \
+        -e CERBRIX_UI_SMOKE_FAIL="${CERBRIX_UI_SMOKE_FAIL:-0}" \
+        -e CI=1 \
+        "$image" sh -c "$inner" >"$WORK/ui-smoke.log" 2>&1; then
+        mask_tokens <"$WORK/ui-smoke.log" >&2
+    else
+        echo "e2e: UI: output of the browser smoke run:" >&2
+        mask_tokens <"$WORK/ui-smoke.log" >&2
+        fail "the browser smoke run failed"
+    fi
+}
+
+if [ "${CERBRIX_E2E_SKIP_UI:-0}" = 1 ]; then
+    UI_NOTE="browser smoke run skipped"
+else
+    echo "e2e: the web UI in a browser"
+    run_ui_smoke
+    UI_NOTE="web UI smoke run in a browser (login, pages, acknowledge, display token, logout)"
+fi
+
+echo "e2e: OK: configuration from Git, values kept arriving, problems opened and resolved with their e-mails, acknowledgement, no-data problem after the agent stopped, no duplicate message, API walk-through (login, status, hosts, series, problems, dashboard, display token, access rules), $UI_NOTE"

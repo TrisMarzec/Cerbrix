@@ -47,7 +47,9 @@ curl http://127.0.0.1:8443/healthz
 
 ## 3. First login
 
-The web UI needs a user. Create the first one as an admin:
+The web UI is part of the server binary and of its Docker image: there is nothing more to install,
+and it is served at `/` of the server (for example `http://127.0.0.1:8443/`). It needs a user; see
+[The web UI](web-ui.md) for what you can do with it. Create the first one as an admin:
 
 ```sh
 docker compose exec server cerbrix-server admin user create t.marzec --role admin
@@ -85,6 +87,9 @@ the count. The login answer is the same for a wrong password, an unknown name an
 user. The [API reference](api.md) describes the login and the roles.
 
 ### Behind a reverse proxy
+
+Pass every path to the server, not only `/api`: the web UI is served at `/` and its pages, such as
+`/hosts` or `/problems`, are answered by the server too.
 
 The login and every request that changes something are checked against cross-site requests:
 when a browser sends an `Origin` header, its host and port must equal those of the `Host`
@@ -331,6 +336,14 @@ listens on port 443 and forwards to `127.0.0.1:8443`. Agents then use
 `https://your-server-name` as `server_url`. The same proxy can serve the web UI and the
 [API](api.md); it must pass the `Host` header unchanged and you must set
 `CERBRIX_AUTH__SECURE_COOKIE=true`, see [Behind a reverse proxy](#behind-a-reverse-proxy).
+
+## Building the server from source
+
+The Docker image builds everything. To build the server binary yourself with `cargo build --release`,
+the web UI must be built first, because the binary embeds it: install Node 22 or newer and run
+`npm ci && npm run build` in `ui/` before building the server. Without `ui/dist` the build still
+works, but the server then serves a placeholder page instead of the UI; `CERBRIX_REQUIRE_UI=1`
+makes a missing UI fail the build.
 
 ## Agent installation
 
