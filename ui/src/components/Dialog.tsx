@@ -12,16 +12,42 @@ interface Props {
   children: ComponentChildren;
 }
 
+interface Entry {
+  el: HTMLElement;
+  /** Where focus goes back on close; null: to the dialog then on top (or main). */
+  before: Element | null;
+}
+
 /** Open dialogs, innermost last. Only the innermost one handles keys and keeps focus. */
-const stack: object[] = [];
+const stack: Entry[] = [];
+
+/** Dialogs whose cleanup has run in this task: their elements are about to leave the page. */
+const closing = new Set<HTMLElement>();
 
 function focusables(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE));
 }
 
+function inClosing(node: Node): boolean {
+  for (const el of closing) if (el.contains(node)) return true;
+  return false;
+}
+
+/** An element focus can go back to: on the page, not the body, not inside a dialog that is closing. */
+function usable(node: Element | null): node is HTMLElement {
+  return node instanceof HTMLElement && node.isConnected && node !== document.body && !inClosing(node);
+}
+
 function restoreFocus(before: Element | null) {
-  if (before instanceof HTMLElement && before.isConnected) {
+  if (usable(before)) {
     before.focus();
+    return;
+  }
+  // Another dialog closing in the same commit may already have put focus where it belongs.
+  if (usable(document.activeElement)) return;
+  const top = [...stack].reverse().find((entry) => !inClosing(entry.el));
+  if (top !== undefined) {
+    (focusables(top.el)[0] ?? top.el).focus();
     return;
   }
   const main = document.querySelector<HTMLElement>('main');
@@ -38,12 +64,23 @@ export function Dialog({ title, onClose, closeOnBackdrop = true, children }: Pro
   close.current = onClose;
 
   useEffect(() => {
-    const token = {};
-    const before = document.activeElement;
     const el = dialog.current;
     if (el === null) return undefined;
-    stack.push(token);
-    (focusables(el)[0] ?? el).focus();
+    const token: Entry = { el, before: document.activeElement };
+    // A dialog nested in this one and mounted in the same commit ran its effect first: this one
+    // goes below it, takes over where focus was before both, and the nested one returns focus here.
+    const nested = stack.findIndex((entry) => el.contains(entry.el));
+    if (nested < 0) {
+      stack.push(token);
+      (focusables(el)[0] ?? el).focus();
+    } else {
+      const inner = stack[nested];
+      if (inner !== undefined) {
+        token.before = inner.before;
+        inner.before = null;
+      }
+      stack.splice(nested, 0, token);
+    }
 
     const isTop = () => stack[stack.length - 1] === token;
 
@@ -93,7 +130,11 @@ export function Dialog({ title, onClose, closeOnBackdrop = true, children }: Pro
       document.removeEventListener('keydown', onKeyDown);
       observer.disconnect();
       stack.splice(stack.indexOf(token), 1);
-      restoreFocus(before);
+      closing.add(el);
+      queueMicrotask(() => {
+        closing.delete(el);
+      });
+      restoreFocus(token.before);
     };
   }, []);
 

@@ -136,6 +136,70 @@ describe('Dialog focus', () => {
   });
 });
 
+describe('Dialog mounted together with a nested one', () => {
+  function Both({ outer = true, inner = true }: { outer?: boolean; inner?: boolean }) {
+    return (
+      <>
+        {outer && (
+          <Dialog title="Outer" onClose={() => {}}>
+            <button type="button">Outer button</button>
+            {inner && (
+              <Dialog title="Inner" onClose={() => {}}>
+                <button type="button">Inner button</button>
+              </Dialog>
+            )}
+          </Dialog>
+        )}
+      </>
+    );
+  }
+
+  it('puts the nested dialog on top: it has the focus and handles Escape', async () => {
+    const onOuter = vi.fn();
+    const onInner = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <Dialog title="Outer" onClose={onOuter}>
+        <button type="button">Outer button</button>
+        <Dialog title="Inner" onClose={onInner}>
+          <button type="button">Inner button</button>
+        </Dialog>
+      </Dialog>,
+    );
+    expect(screen.getByRole('button', { name: 'Inner button' })).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(onInner).toHaveBeenCalledTimes(1);
+    expect(onOuter).not.toHaveBeenCalled();
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Inner button' })).toHaveFocus();
+  });
+
+  it('leaves the focus on main, not on the body, when the outer one goes with the inner one open', async () => {
+    const main = document.createElement('main');
+    document.body.append(main);
+    const view = render(<Both />, { container: main });
+    expect(screen.getByRole('button', { name: 'Inner button' })).toHaveFocus();
+    view.rerender(<Both outer={false} />);
+    await waitFor(() => expect(main).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+    main.remove();
+  });
+
+  it('gives the focus back to the opener of the outer one when it is still there', async () => {
+    const main = document.createElement('main');
+    document.body.append(main);
+    const opener = document.createElement('button');
+    opener.textContent = 'Opener';
+    document.body.append(opener);
+    opener.focus();
+    const view = render(<Both />, { container: main });
+    view.rerender(<Both outer={false} />);
+    await waitFor(() => expect(opener).toHaveFocus());
+    opener.remove();
+    main.remove();
+  });
+});
+
 describe('Dialog', () => {
   it('is modal and labelled by its title', async () => {
     const user = userEvent.setup();

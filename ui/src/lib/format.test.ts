@@ -113,7 +113,7 @@ describe('value edge cases', () => {
   });
 
   it('rounds a percentage that reaches 100', () => {
-    expect(value('cpu.usage', 99.95)).toBe((99.95).toFixed(1) + ' %');
+    expect(value('cpu.usage', 99.95)).toBe('100.0 %');
     expect(value('memory.used_percent', 99.96)).toBe('100.0 %');
   });
 });
