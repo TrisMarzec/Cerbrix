@@ -14,21 +14,6 @@
   font-size: 14px;
 }
 
-.hosts-search {
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-}
-
-.hosts-search input {
-  width: 22em;
-  max-width: 100%;
-}
-
-.hosts-result.is-busy {
-  opacity: 0.6;
-}
-
 .hosts-table .cell-sev {
   padding: 0;
   width: 6px;
@@ -40,15 +25,6 @@
 
 .hosts-table tr.is-problem.is-acknowledged .cell-sev {
   opacity: 0.5;
-}
-
-.hosts-table .visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }
 
 .hosts-table .host-name,

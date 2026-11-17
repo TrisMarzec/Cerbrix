@@ -50,7 +50,7 @@ describe('PasswordDialog', () => {
     render(<PasswordDialog onClose={() => {}} onChanged={onChanged} />);
     await fill(user, {});
     await user.click(screen.getByRole('button', { name: 'Change password' }));
-    expect(await screen.findByText('The current password is wrong')).toBeInTheDocument();
+    expect(await screen.findByText('The current password is wrong.')).toBeInTheDocument();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     for (const label of ['Current password', 'New password', 'Repeat new password']) {
       expect(screen.getByLabelText(label)).toHaveValue('');

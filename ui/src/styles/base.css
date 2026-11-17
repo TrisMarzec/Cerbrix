@@ -98,14 +98,6 @@ td {
   vertical-align: middle;
 }
 
-tr.link {
-  cursor: pointer;
-}
-
-tr.link:hover td {
-  background: var(--raised);
-}
-
 /* Forms and buttons */
 input,
 select,
@@ -133,6 +125,66 @@ textarea {
   color: var(--dim);
   cursor: default;
   opacity: 0.6;
+}
+
+/* A group of buttons of which one is chosen (a time range, a tab). */
+.btn[aria-pressed='true'] {
+  border-color: var(--git);
+  color: var(--git);
+  font-weight: 600;
+}
+
+/* A form in a dialog: fields one below the other, the label above its field. */
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dialog-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--dim);
+}
+
+.dialog-form textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+/* Why a form or an action failed. */
+.form-error {
+  color: var(--warning);
+}
+
+/* A search field of a list page. */
+.search-field {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.search-field input {
+  width: 22em;
+  max-width: 100%;
+}
+
+/* Everything that comes from the last answer while the answer for a new query is outstanding. */
+.busy-region.is-busy {
+  opacity: 0.6;
+}
+
+/* Text for screen readers only. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  padding: 0;
 }
 
 .panel {

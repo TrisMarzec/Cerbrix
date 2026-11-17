@@ -8,7 +8,7 @@ const SINCE = new Date(2026, 10, 17, 14, 20, 0);
 
 function show(of: { data: unknown; staleSince: Date | undefined }, shellStale?: Date) {
   return render(
-    <StatusContext.Provider value={{ status: statusFixture(), staleSince: shellStale }}>
+    <StatusContext.Provider value={{ status: statusFixture(), staleSince: shellStale, reloadStatus: () => {} }}>
       <NowContext.Provider value={NOW}>
         <StaleNote of={of} />
       </NowContext.Provider>

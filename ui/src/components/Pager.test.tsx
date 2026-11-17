@@ -56,3 +56,12 @@ describe('Pager', () => {
     expect(container).toBeEmptyDOMElement();
   });
 });
+
+describe('Pager while the next page loads', () => {
+  it('disables both buttons', () => {
+    render(<Pager total={137} limit={50} offset={50} disabled onChange={() => {}} />);
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    expect(screen.getByText('51–100 of 137')).toBeInTheDocument();
+  });
+});

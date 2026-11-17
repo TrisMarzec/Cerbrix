@@ -4,11 +4,6 @@
   margin-bottom: 12px;
 }
 
-.problems-tabs button[aria-pressed="true"] {
-  border-color: var(--git);
-  font-weight: 600;
-}
-
 .problems-tools {
   display: flex;
   flex-wrap: wrap;
@@ -25,17 +20,6 @@
   font-size: 14px;
 }
 
-.problems-search {
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-}
-
-.problems-search input {
-  width: 22em;
-  max-width: 100%;
-}
-
 .problems-chip {
   display: inline-flex;
   align-items: center;
@@ -45,11 +29,7 @@
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--panel);
-  overflow-wrap: anywhere;
-}
-
-.problems-result.is-busy {
-  opacity: 0.6;
+  overflow-wrap: break-word;
 }
 
 .problems-table .cell-sev {
@@ -58,28 +38,26 @@
   background: var(--sev);
 }
 
-.problems-table tr.is-acknowledged .cell-sev {
-  opacity: 0.5;
-}
-
-.problems-table tr.is-acknowledged .problem-main,
-.problems-table tr.is-acknowledged .problem-host {
+.problems-table tr.is-acknowledged .problem-main {
   color: var(--dim);
 }
 
-.problems-table .visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
+/* The host name in the severity colour (concept section 7); still a link. */
+.problems-table .problem-host-link {
+  color: var(--sev);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.problems-table .problem-host-link:hover,
+.problems-table .problem-host-link:focus-visible {
+  text-decoration: underline;
 }
 
 .problems-table .problem-host-link,
 .problems-table .problem-dashboards,
 .problems-table .problem-end small {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .problems-table .problem-actions {

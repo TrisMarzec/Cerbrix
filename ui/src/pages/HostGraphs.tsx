@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, seg } from '../api/client';
 import type { HostItem, HostValue, Series } from '../api/types';
 import { Banner } from '../components/Banner';
+import { BusyRegion } from '../components/BusyRegion';
 import { Graph } from '../components/Graph';
 import { StaleNote } from '../components/StaleNote';
 import { usePolled } from '../lib/poll';
@@ -138,7 +139,7 @@ function LoadedGraph({ host, spec, range, now, valuesHaveKey }: LoadedProps) {
     );
   }
   return (
-    <div class={series.pending ? 'graph-busy is-busy' : 'graph-busy'} aria-busy={series.pending}>
+    <BusyRegion pending={series.pending} class="graph-busy">
       <StaleNote of={series} />
       <Graph
         points={answer.points}
@@ -148,7 +149,7 @@ function LoadedGraph({ host, spec, range, now, valuesHaveKey }: LoadedProps) {
         now={now}
         label={`${spec.title} over the last ${RANGE_WORDS[range]}`}
       />
-    </div>
+    </BusyRegion>
   );
 }
 

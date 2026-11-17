@@ -52,7 +52,7 @@ async function open(o: Options = {}) {
   const page = o.viaRoute === true ? resolveRoute('/administration').element : <AdministrationPage />;
   const view = render(
     <SessionProvider>
-      <StatusContext.Provider value={{ status: statusFixture(), staleSince: undefined }}>
+      <StatusContext.Provider value={{ status: statusFixture(), staleSince: undefined, reloadStatus: () => {} }}>
         <NowContext.Provider value={NOW}>{page}</NowContext.Provider>
       </StatusContext.Provider>
     </SessionProvider>,
@@ -178,6 +178,8 @@ describe('AdministrationPage', () => {
     expect(window.location.search).toBe('?offset=50');
     expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
     expect(screen.getByText('anna')).toBeTruthy();
+    expect(screen.getByText('1–50 of 120')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
     release?.();
     await advance(0);
     await advance(0);
@@ -660,5 +662,17 @@ describe('users that are not up to date', () => {
     expect(staleNotes()).toHaveLength(0);
     await advance(10_000);
     expectStaleAbove(screen.getByRole('table', { name: 'Users' }), '14:30');
+  });
+});
+
+describe('password managers', () => {
+  it('marks the new user name as no login name and the passwords as new ones', async () => {
+    await open();
+    const u = user();
+    const inAdd = within(await openAdd(u));
+    expect(inAdd.getByLabelText('Name')).toHaveAttribute('autocomplete', 'off');
+    await u.click(inAdd.getByLabelText('Set a password'));
+    expect(inAdd.getByLabelText('Password')).toHaveAttribute('autocomplete', 'new-password');
+    expect(inAdd.getByLabelText('Repeat the password')).toHaveAttribute('autocomplete', 'new-password');
   });
 });

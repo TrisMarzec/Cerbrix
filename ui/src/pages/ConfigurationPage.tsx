@@ -15,23 +15,25 @@ import type {
   SyncIssue,
   UnknownAgent,
 } from '../api/types';
+import { ActionDialog } from '../components/ActionDialog';
 import { Banner } from '../components/Banner';
-import { describeActionError } from '../components/actionError';
+import { BusyRegion } from '../components/BusyRegion';
+import { describeError, type ErrorTexts } from '../components/describeError';
 import { Dialog } from '../components/Dialog';
 import { Empty } from '../components/Empty';
 import { Pager } from '../components/Pager';
 import { SecretDialog } from '../components/SecretDialog';
 import { StaleNote } from '../components/StaleNote';
 import { TimeText } from '../components/TimeText';
+import { DASH } from '../lib/format';
+import { usePaging } from '../lib/paging';
 import { usePolled } from '../lib/poll';
-import { useQueryState } from '../lib/query';
 import { useSession } from '../session';
 import { useNow, useStatus } from '../shell/context';
 
 const HISTORY_LIMIT = 20;
 const DESCRIPTION_MAX = 200;
 const COPIED_MS = 2000;
-const DASH = '–';
 
 const VALIDITIES: { value: string; label: string }[] = [
   { value: '1h', label: '1 hour' },
@@ -55,16 +57,6 @@ type OnSecret = (secret: Omit<Secret, 'id'>) => void;
 /** Marks a request that produces a secret as in flight, so no second one can start meanwhile. */
 type Track = <T>(request: Promise<T>) => Promise<T>;
 
-function parseOffset(text: string | null): number {
-  if (text === null || !/^\d+$/.test(text)) return 0;
-  const n = Number(text);
-  return Number.isSafeInteger(n) ? n : 0;
-}
-
-function offsetParam(offset: number): string | undefined {
-  return offset === 0 ? undefined : String(offset);
-}
-
 function LoadFailed({ what, onRetry }: { what: string; onRetry: () => void }) {
   return (
     <Banner kind="warning">
@@ -79,70 +71,9 @@ function LoadFailed({ what, onRetry }: { what: string; onRetry: () => void }) {
 function Failure({ text }: { text: string | undefined }) {
   if (text === undefined) return null;
   return (
-    <p role="alert" class="config-error">
+    <p role="alert" class="form-error">
       {text}
     </p>
-  );
-}
-
-interface ConfirmProps<T> {
-  title: string;
-  confirmLabel: string;
-  children: ComponentChildren;
-  run: () => Promise<T>;
-  /** A sentence for a failure this dialog knows; `undefined` leaves it to the general rule. */
-  explain?: (e: unknown) => string | undefined;
-  onDone: (result: T) => void;
-  onClose: () => void;
-}
-
-/** Asks first, runs the request once, and stays open with the failure written out. */
-function ConfirmDialog<T>({
-  title,
-  confirmLabel,
-  children,
-  run,
-  explain,
-  onDone,
-  onClose,
-}: ConfirmProps<T>) {
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string | undefined>(undefined);
-
-  const confirm = () => {
-    if (busy) return;
-    setBusy(true);
-    setFailure(undefined);
-    run().then(
-      (result) => {
-        onDone(result);
-      },
-      (e: unknown) => {
-        setFailure(explain?.(e) ?? describeActionError(e));
-        setBusy(false);
-      },
-    );
-  };
-
-  return (
-    <Dialog
-      title={title}
-      closeOnBackdrop={!busy}
-      onClose={() => {
-        if (!busy) onClose();
-      }}
-    >
-      <p>{children}</p>
-      <Failure text={failure} />
-      <div class="dialog-actions">
-        <button type="button" class="btn" disabled={busy} onClick={onClose}>
-          Cancel
-        </button>
-        <button type="button" class="btn" disabled={busy} onClick={confirm}>
-          {confirmLabel}
-        </button>
-      </div>
-    </Dialog>
   );
 }
 
@@ -350,8 +281,8 @@ function HistoryRow({ entry, now }: { entry: SyncHistoryEntry; now: Date }) {
 }
 
 function HistorySection({ now }: { now: Date }) {
-  const [query, setQuery] = useQueryState();
-  const offset = parseOffset(query.get('history_offset'));
+  const paging = usePaging('history_offset', HISTORY_LIMIT);
+  const offset = paging.offset;
   const history = usePolled(
     (signal) =>
       api.get<Listed<SyncHistoryEntry>>('/sync/history', { limit: HISTORY_LIMIT, offset }, signal),
@@ -359,25 +290,15 @@ function HistorySection({ now }: { now: Date }) {
   );
   const answer = history.data;
   const failed = history.error !== undefined && answer === undefined;
-  const total = answer?.total ?? 0;
-  const beyond = answer !== undefined && total > 0 && offset >= total;
-
-  // Fewer entries than the offset: go to the last page that exists (once; the next answer is in range).
-  useEffect(() => {
-    if (!history.pending && beyond) {
-      setQuery({ history_offset: offsetParam(Math.floor((total - 1) / HISTORY_LIMIT) * HISTORY_LIMIT) });
-    }
-  }, [history.pending, beyond, total]);
+  // Fewer entries than the offset: the last page that exists replaces it (once the answer is in).
+  const { beyond, shownOffset } = paging.correct(answer?.total, history.pending);
 
   return (
     <section class="config-section">
       <h2>Sync history</h2>
       {failed && <LoadFailed what="the sync history" onRetry={history.reload} />}
       {answer !== undefined && !failed && (
-        <div
-          class={history.pending ? 'config-result is-busy' : 'config-result'}
-          aria-busy={history.pending}
-        >
+        <BusyRegion pending={history.pending} class="config-result">
           <StaleNote of={history} />
           {answer.total === 0 ? (
             !history.pending && <Empty>No revision has been applied yet.</Empty>
@@ -406,12 +327,11 @@ function HistorySection({ now }: { now: Date }) {
           <Pager
             total={answer.total}
             limit={HISTORY_LIMIT}
-            offset={offset}
-            onChange={(next) => {
-              setQuery({ history_offset: offsetParam(next) });
-            }}
+            offset={shownOffset}
+            disabled={history.pending}
+            onChange={paging.set}
           />
-        </div>
+        </BusyRegion>
       )}
     </section>
   );
@@ -479,7 +399,6 @@ function descriptionProblem(text: string): string | undefined {
   if ([...text].length > DESCRIPTION_MAX) {
     return `The description may have at most ${DESCRIPTION_MAX} characters.`;
   }
-  // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f-\u009f]/.test(text)) {
     return 'The description must not contain control characters.';
   }
@@ -518,7 +437,7 @@ function CreateKeyDialog({ track, onCreated, onClose }: CreateKeyProps) {
           onCreated(created.key);
         },
         (error: unknown) => {
-          setFailure(describeActionError(error));
+          setFailure(describeError(error));
           setBusy(false);
         },
       );
@@ -532,7 +451,7 @@ function CreateKeyDialog({ track, onCreated, onClose }: CreateKeyProps) {
         if (!busy) onClose();
       }}
     >
-      <form class="config-form" onSubmit={submit} noValidate>
+      <form class="dialog-form" onSubmit={submit} noValidate>
         <label>
           Description
           <input
@@ -683,9 +602,9 @@ function KeysSection({ now, onSecret, track, locked }: SecretSectionProps) {
         />
       )}
       {dialog?.kind === 'revoke' && (
-        <ConfirmDialog
+        <ActionDialog
           title="Revoke enrolment key"
-          confirmLabel="Revoke key"
+          submitLabel="Revoke key"
           run={() => api.send<void>('DELETE', `/enrollment-keys/${seg(dialog.key.id)}`)}
           onDone={() => {
             setDialog(undefined);
@@ -695,8 +614,8 @@ function KeysSection({ now, onSecret, track, locked }: SecretSectionProps) {
             setDialog(undefined);
           }}
         >
-          {`Revoke the key "${dialog.key.description}"? Agents that have not enrolled yet can no longer use it.`}
-        </ConfirmDialog>
+          <p>{`Revoke the key "${dialog.key.description}"? Agents that have not enrolled yet can no longer use it.`}</p>
+        </ActionDialog>
       )}
     </section>
   );
@@ -706,13 +625,8 @@ function KeysSection({ now, onSecret, track, locked }: SecretSectionProps) {
 
 const SYNCING = 'The configuration is being synchronised. Try again.';
 
-function isNotFound(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && 'status' in e && e.status === 404;
-}
-
-function explainSyncing(e: unknown): string | undefined {
-  return isNotFound(e) ? SYNCING : undefined;
-}
+/** A display that is not found is one the synchronisation is replacing right now. */
+const TOKEN_TEXTS: ErrorTexts = { 404: SYNCING };
 
 type TokenDialog =
   | { kind: 'replace'; display: Display }
@@ -737,7 +651,7 @@ function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
     return {
       title: `Token of ${display.name}`,
       value: created.token,
-      note: `Open /display/${display.id} on the wall monitor and enter this token.`,
+      note: `Keep this token for the wall display ${display.name}. The page that uses it comes with the next release.`,
     };
   };
 
@@ -752,7 +666,7 @@ function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
         onSecret(secret);
       },
       (e: unknown) => {
-        setFailure({ id: display.id, text: explainSyncing(e) ?? describeActionError(e) });
+        setFailure({ id: display.id, text: describeError(e, TOKEN_TEXTS) });
         setBusyId(undefined);
       },
     );
@@ -836,11 +750,11 @@ function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
           </table>
         ))}
       {dialog?.kind === 'replace' && (
-        <ConfirmDialog
+        <ActionDialog
           title="Replace display token"
-          confirmLabel="Replace token"
+          submitLabel="Replace token"
           run={() => createToken(dialog.display)}
-          explain={explainSyncing}
+          texts={TOKEN_TEXTS}
           onDone={(secret) => {
             setDialog(undefined);
             displays.reload();
@@ -850,13 +764,13 @@ function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
             setDialog(undefined);
           }}
         >
-          {`Replace the token of "${dialog.display.name}"? The current token stops working at once.`}
-        </ConfirmDialog>
+          <p>{`Replace the token of "${dialog.display.name}"? The current token stops working at once.`}</p>
+        </ActionDialog>
       )}
       {dialog?.kind === 'revoke' && (
-        <ConfirmDialog
+        <ActionDialog
           title="Revoke display token"
-          confirmLabel="Revoke token"
+          submitLabel="Revoke token"
           run={() => api.send<void>('DELETE', `/displays/${seg(dialog.display.id)}/token`)}
           onDone={() => {
             setDialog(undefined);
@@ -866,8 +780,8 @@ function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
             setDialog(undefined);
           }}
         >
-          {`Revoke the token of "${dialog.display.name}"? The display can no longer load its dashboards until it gets a new token.`}
-        </ConfirmDialog>
+          <p>{`Revoke the token of "${dialog.display.name}"? The display can no longer load its dashboards until it gets a new token.`}</p>
+        </ActionDialog>
       )}
     </section>
   );

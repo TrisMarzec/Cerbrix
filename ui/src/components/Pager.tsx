@@ -1,14 +1,18 @@
+import { lastPageStart } from '../lib/paging';
+
 interface Props {
   total: number;
   limit: number;
   offset: number;
+  /** True while the next page loads: the buttons wait for its answer. */
+  disabled?: boolean;
   onChange: (offset: number) => void;
 }
 
-export function Pager({ total, limit, offset, onChange }: Props) {
+export function Pager({ total, limit, offset, disabled = false, onChange }: Props) {
   if (total === 0) return null;
   const beyond = offset >= total;
-  const lastStart = Math.floor((total - 1) / limit) * limit;
+  const lastStart = lastPageStart(total, limit);
   const from = beyond ? lastStart : offset;
   const last = Math.min(from + limit, total);
   return (
@@ -16,7 +20,7 @@ export function Pager({ total, limit, offset, onChange }: Props) {
       <button
         type="button"
         class="btn"
-        disabled={from <= 0}
+        disabled={disabled || from <= 0}
         onClick={() => onChange(beyond ? lastStart : Math.max(0, offset - limit))}
       >
         Previous
@@ -25,7 +29,7 @@ export function Pager({ total, limit, offset, onChange }: Props) {
       <button
         type="button"
         class="btn"
-        disabled={from + limit >= total}
+        disabled={disabled || from + limit >= total}
         onClick={() => onChange(from + limit)}
       >
         Next

@@ -8,10 +8,6 @@
   margin-bottom: 10px;
 }
 
-.admin-result.is-busy {
-  opacity: 0.6;
-}
-
 .admin-table th,
 .admin-table td {
   overflow-wrap: anywhere;
@@ -39,24 +35,7 @@
   margin: 0 0 4px 8px;
 }
 
-.admin-error {
-  color: var(--warning);
-}
-
-.admin-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.admin-form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  color: var(--dim);
-}
-
-.admin-form label.admin-radio {
+.dialog-form label.admin-radio {
   flex-direction: row;
   align-items: center;
   gap: 8px;
@@ -75,15 +54,6 @@
 .admin-choice legend {
   color: var(--dim);
   padding: 0 4px;
-}
-
-.admin-table .visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }
 
 .admin-hint {

@@ -87,7 +87,7 @@ describe('AckDialog', () => {
     [
       429,
       { error: 'rate_limited', message: 'Too many requests, wait a moment' },
-      'Too many requests, wait a moment',
+      'The server is busy, try again in a moment.',
     ],
     [500, { error: 'internal', message: 'Something broke' }, 'Something broke'],
   ])('keeps the dialog open on %i and says why', async (status, json, text) => {

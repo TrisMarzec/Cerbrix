@@ -1,16 +1,17 @@
 import './HostsPage.css';
 
-import { useEffect, useRef, useState } from 'preact/hooks';
-
 import { api, seg } from '../api/client';
 import type { HostRow, HostsAnswer } from '../api/types';
 import { Banner } from '../components/Banner';
+import { BusyRegion } from '../components/BusyRegion';
 import { Empty } from '../components/Empty';
 import { Pager } from '../components/Pager';
+import { SearchField } from '../components/SearchField';
 import { StaleNote } from '../components/StaleNote';
 import { StateText } from '../components/StateText';
-import { age, value } from '../lib/format';
-import { usePolled } from '../lib/poll';
+import { age, DASH, value } from '../lib/format';
+import { usePaging } from '../lib/paging';
+import { ONCE, usePolled } from '../lib/poll';
 import { useQueryState } from '../lib/query';
 import { Link } from '../lib/router';
 import { useNow } from '../shell/context';
@@ -18,9 +19,6 @@ import { useNow } from '../shell/context';
 const LIMIT = 50;
 const SEARCH_MAX = 200;
 const GROUP_MAX = 63;
-const SEARCH_DELAY_MS = 300;
-/** `usePolled` has no "never": about 23 days is the same for a page that is open for a visit. */
-const NO_POLL_MS = 2_000_000_000;
 
 type StateFilter = 'problems' | 'no_data' | 'ok';
 
@@ -33,98 +31,6 @@ const STATE_OPTIONS: { value: StateFilter | ''; label: string }[] = [
 
 function parseState(text: string | null): StateFilter | undefined {
   return text === 'problems' || text === 'no_data' || text === 'ok' ? text : undefined;
-}
-
-function parseOffset(text: string | null): number {
-  if (text === null || !/^\d+$/.test(text)) return 0;
-  const n = Number(text);
-  return Number.isSafeInteger(n) ? n : 0;
-}
-
-/** Start of the last page that exists for `total` > 0 hosts. */
-function lastPageStart(total: number): number {
-  return Math.floor((total - 1) / LIMIT) * LIMIT;
-}
-
-function offsetParam(offset: number): string | undefined {
-  return offset === 0 ? undefined : String(offset);
-}
-
-interface SearchProps {
-  /** The search text of the URL. */
-  urlValue: string;
-  onCommit: (text: string) => void;
-}
-
-/** The search field: follows the URL, writes to it 300 ms after the last key stroke or at once on Enter. */
-function SearchField({ urlValue, onCommit }: SearchProps) {
-  const [text, setText] = useState(urlValue);
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-
-  const cancel = () => {
-    clearTimeout(timer.current);
-    timer.current = undefined;
-  };
-
-  // A change of the URL (the back button, or our own commit) replaces what is typed.
-  useEffect(() => {
-    cancel();
-    setText(urlValue);
-  }, [urlValue]);
-  useEffect(() => cancel, []);
-
-  const current = useRef(urlValue);
-  current.current = urlValue;
-  const input = useRef<HTMLInputElement>(null);
-
-  // Text equal to what the URL already has changes nothing: no write, no offset reset, no request.
-  const commit = (next: string) => {
-    cancel();
-    if (next !== current.current) onCommit(next);
-  };
-
-  return (
-    <form
-      class="hosts-search"
-      role="search"
-      onSubmit={(e) => {
-        e.preventDefault();
-        commit(text);
-      }}
-    >
-      <label>
-        Search
-        <input
-          ref={input}
-          type="search"
-          value={text}
-          maxLength={SEARCH_MAX}
-          placeholder="Name or address"
-          onInput={(e) => {
-            const next = e.currentTarget.value;
-            setText(next);
-            cancel();
-            timer.current = setTimeout(() => {
-              commit(next);
-            }, SEARCH_DELAY_MS);
-          }}
-        />
-      </label>
-      {text !== '' && (
-        <button
-          type="button"
-          class="btn"
-          onClick={() => {
-            setText('');
-            commit('');
-            input.current?.focus();
-          }}
-        >
-          Clear search
-        </button>
-      )}
-    </form>
-  );
 }
 
 function rowClass(h: HostRow): string | undefined {
@@ -168,7 +74,7 @@ function HostTable({ rows, now }: { rows: HostRow[]; now: Date }) {
               </Link>
               {h.address !== null && <small class="host-address">{h.address}</small>}
             </td>
-            <td class="host-groups">{h.groups.length === 0 ? '–' : h.groups.join(', ')}</td>
+            <td class="host-groups">{h.groups.length === 0 ? DASH : h.groups.join(', ')}</td>
             <td>
               <StateText state={h.state} />
             </td>
@@ -196,7 +102,8 @@ export function HostsPage() {
   withoutGroup.delete('offset');
   const withoutGroupText = withoutGroup.toString();
   const state = parseState(query.get('state'));
-  const offset = parseOffset(query.get('offset'));
+  const paging = usePaging('offset', LIMIT);
+  const offset = paging.offset;
 
   const hosts = usePolled(
     (signal) =>
@@ -216,18 +123,13 @@ export function HostsPage() {
   const groups = usePolled(
     (signal) => api.get<{ items: string[] }>('/host-groups', undefined, signal),
     [],
-    // Loaded once per mount (and by "Try again"): a very long interval instead of polling.
-    NO_POLL_MS,
+    // Loaded once per mount; "Try again" and a tab that becomes visible after a failure load it again.
+    ONCE,
   );
 
   const answer = hosts.data;
-  const total = answer?.total ?? 0;
-  const beyond = answer !== undefined && total > 0 && total <= offset;
-
-  // Fewer hosts than the offset: go back to the last page that exists (once; the next answer is in range).
-  useEffect(() => {
-    if (!hosts.pending && beyond) setQuery({ offset: offsetParam(lastPageStart(total)) });
-  }, [hosts.pending, beyond, total]);
+  // Fewer hosts than the offset: the last page that exists replaces it (once the answer is in).
+  const { beyond, shownOffset } = paging.correct(answer?.total, hosts.pending);
 
   const failed = answer === undefined && hosts.error !== undefined;
   const filtered = search !== '' || group !== '' || state !== undefined;
@@ -243,6 +145,10 @@ export function HostsPage() {
         <SearchField
           urlValue={search}
           onCommit={(text) => setQuery({ search: text === '' ? undefined : text })}
+          label="Search"
+          placeholder="Name or address"
+          class="hosts-search"
+          maxLength={SEARCH_MAX}
         />
         <label>
           Group
@@ -299,10 +205,7 @@ export function HostsPage() {
       {answer !== undefined && (
         // Everything below comes from the last answer: while the answer for a new query is
         // outstanding it is dimmed and marked busy (the empty sentence is not shown at all).
-        <div
-          class={hosts.pending ? 'hosts-result is-busy' : 'hosts-result'}
-          aria-busy={hosts.pending}
-        >
+        <BusyRegion pending={hosts.pending} class="hosts-result">
           <StaleNote of={hosts} />
           {!answer.metrics_available && (
             <Banner kind="warning">Current values are not available right now.</Banner>
@@ -322,12 +225,13 @@ export function HostsPage() {
               <Pager
                 total={answer.total}
                 limit={LIMIT}
-                offset={offset}
-                onChange={(next) => setQuery({ offset: offsetParam(next) })}
+                offset={shownOffset}
+                disabled={hosts.pending}
+                onChange={paging.set}
               />
             </>
           )}
-        </div>
+        </BusyRegion>
       )}
     </>
   );

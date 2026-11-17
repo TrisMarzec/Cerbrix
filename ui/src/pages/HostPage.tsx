@@ -12,19 +12,20 @@ import type {
   HostValue,
 } from '../api/types';
 import { AckDialog } from '../components/AckDialog';
-import { describeActionError } from '../components/actionError';
+import { ActionDialog } from '../components/ActionDialog';
 import { Banner } from '../components/Banner';
 import { CloseDialog } from '../components/CloseDialog';
-import { Dialog } from '../components/Dialog';
+import { hasStatus } from '../components/describeError';
 import { Empty } from '../components/Empty';
-import { ProblemRow } from '../components/ProblemRow';
+import { problemName, ProblemRow } from '../components/ProblemRow';
 import { StaleNote } from '../components/StaleNote';
-import { age, clock, severityWord, value } from '../lib/format';
+import { TimeText } from '../components/TimeText';
+import { age, DASH, severityWord, value } from '../lib/format';
 import { usePolled } from '../lib/poll';
 import { useQueryState } from '../lib/query';
 import { Link } from '../lib/router';
 import { useSession } from '../session';
-import { useNow } from '../shell/context';
+import { useNow, useStatus } from '../shell/context';
 import {
   DEFAULT_RANGE,
   graphSpecs,
@@ -49,10 +50,6 @@ function originText(origin: string): string {
   return origin.startsWith('template:') ? `template: ${origin.slice('template:'.length)}` : origin;
 }
 
-function problemName(p: Problem): string {
-  return p.instance === '' ? p.trigger : `${p.trigger} ${p.instance}`;
-}
-
 interface ReleaseProps {
   host: string;
   onDone: () => void;
@@ -61,54 +58,23 @@ interface ReleaseProps {
 }
 
 function ReleaseDialog({ host, onDone, onClose, onGone }: ReleaseProps) {
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string | undefined>(undefined);
-
-  const release = () => {
-    if (busy) return;
-    setBusy(true);
-    setFailure(undefined);
-    api.send('POST', `/hosts/${seg(host)}/release`).then(
-      () => {
-        onDone();
-      },
-      (error: unknown) => {
-        if (typeof error === 'object' && error !== null && 'status' in error && error.status === 404) {
-          onGone();
-          return;
-        }
-        setFailure(describeActionError(error));
-        setBusy(false);
-      },
-    );
-  };
-
   return (
-    <Dialog
+    <ActionDialog
       title="Release agent binding"
-      closeOnBackdrop={!busy}
-      onClose={() => {
-        if (!busy) onClose();
+      submitLabel="Release binding"
+      run={() => api.send('POST', `/hosts/${seg(host)}/release`)}
+      onFailed={(e) => {
+        // The host was removed meanwhile: the page shows that instead.
+        if (hasStatus(e, 404)) onGone();
       }}
+      onDone={onDone}
+      onClose={onClose}
     >
       <p>
         Release the agent binding of <strong>{host}</strong>? The agent on this host must enrol
         again with a new key.
       </p>
-      {failure !== undefined && (
-        <p role="alert" class="dialog-error">
-          {failure}
-        </p>
-      )}
-      <div class="dialog-actions">
-        <button type="button" class="btn" disabled={busy} onClick={onClose}>
-          Cancel
-        </button>
-        <button type="button" class="btn" disabled={busy} onClick={release}>
-          Release binding
-        </button>
-      </div>
-    </Dialog>
+    </ActionDialog>
   );
 }
 
@@ -122,7 +88,7 @@ function Head({ host, problems, now }: { host: HostDetail; problems: Problem[]; 
         {worstSeverity === undefined ? (
           <span class="host-pill is-ok">No problems</span>
         ) : (
-          <span class={`host-pill sev-${worstSeverity}`}>
+          <span class={`host-pill sev-${worstSeverity}${allAcknowledged ? ' is-acknowledged' : ''}`}>
             {`${count} open ${count === 1 ? 'problem' : 'problems'} · ${severityWord(worstSeverity)}${allAcknowledged ? ' (acknowledged)' : ''}`}
           </span>
         )}
@@ -131,15 +97,15 @@ function Head({ host, problems, now }: { host: HostDetail; problems: Problem[]; 
       <dl class="host-facts">
         <div>
           <dt>Address</dt>
-          <dd>{host.address ?? '–'}</dd>
+          <dd>{host.address ?? DASH}</dd>
         </div>
         <div>
           <dt>Groups</dt>
-          <dd>{host.groups.length === 0 ? '–' : host.groups.join(', ')}</dd>
+          <dd>{host.groups.length === 0 ? DASH : host.groups.join(', ')}</dd>
         </div>
         <div>
           <dt>Templates</dt>
-          <dd>{host.templates.length === 0 ? '–' : host.templates.join(', ')}</dd>
+          <dd>{host.templates.length === 0 ? DASH : host.templates.join(', ')}</dd>
         </div>
         <div>
           <dt>Defined in</dt>
@@ -151,17 +117,17 @@ function Head({ host, problems, now }: { host: HostDetail; problems: Problem[]; 
         </div>
         <div>
           <dt>Enrolled</dt>
-          <dd>{host.enrolled_at === null ? 'not enrolled' : clock(host.enrolled_at, now)}</dd>
+          <dd>{host.enrolled_at === null ? 'not enrolled' : <TimeText iso={host.enrolled_at} now={now} />}</dd>
         </div>
         <div>
           <dt>Dashboards</dt>
           <dd>
             {host.dashboards.length === 0
-              ? '–'
+              ? DASH
               : host.dashboards.map((d, i) => (
                   <span key={d.id}>
                     {i > 0 && ', '}
-                    <Link href={`/problems?dashboard=${encodeURIComponent(d.id)}`}>{d.name}</Link>
+                    <Link href={`/problems?${new URLSearchParams({ dashboard: d.id }).toString()}`}>{d.name}</Link>
                   </span>
                 ))}
           </dd>
@@ -185,6 +151,7 @@ export function HostPage({ name }: { name: string }) {
   const [query, setQuery] = useQueryState();
   const now = useNow();
   const { can } = useSession();
+  const { reloadStatus } = useStatus();
   const range = parseRange(query.get('range'));
 
   const detail = usePolled(
@@ -198,7 +165,8 @@ export function HostPage({ name }: { name: string }) {
 
   const [dialog, setDialog] = useState<DialogState>(undefined);
   const [releasing, setReleasing] = useState(false);
-  const [released, setReleased] = useState(false);
+  // What the last action did ("Problem acknowledged."); the next action or range change ends it.
+  const [notice, setNotice] = useState<string | undefined>(undefined);
   const [gone, setGone] = useState(false);
 
   // A problem the server returned for an action, shown until the reload's answer arrives.
@@ -253,9 +221,12 @@ export function HostPage({ name }: { name: string }) {
     // A refused action (a problem that was resolved meanwhile) leaves the list out of date.
     detail.reload();
   };
-  const actionDone = (p: Problem) => {
+  const actionDone = (p: Problem, text: string) => {
     setPatches((previous) => ({ ...previous, [p.id]: p }));
+    setNotice(text);
     closeDialog();
+    // The badge of the navigation counts the unacknowledged problems.
+    reloadStatus();
   };
   const openProblems = host.open_problems
     .map((p) => patches[p.id] ?? p)
@@ -266,11 +237,11 @@ export function HostPage({ name }: { name: string }) {
   return (
     <>
       <h1>{name}</h1>
-      {released && <Banner kind="info">Agent binding released.</Banner>}
+      {notice !== undefined && <Banner kind="info">{notice}</Banner>}
       <StaleNote of={detail} />
       <Head host={host} problems={openProblems} now={now} />
       <div class="host-tools">
-        <Link href={`/problems?state=resolved&host=${encodeURIComponent(name)}`}>
+        <Link href={`/problems?${new URLSearchParams({ state: 'resolved', host: name }).toString()}`}>
           Past problems of this host
         </Link>
         {can('admin') && (
@@ -278,7 +249,7 @@ export function HostPage({ name }: { name: string }) {
             type="button"
             class="btn"
             onClick={() => {
-              setReleased(false);
+              setNotice(undefined);
               setReleasing(true);
             }}
           >
@@ -308,7 +279,7 @@ export function HostPage({ name }: { name: string }) {
                             class="btn"
                             aria-label={`${p.acknowledged_at === null ? 'Acknowledge' : 'Acknowledge again'} ${problemName(p)}`}
                             onClick={() => {
-                              setReleased(false);
+                              setNotice(undefined);
                               setDialog({ kind: 'ack', problem: p });
                             }}
                           >
@@ -319,7 +290,7 @@ export function HostPage({ name }: { name: string }) {
                             class="btn"
                             aria-label={`Close problem ${problemName(p)}`}
                             onClick={() => {
-                              setReleased(false);
+                              setNotice(undefined);
                               setDialog({ kind: 'close', problem: p });
                             }}
                           >
@@ -345,7 +316,7 @@ export function HostPage({ name }: { name: string }) {
                     class="btn"
                     aria-pressed={r === range}
                     onClick={() => {
-                      setReleased(false);
+                      setNotice(undefined);
                       setQuery({ range: r === DEFAULT_RANGE ? undefined : r });
                     }}
                   >
@@ -463,10 +434,22 @@ export function HostPage({ name }: { name: string }) {
       </div>
 
       {dialog?.kind === 'ack' && (
-        <AckDialog problem={dialog.problem} onDone={actionDone} onClose={closeDialog} />
+        <AckDialog
+          problem={dialog.problem}
+          onDone={(p) => {
+            actionDone(p, 'Problem acknowledged.');
+          }}
+          onClose={closeDialog}
+        />
       )}
       {dialog?.kind === 'close' && (
-        <CloseDialog problem={dialog.problem} onDone={actionDone} onClose={closeDialog} />
+        <CloseDialog
+          problem={dialog.problem}
+          onDone={(p) => {
+            actionDone(p, 'Problem closed.');
+          }}
+          onClose={closeDialog}
+        />
       )}
       {releasing && (
         <ReleaseDialog
@@ -480,7 +463,7 @@ export function HostPage({ name }: { name: string }) {
           }}
           onDone={() => {
             setReleasing(false);
-            setReleased(true);
+            setNotice('Agent binding released.');
             detail.reload();
           }}
         />

@@ -1,5 +1,3 @@
-import './ProblemDialogs.css';
-
 import type { Problem } from '../api/types';
 
 /** The problem a dialog is about: host, trigger, instance and summary, as text. */

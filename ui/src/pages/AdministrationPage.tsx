@@ -1,19 +1,21 @@
 import './AdministrationPage.css';
 
-import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { api, ApiError, seg } from '../api/client';
+import { api, seg } from '../api/client';
 import type { Listed, Role, User } from '../api/types';
+import { ActionDialog } from '../components/ActionDialog';
 import { Banner } from '../components/Banner';
-import { Dialog } from '../components/Dialog';
+import { BusyRegion } from '../components/BusyRegion';
+import { describeError, hasStatus } from '../components/describeError';
 import { Empty } from '../components/Empty';
 import { Pager } from '../components/Pager';
 import { SecretDialog } from '../components/SecretDialog';
 import { StaleNote } from '../components/StaleNote';
 import { TimeText } from '../components/TimeText';
+import { roleWord } from '../lib/format';
+import { usePaging } from '../lib/paging';
 import { usePolled } from '../lib/poll';
-import { useQueryState } from '../lib/query';
 import { useSession } from '../session';
 import { useNow } from '../shell/context';
 
@@ -28,28 +30,10 @@ const GONE = 'This user no longer exists.';
 const OWN_SESSION = 'This ends your own session.';
 const PASSWORD_NOTE = 'Give this password to the user. They should change it after the first login.';
 
-const ROLES: { value: Role; label: string }[] = [
-  { value: 'viewer', label: 'Viewer' },
-  { value: 'operator', label: 'Operator' },
-  { value: 'admin', label: 'Admin' },
-];
-
-function roleWord(role: Role): string {
-  return ROLES.find((r) => r.value === role)?.label ?? role;
-}
+const ROLES: Role[] = ['viewer', 'operator', 'admin'];
 
 function isRole(value: string): value is Role {
-  return ROLES.some((r) => r.value === value);
-}
-
-function parseOffset(text: string | null): number {
-  if (text === null || !/^\d+$/.test(text)) return 0;
-  const n = Number(text);
-  return Number.isSafeInteger(n) ? n : 0;
-}
-
-function offsetParam(offset: number): string | undefined {
-  return offset === 0 ? undefined : String(offset);
+  return ROLES.some((r) => r === value);
 }
 
 /** True until the component unmounts; a late answer then sets no state. */
@@ -64,24 +48,11 @@ function useMounted() {
   return mounted;
 }
 
-/** The sentence for a failed request, and whether it means the user is gone. */
-function explain(e: unknown, onCreate = false): { text: string; gone: boolean } {
-  if (!(e instanceof ApiError) || e.status === 0) {
-    return { text: 'Could not reach the server.', gone: false };
-  }
-  switch (e.status) {
-    case 403:
-      return { text: 'Your role may not do this.', gone: false };
-    case 404:
-      return { text: GONE, gone: true };
-    case 409:
-      return { text: onCreate ? 'This name is taken.' : e.message, gone: false };
-    case 429:
-      return { text: 'The server is busy, try again in a moment.', gone: false };
-    default:
-      return { text: e.message, gone: false };
-  }
-}
+/** A request about one user answers 404 when the user was removed meanwhile. */
+const ROW_TEXTS = { 404: GONE };
+/** Creating a user answers 409 when the name is taken. */
+const CREATE_TEXTS = { 409: 'This name is taken.' };
+
 
 /** A secret shown once; the page holds it only while its dialog is open. */
 interface Secret {
@@ -89,94 +60,22 @@ interface Secret {
   value: string;
 }
 
-// ---------------------------------------------------------------- Dialog frame
+// ---------------------------------------------------------------- Dialogs
 
-interface FrameProps<T> {
-  title: string;
-  submitLabel: string;
-  submitDisabled?: boolean;
-  children: ComponentChildren;
-  /** A sentence when the input is not acceptable; no request is sent then. */
-  validate?: () => string | undefined;
-  run: () => Promise<T>;
-  /** Called after every attempt, for example to empty password fields. */
-  afterAttempt?: () => void;
-  /** The failure of a create is read differently (`409` means the name is taken). */
-  onCreate?: boolean;
-  onDone: (result: T) => void;
-  /** `reload` is true when the dialog learned that the list is out of date. */
-  onClose: (reload: boolean) => void;
-}
-
-/** A form dialog that runs one request at a time, stays open on failure and cannot be dismissed meanwhile. */
-function Frame<T>({
-  title,
-  submitLabel,
-  submitDisabled = false,
-  children,
-  validate,
-  run,
-  afterAttempt,
-  onCreate = false,
-  onDone,
-  onClose,
-}: FrameProps<T>) {
-  const mounted = useMounted();
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string | undefined>(undefined);
-  const [stale, setStale] = useState(false);
-
-  const close = () => {
-    if (!busy) onClose(stale);
+/**
+ * What a dialog about one user does on close: it asks for a reload of the list when one of its
+ * requests learned that the user is gone.
+ */
+function useGone(onClose: Closed): { onFailed: (e: unknown) => void; onClose: () => void } {
+  const gone = useRef(false);
+  return {
+    onFailed: (e) => {
+      if (hasStatus(e, 404)) gone.current = true;
+    },
+    onClose: () => {
+      onClose(gone.current);
+    },
   };
-
-  const submit = (e: Event) => {
-    e.preventDefault();
-    if (busy) return;
-    const problem = validate?.();
-    if (problem !== undefined) {
-      setFailure(problem);
-      return;
-    }
-    setBusy(true);
-    setFailure(undefined);
-    run().then(
-      (result) => {
-        if (!mounted.current) return;
-        afterAttempt?.();
-        onDone(result);
-      },
-      (error: unknown) => {
-        if (!mounted.current) return;
-        const { text, gone } = explain(error, onCreate);
-        afterAttempt?.();
-        setFailure(text);
-        if (gone) setStale(true);
-        setBusy(false);
-      },
-    );
-  };
-
-  return (
-    <Dialog title={title} closeOnBackdrop={!busy} onClose={close}>
-      <form class="admin-form" onSubmit={submit} noValidate>
-        {children}
-        {failure !== undefined && (
-          <p role="alert" class="admin-error">
-            {failure}
-          </p>
-        )}
-        <div class="dialog-actions">
-          <button type="button" class="btn" disabled={busy} onClick={close}>
-            Cancel
-          </button>
-          <button type="submit" class="btn" disabled={busy || submitDisabled}>
-            {submitLabel}
-          </button>
-        </div>
-      </form>
-    </Dialog>
-  );
 }
 
 function OwnSessionWarning({ own }: { own: boolean }) {
@@ -248,7 +147,7 @@ function PasswordFields({ choice }: { choice: PasswordChoice }) {
             Password
             <input
               type="password"
-              autoComplete="new-password"
+              autocomplete="new-password"
               value={choice.password}
               onInput={(e) => {
                 choice.setPassword(e.currentTarget.value);
@@ -259,7 +158,7 @@ function PasswordFields({ choice }: { choice: PasswordChoice }) {
             Repeat the password
             <input
               type="password"
-              autoComplete="new-password"
+              autocomplete="new-password"
               value={choice.again}
               onInput={(e) => {
                 choice.setAgain(e.currentTarget.value);
@@ -271,8 +170,6 @@ function PasswordFields({ choice }: { choice: PasswordChoice }) {
     </fieldset>
   );
 }
-
-// ---------------------------------------------------------------- Dialogs
 
 type Generated = { password?: string };
 type Closed = (reload: boolean) => void;
@@ -289,8 +186,8 @@ function RoleSelect({ value, onChange }: { value: Role; onChange: (role: Role) =
         }}
       >
         {ROLES.map((r) => (
-          <option key={r.value} value={r.value}>
-            {r.label}
+          <option key={r} value={r}>
+            {roleWord(r)}
           </option>
         ))}
       </select>
@@ -310,10 +207,10 @@ function AddUserDialog({
   const choice = usePasswordChoice();
 
   return (
-    <Frame
+    <ActionDialog
       title="Add user"
       submitLabel="Add user"
-      onCreate
+      texts={CREATE_TEXTS}
       validate={() => (NAME_PATTERN.test(name) ? passwordProblem(choice) : NAME_PROBLEM)}
       run={() =>
         api.send<User & Generated>('POST', '/users', {
@@ -326,13 +223,15 @@ function AddUserDialog({
         clearPasswords(choice);
       }}
       onDone={onDone}
-      onClose={onClose}
+      onClose={() => {
+        onClose(false);
+      }}
     >
       <label>
         Name
         <input
           type="text"
-          autoComplete="off"
+          autocomplete="off"
           value={name}
           onInput={(e) => {
             setName(e.currentTarget.value);
@@ -341,7 +240,7 @@ function AddUserDialog({
       </label>
       <RoleSelect value={role} onChange={setRole} />
       <PasswordFields choice={choice} />
-    </Frame>
+    </ActionDialog>
   );
 }
 
@@ -355,47 +254,50 @@ interface RowDialogProps {
 function RoleDialog({ user, own, onDone, onClose }: RowDialogProps) {
   const [role, setRole] = useState<Role>(user.role);
   return (
-    <Frame
+    <ActionDialog
       title="Change role"
       submitLabel="Change role"
       submitDisabled={role === user.role}
       run={() => api.send<User>('PATCH', `/users/${seg(user.id)}`, { role })}
+      texts={ROW_TEXTS}
       onDone={onDone}
-      onClose={onClose}
+      {...useGone(onClose)}
     >
       <RoleSelect value={role} onChange={setRole} />
       <OwnSessionWarning own={own} />
-    </Frame>
+    </ActionDialog>
   );
 }
 
 function DisableDialog({ user, own, onDone, onClose }: RowDialogProps) {
   return (
-    <Frame
+    <ActionDialog
       title="Disable user"
       submitLabel="Disable user"
       run={() => api.send<User>('PATCH', `/users/${seg(user.id)}`, { disabled: true })}
+      texts={ROW_TEXTS}
       onDone={onDone}
-      onClose={onClose}
+      {...useGone(onClose)}
     >
       <p>{`Disable ${user.name}? They are logged out at once and cannot log in until enabled.`}</p>
       <OwnSessionWarning own={own} />
-    </Frame>
+    </ActionDialog>
   );
 }
 
 function RemoveDialog({ user, own, onDone, onClose }: RowDialogProps) {
   return (
-    <Frame
+    <ActionDialog
       title="Remove user"
       submitLabel="Remove user"
       run={() => api.send<void>('DELETE', `/users/${seg(user.id)}`)}
+      texts={ROW_TEXTS}
       onDone={onDone}
-      onClose={onClose}
+      {...useGone(onClose)}
     >
       <p>{`Remove ${user.name}? This cannot be undone.`}</p>
       <OwnSessionWarning own={own} />
-    </Frame>
+    </ActionDialog>
   );
 }
 
@@ -411,7 +313,7 @@ function ResetDialog({
 }) {
   const choice = usePasswordChoice();
   return (
-    <Frame
+    <ActionDialog
       title="Reset password"
       submitLabel="Reset password"
       validate={() => passwordProblem(choice)}
@@ -425,12 +327,13 @@ function ResetDialog({
       afterAttempt={() => {
         clearPasswords(choice);
       }}
+      texts={ROW_TEXTS}
       onDone={onDone}
-      onClose={onClose}
+      {...useGone(onClose)}
     >
       <p>{`All sessions of ${user.name} end.`}</p>
       <PasswordFields choice={choice} />
-    </Frame>
+    </ActionDialog>
   );
 }
 
@@ -443,8 +346,8 @@ export function AdministrationPage() {
   const { user: me } = useSession();
   const now = useNow();
   const mounted = useMounted();
-  const [query, setQuery] = useQueryState();
-  const offset = parseOffset(query.get('offset'));
+  const paging = usePaging('offset', LIMIT);
+  const offset = paging.offset;
 
   const users = usePolled(
     (signal) => api.get<Listed<User>>('/users', { limit: LIMIT, offset }, signal),
@@ -457,20 +360,13 @@ export function AdministrationPage() {
   const [failure, setFailure] = useState<string | undefined>(undefined);
 
   const answer = users.data;
-  const total = answer?.total ?? 0;
-  const beyond = answer !== undefined && total > 0 && total <= offset;
+  // Fewer users than the offset: the last page that exists replaces it (once the answer is in).
+  const { beyond, shownOffset } = paging.correct(answer?.total, users.pending);
 
   // Another page: the failure of an Enable on the old one no longer applies.
   useEffect(() => {
     setFailure(undefined);
   }, [offset]);
-
-  // Fewer users than the offset: go back to the last page that exists (once; the next answer is in range).
-  useEffect(() => {
-    if (!users.pending && beyond) {
-      setQuery({ offset: offsetParam(Math.floor((total - 1) / LIMIT) * LIMIT) });
-    }
-  }, [users.pending, beyond, total]);
 
   const failed = answer === undefined && users.error !== undefined;
 
@@ -501,10 +397,9 @@ export function AdministrationPage() {
       },
       (e: unknown) => {
         if (!mounted.current) return;
-        const { text, gone } = explain(e);
-        setFailure(text);
+        setFailure(describeError(e, ROW_TEXTS));
         setEnabling(undefined);
-        if (gone) users.reload();
+        if (hasStatus(e, 404)) users.reload();
       },
     );
   };
@@ -548,17 +443,14 @@ export function AdministrationPage() {
           </button>
         </div>
         {failure !== undefined && (
-          <p role="alert" class="admin-error">
+          <p role="alert" class="form-error">
             {failure}
           </p>
         )}
         {answer !== undefined && (
           // Everything below comes from the last answer: while the answer for a new page is
           // outstanding it is dimmed and marked busy.
-          <div
-            class={users.pending ? 'admin-result is-busy' : 'admin-result'}
-            aria-busy={users.pending}
-          >
+          <BusyRegion pending={users.pending} class="admin-result">
             <StaleNote of={users} />
             {answer.total === 0 ? (
               !users.pending && <Empty>No users.</Empty>
@@ -632,14 +524,13 @@ export function AdministrationPage() {
                 <Pager
                   total={answer.total}
                   limit={LIMIT}
-                  offset={offset}
-                  onChange={(next) => {
-                    setQuery({ offset: offsetParam(next) });
-                  }}
+                  offset={shownOffset}
+                  disabled={users.pending}
+                  onChange={paging.set}
                 />
               </>
             )}
-          </div>
+          </BusyRegion>
         )}
       </section>
       {open?.kind === 'add' && (

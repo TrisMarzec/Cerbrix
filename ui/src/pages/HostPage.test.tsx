@@ -8,7 +8,7 @@ import type uPlot from 'uplot';
 import type { HostDetail, HostValue, Role, Series } from '../api/types';
 import { GRAPH_HEIGHT } from '../components/Graph';
 import { SessionProvider } from '../session';
-import { NowContext } from '../shell/context';
+import { NowContext, StatusContext } from '../shell/context';
 import {
   acknowledgedProblem,
   criticalProblem,
@@ -88,6 +88,7 @@ interface Options {
   detail?: Responder | Responder[];
   values?: Responder | Responder[];
   routes?: Record<string, Responder | Responder[]>;
+  reloadStatus?: () => void;
 }
 
 async function open(o: Options = {}) {
@@ -103,9 +104,13 @@ async function open(o: Options = {}) {
   });
   const view = render(
     <SessionProvider>
-      <NowContext.Provider value={NOW}>
-        <HostPage name={name} />
-      </NowContext.Provider>
+      <StatusContext.Provider
+        value={{ status: undefined, staleSince: undefined, reloadStatus: o.reloadStatus ?? (() => {}) }}
+      >
+        <NowContext.Provider value={NOW}>
+          <HostPage name={name} />
+        </NowContext.Provider>
+      </StatusContext.Provider>
     </SessionProvider>,
   );
   await advance(0);
@@ -143,7 +148,7 @@ describe('head', () => {
     expect(screen.getByRole('link', { name: 'E2E' })).toHaveAttribute('href', '/problems?dashboard=e2e');
     expect(screen.getByRole('link', { name: 'Production' })).toHaveAttribute(
       'href',
-      '/problems?dashboard=prod%20wall',
+      '/problems?dashboard=prod+wall',
     );
   });
 
@@ -826,6 +831,8 @@ describe('optimistic actions', () => {
     await advance(0);
     expect(screen.getByText(/acknowledged by anna/)).toBeInTheDocument();
     expect(screen.getByText('1 open problem · Critical (acknowledged)')).toBeInTheDocument();
+    expect(screen.getByText('1 open problem · Critical (acknowledged)')).toHaveClass('is-acknowledged');
+    expect(screen.getByRole('status')).toHaveTextContent('Problem acknowledged.');
   });
 
   it('removes a closed problem at once', async () => {
@@ -844,6 +851,36 @@ describe('optimistic actions', () => {
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close problem' }));
     await advance(0);
     expect(screen.getByText('No open problems.')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Problem closed.');
+  });
+
+  it('asks for the status at once after an action, so the badge follows', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const reloadStatus = vi.fn();
+    await open({
+      role: 'operator',
+      reloadStatus,
+      detail: pendingReload(hostDetailFixture({ open_problems: [criticalProblem] })),
+      routes: {
+        [`POST /problems/${criticalProblem.id}/ack`]: {
+          json: { ...criticalProblem, acknowledged_at: NOW.toISOString(), acknowledged_by: 'anna' },
+        },
+      },
+    });
+    await user.click(screen.getByRole('button', { name: /^Acknowledge / }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Acknowledge' }));
+    await advance(0);
+    expect(reloadStatus).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('host facts', () => {
+  it('writes the enrolment time with the full time as a tooltip', async () => {
+    await open();
+    const enrolled = new Date(2026, 10, 16, 21, 52).toISOString();
+    const time = screen.getByText('16 Nov 21:52');
+    expect(time.tagName).toBe('TIME');
+    expect(time).toHaveAttribute('title', enrolled);
   });
 });
 

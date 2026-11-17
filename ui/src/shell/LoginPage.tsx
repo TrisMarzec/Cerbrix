@@ -1,20 +1,13 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { api, ApiError } from '../api/client';
+import { api } from '../api/client';
 import type { SessionUser } from '../api/types';
+import { describeError } from '../components/describeError';
 
 interface Props {
   /** True when the user was logged in and the session has ended. */
   expired: boolean;
   onLoggedIn: (user: SessionUser) => void;
-}
-
-function messageFor(e: unknown): string {
-  if (e instanceof ApiError) {
-    if (e.status === 401) return e.message;
-    if (e.status === 429) return 'The server is busy, try again in a moment';
-  }
-  return 'Could not reach the server';
 }
 
 export function LoginPage({ expired, onLoggedIn }: Props) {
@@ -39,7 +32,8 @@ export function LoginPage({ expired, onLoggedIn }: Props) {
     try {
       onLoggedIn(await api.send<SessionUser>('POST', '/session', { name, password: attempt }));
     } catch (failure) {
-      setError(messageFor(failure));
+      // A 401 (a wrong name or password) is said in the server's words.
+      setError(describeError(failure));
       setBusy(false);
     }
   }

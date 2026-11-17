@@ -11,9 +11,15 @@ export interface StatusValue {
   staleSince: Date | undefined;
   /** The last error of the status poll; undefined while it works. */
   error?: ApiError | undefined;
+  /** Asks for the status at once, for example after an action changed the problem counts. */
+  reloadStatus: () => void;
 }
 
-export const StatusContext = createContext<StatusValue>({ status: undefined, staleSince: undefined });
+export const StatusContext = createContext<StatusValue>({
+  status: undefined,
+  staleSince: undefined,
+  reloadStatus: () => {},
+});
 
 /** The one polled `GET /status` of the shell, for pages that need `gitops` or the sync state. */
 export function useStatus(): StatusValue {

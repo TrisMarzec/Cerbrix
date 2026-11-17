@@ -1,6 +1,7 @@
 import { useState } from 'preact/hooks';
 
-import { api, ApiError } from '../api/client';
+import { api } from '../api/client';
+import { describeError } from '../components/describeError';
 import { Dialog } from '../components/Dialog';
 
 interface Props {
@@ -14,14 +15,8 @@ interface Props {
 const MIN = 12;
 const MAX = 256;
 
-function messageFor(e: unknown): string {
-  if (e instanceof ApiError) {
-    if (e.status === 403) return 'The current password is wrong';
-    if (e.status === 429) return 'The server is busy, try again in a moment';
-    if (e.status !== 0) return e.message;
-  }
-  return 'Could not reach the server';
-}
+/** The server answers 403 when the current password does not match. */
+const TEXTS = { 403: 'The current password is wrong.' };
 
 export function PasswordDialog({ userName, onClose, onChanged }: Props) {
   const [current, setCurrent] = useState('');
@@ -49,7 +44,7 @@ export function PasswordDialog({ userName, onClose, onChanged }: Props) {
       await api.send('PUT', '/session/password', body);
       onChanged();
     } catch (failure) {
-      setError(messageFor(failure));
+      setError(describeError(failure, TEXTS));
     } finally {
       // Passwords live only as long as the open form and the request.
       setCurrent('');

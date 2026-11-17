@@ -54,7 +54,7 @@ async function open(o: Options = {}) {
   const status = 'status' in o ? o.status : statusFixture();
   const view = render(
     <SessionProvider>
-      <StatusContext.Provider value={{ status, staleSince: undefined }}>
+      <StatusContext.Provider value={{ status, staleSince: undefined, reloadStatus: () => {} }}>
         <NowContext.Provider value={NOW}>
           <ConfigurationPage />
         </NowContext.Provider>
@@ -364,6 +364,9 @@ describe('sync history', () => {
     const region = document.querySelector('.config-result');
     expect(region).toHaveAttribute('aria-busy', 'true');
     expect(screen.getByText('253a299')).toBeInTheDocument();
+    // The pager stays on the page that is shown and waits for the answer.
+    expect(screen.getByText('1–20 of 45')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
     release();
     await advance(0);
     expect(document.querySelector('.config-result')).toHaveAttribute('aria-busy', 'false');
@@ -629,7 +632,7 @@ describe('display tokens', () => {
     expect(sent('POST', '/displays/e2e-wall/token')).toHaveLength(1);
     expect(screen.getByDisplayValue('cbx_dt_TOKENVALUE')).toBeInTheDocument();
     expect(
-      screen.getByText('Open /display/e2e-wall on the wall monitor and enter this token.'),
+      screen.getByText('Keep this token for the wall display E2E wall. The page that uses it comes with the next release.'),
     ).toBeInTheDocument();
     expect(sent('GET', '/displays')).toHaveLength(2);
     await u.click(screen.getByRole('button', { name: 'Close' }));

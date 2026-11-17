@@ -346,6 +346,23 @@ describe('table', () => {
     expect(lastHostQuery().get('offset')).toBe('50');
     expect(lastHostQuery().get('state')).toBe('ok');
   });
+
+  it('keeps the pager on the shown page and disabled while the next page loads', async () => {
+    const next = held(hostsAnswer([hostRowFixture({ name: 'page-2' })], { total: 120 }));
+    await open('/hosts', [hostsAnswer([hostRowFixture()], { total: 120 }), next.responder]);
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await advance(0);
+    expect(screen.getByText('1–50 of 120')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    await act(async () => {
+      next.release();
+      await Promise.resolve();
+    });
+    await advance(0);
+    expect(screen.getByText('51–100 of 120')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled();
+  });
 });
 
 describe('banner and empty states', () => {
@@ -607,5 +624,21 @@ describe('hosts that are not up to date', () => {
     expect(staleNotes()).toHaveLength(0);
     await advance(10_000);
     expectStaleAbove(screen.getByRole('table', { name: 'Hosts' }), '14:30');
+  });
+});
+
+describe('the group list', () => {
+  it('is loaded once while the hosts are polled', async () => {
+    await open('/hosts', hostsAnswer([hostRowFixture()]));
+    await advance(60_000);
+    expect(hostRequests().length).toBeGreaterThan(5);
+    expect(mock.count('GET /host-groups')).toBe(1);
+  });
+
+  it('is loaded again by Try again after a failed first load', async () => {
+    await open('/hosts', [{ status: 500, json: { error: 'internal', message: 'x' } }, hostsAnswer([])], 'network');
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await advance(0);
+    expect(mock.count('GET /host-groups')).toBe(2);
   });
 });

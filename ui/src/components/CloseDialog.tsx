@@ -2,11 +2,14 @@ import { useState } from 'preact/hooks';
 
 import { api, seg } from '../api/client';
 import type { Problem } from '../api/types';
-import { describeActionError } from './actionError';
+import { describeError } from './describeError';
 import { Dialog } from './Dialog';
 import { ProblemBrief } from './ProblemBrief';
 
 const REASON_MAX = 1000;
+
+/** Both actions answer 409 for a problem that has been resolved meanwhile. */
+const ALREADY_RESOLVED = { 409: 'This problem is already resolved.' };
 
 interface Props {
   problem: Problem;
@@ -35,7 +38,7 @@ export function CloseDialog({ problem, onDone, onClose }: Props) {
         onDone(answer);
       },
       (error: unknown) => {
-        setFailure(describeActionError(error));
+        setFailure(describeError(error, ALREADY_RESOLVED));
         setBusy(false);
       },
     );
@@ -70,7 +73,7 @@ export function CloseDialog({ problem, onDone, onClose }: Props) {
           />
         </label>
         {failure !== undefined && (
-          <p role="alert" class="dialog-error">
+          <p role="alert" class="form-error">
             {failure}
           </p>
         )}

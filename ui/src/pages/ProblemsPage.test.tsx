@@ -8,7 +8,7 @@ import {
 
 import type { Problem, ProblemsAnswer, Role } from "../api/types";
 import { SessionProvider } from "../session";
-import { NowContext } from "../shell/context";
+import { NowContext, StatusContext } from "../shell/context";
 import {
   acknowledgedProblem,
   criticalProblem,
@@ -837,5 +837,51 @@ describe("problems that are not up to date", () => {
     expect(staleNotes()).toHaveLength(0);
     await advance(10_000);
     expectStaleAbove(screen.getByRole("table", { name: "Problems" }), "14:30");
+  });
+});
+
+describe("problem texts and the status after an action", () => {
+  it("labels the close button as on the host page", async () => {
+    await open("/problems", { problems: answer([criticalProblem]) });
+    expect(
+      screen.getByRole("button", { name: /^Close problem Disk almost full/ }),
+    ).toHaveTextContent(/^Close…$/);
+  });
+
+  it("says acknowledged without a name when the user is unknown", async () => {
+    await open("/problems", {
+      problems: answer([{ ...acknowledgedProblem, acknowledged_by: null, ack_comment: null }]),
+    });
+    const row = screen.getByText("Memory high").closest("tr") as HTMLElement;
+    expect(row).toHaveTextContent("Warning · acknowledged, 14:05");
+    expect(row).not.toHaveTextContent("unknown");
+  });
+
+  it("asks for the status at once after an acknowledge, so the badge follows", async () => {
+    window.history.replaceState(null, "", "/problems");
+    mock = mockFetch({
+      "GET /session": { json: { name: "anna", role: "operator" } },
+      "GET /problems": answer([criticalProblem]),
+      "GET /dashboards": { json: { items: [] } },
+      "GET /host-groups": { json: { items: [] } },
+      [`POST /problems/${criticalProblem.id}/ack`]: { json: { ...criticalProblem } },
+    });
+    const reloadStatus = vi.fn();
+    render(
+      <SessionProvider>
+        <StatusContext.Provider value={{ status: undefined, staleSince: undefined, reloadStatus }}>
+          <NowContext.Provider value={NOW}>
+            <ProblemsPage />
+          </NowContext.Provider>
+        </StatusContext.Provider>
+      </SessionProvider>,
+    );
+    await advance(0);
+    await advance(0);
+    fireEvent.click(screen.getByRole("button", { name: /^Acknowledge Disk almost full/ }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Acknowledge" }));
+    expect(reloadStatus).not.toHaveBeenCalled();
+    await advance(0);
+    expect(reloadStatus).toHaveBeenCalledTimes(1);
   });
 });

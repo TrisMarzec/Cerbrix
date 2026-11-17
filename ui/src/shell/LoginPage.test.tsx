@@ -63,7 +63,7 @@ describe('LoginPage', () => {
     render(<LoginPage expired={false} onLoggedIn={() => {}} />);
     await fill(user);
     await user.click(screen.getByRole('button', { name: 'Log in' }));
-    expect(await screen.findByText('The server is busy, try again in a moment')).toBeInTheDocument();
+    expect(await screen.findByText('The server is busy, try again in a moment.')).toBeInTheDocument();
     expect(screen.getByLabelText('Password')).toHaveValue('');
   });
 
@@ -73,7 +73,18 @@ describe('LoginPage', () => {
     render(<LoginPage expired={false} onLoggedIn={() => {}} />);
     await fill(user);
     await user.click(screen.getByRole('button', { name: 'Log in' }));
-    expect(await screen.findByText('Could not reach the server')).toBeInTheDocument();
+    expect(await screen.findByText('Could not reach the server.')).toBeInTheDocument();
+  });
+
+  it("shows the server's message for another failure", async () => {
+    mock = mockFetch({
+      'POST /session': { status: 500, json: { error: 'internal', message: 'The database is down.' } },
+    });
+    const user = userEvent.setup();
+    render(<LoginPage expired={false} onLoggedIn={() => {}} />);
+    await fill(user);
+    await user.click(screen.getByRole('button', { name: 'Log in' }));
+    expect(await screen.findByText('The database is down.')).toBeInTheDocument();
   });
 
   it('shows why the user is here after the session ended, and links the licences', () => {

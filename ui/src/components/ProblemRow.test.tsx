@@ -1,8 +1,9 @@
 import { screen } from '@testing-library/preact';
 
+import type { Problem } from '../api/types';
 import { acknowledgedProblem, criticalProblem } from '../test/fixtures';
 import { renderAt } from '../test/render';
-import { ProblemRow } from './ProblemRow';
+import { ProblemMeta, problemName, ProblemRow, resolveText } from './ProblemRow';
 
 describe('ProblemRow', () => {
   it('shows host, trigger, summary, severity word and duration', () => {
@@ -75,5 +76,37 @@ describe('ProblemRow', () => {
     const resolved = { ...criticalProblem, resolved_at: new Date(2026, 10, 17, 12, 46).toISOString() };
     renderAt((now) => <ProblemRow problem={resolved} now={now} />);
     expect(screen.getByText('30 min')).toBeInTheDocument();
+  });
+});
+
+describe('problem texts', () => {
+  it('names a problem by trigger and instance', () => {
+    expect(problemName(criticalProblem)).toBe('Disk almost full mount=/');
+    expect(problemName(acknowledgedProblem)).toBe('Memory high');
+  });
+
+  it('says acknowledged without a name when the user is unknown', () => {
+    const problem = { ...acknowledgedProblem, acknowledged_by: null, ack_comment: null };
+    const { container } = renderAt((now) => <ProblemMeta problem={problem} now={now} />);
+    expect(container).toHaveTextContent(/^Warning · acknowledged, 14:05$/);
+    expect(container).not.toHaveTextContent('unknown');
+  });
+
+  it('writes the severity, who acknowledged and the comment', () => {
+    const { container } = renderAt((now) => <ProblemMeta problem={acknowledgedProblem} now={now} />);
+    expect(container).toHaveTextContent('Warning · acknowledged by anna, 14:05 · watching');
+  });
+
+  it('says how a problem was resolved', () => {
+    const base = { ...criticalProblem, resolved_at: criticalProblem.started_at };
+    expect(resolveText(criticalProblem)).toBeUndefined();
+    expect(resolveText({ ...base, resolve_reason: 'condition_ended' })).toBe('ended by itself');
+    expect(resolveText({ ...base, resolve_reason: 'host_removed' })).toBe('host removed');
+    expect(resolveText({ ...base, resolve_reason: 'trigger_removed' })).toBe('trigger removed');
+    expect(resolveText({ ...base, resolve_reason: 'closed_by_operator', closed_by: 'anna' })).toBe('closed by anna');
+    expect(resolveText({ ...base, resolve_reason: 'closed_by_operator', closed_by: null })).toBe('closed by hand');
+    // A reason a later server version adds is shown as it was sent.
+    const unknown = 'merged' as unknown as Problem['resolve_reason'];
+    expect(resolveText({ ...base, resolve_reason: unknown })).toBe('merged');
   });
 });

@@ -73,10 +73,6 @@
   margin-left: 8px;
 }
 
-.config-result.is-busy {
-  opacity: 0.6;
-}
-
 .config-names {
   margin-top: 10px;
   color: var(--dim);
@@ -97,32 +93,6 @@
   margin-bottom: 10px;
 }
 
-.config-error {
-  color: var(--warning);
-}
-
-.config-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.config-form label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  color: var(--dim);
-}
-
 .config-dim-row {
   color: var(--dim);
-}
-
-.config-table .visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }
