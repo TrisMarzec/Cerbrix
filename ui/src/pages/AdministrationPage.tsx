@@ -1,20 +1,20 @@
-import "./AdministrationPage.css";
+import './AdministrationPage.css';
 
-import type { ComponentChildren } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import type { ComponentChildren } from 'preact';
+import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { api, ApiError, seg } from "../api/client";
-import type { Listed, Role, User } from "../api/types";
-import { Banner } from "../components/Banner";
-import { Dialog } from "../components/Dialog";
-import { Empty } from "../components/Empty";
-import { Pager } from "../components/Pager";
-import { SecretDialog } from "../components/SecretDialog";
-import { TimeText } from "../components/TimeText";
-import { usePolled } from "../lib/poll";
-import { useQueryState } from "../lib/query";
-import { useSession } from "../session";
-import { useNow } from "../shell/context";
+import { api, ApiError, seg } from '../api/client';
+import type { Listed, Role, User } from '../api/types';
+import { Banner } from '../components/Banner';
+import { Dialog } from '../components/Dialog';
+import { Empty } from '../components/Empty';
+import { Pager } from '../components/Pager';
+import { SecretDialog } from '../components/SecretDialog';
+import { TimeText } from '../components/TimeText';
+import { usePolled } from '../lib/poll';
+import { useQueryState } from '../lib/query';
+import { useSession } from '../session';
+import { useNow } from '../shell/context';
 
 const LIMIT = 50;
 const NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -22,16 +22,15 @@ const PASSWORD_MIN = 12;
 const PASSWORD_MAX = 256;
 
 const NAME_PROBLEM =
-  "Use 1 to 63 characters: a–z, 0–9, dot, underscore, hyphen; start with a letter or digit.";
-const GONE = "This user no longer exists.";
-const OWN_SESSION = "This ends your own session.";
-const PASSWORD_NOTE =
-  "Give this password to the user. They should change it after the first login.";
+  'Use 1 to 63 characters: a–z, 0–9, dot, underscore, hyphen; start with a letter or digit.';
+const GONE = 'This user no longer exists.';
+const OWN_SESSION = 'This ends your own session.';
+const PASSWORD_NOTE = 'Give this password to the user. They should change it after the first login.';
 
 const ROLES: { value: Role; label: string }[] = [
-  { value: "viewer", label: "Viewer" },
-  { value: "operator", label: "Operator" },
-  { value: "admin", label: "Admin" },
+  { value: 'viewer', label: 'Viewer' },
+  { value: 'operator', label: 'Operator' },
+  { value: 'admin', label: 'Admin' },
 ];
 
 function roleWord(role: Role): string {
@@ -52,29 +51,32 @@ function offsetParam(offset: number): string | undefined {
   return offset === 0 ? undefined : String(offset);
 }
 
+/** True until the component unmounts; a late answer then sets no state. */
+function useMounted() {
+  const mounted = useRef(true);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
+  );
+  return mounted;
+}
+
 /** The sentence for a failed request, and whether it means the user is gone. */
-function explain(
-  e: unknown,
-  onCreate = false,
-): { text: string; gone: boolean } {
+function explain(e: unknown, onCreate = false): { text: string; gone: boolean } {
   if (!(e instanceof ApiError) || e.status === 0) {
-    return { text: "Could not reach the server.", gone: false };
+    return { text: 'Could not reach the server.', gone: false };
   }
   switch (e.status) {
     case 403:
-      return { text: "Your role may not do this.", gone: false };
+      return { text: 'Your role may not do this.', gone: false };
     case 404:
       return { text: GONE, gone: true };
     case 409:
-      return {
-        text: onCreate ? "This name is taken." : e.message,
-        gone: false,
-      };
+      return { text: onCreate ? 'This name is taken.' : e.message, gone: false };
     case 429:
-      return {
-        text: "The server is busy, try again in a moment.",
-        gone: false,
-      };
+      return { text: 'The server is busy, try again in a moment.', gone: false };
     default:
       return { text: e.message, gone: false };
   }
@@ -96,7 +98,7 @@ interface FrameProps<T> {
   /** A sentence when the input is not acceptable; no request is sent then. */
   validate?: () => string | undefined;
   run: () => Promise<T>;
-  /** Called after every attempt that reached the server or failed, for example to empty password fields. */
+  /** Called after every attempt, for example to empty password fields. */
   afterAttempt?: () => void;
   /** The failure of a create is read differently (`409` means the name is taken). */
   onCreate?: boolean;
@@ -118,6 +120,7 @@ function Frame<T>({
   onDone,
   onClose,
 }: FrameProps<T>) {
+  const mounted = useMounted();
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | undefined>(undefined);
   const [stale, setStale] = useState(false);
@@ -138,10 +141,12 @@ function Frame<T>({
     setFailure(undefined);
     run().then(
       (result) => {
+        if (!mounted.current) return;
         afterAttempt?.();
         onDone(result);
       },
       (error: unknown) => {
+        if (!mounted.current) return;
         const { text, gone } = explain(error, onCreate);
         afterAttempt?.();
         setFailure(text);
@@ -190,8 +195,8 @@ interface PasswordChoice {
 
 function usePasswordChoice(): PasswordChoice {
   const [generate, setGenerate] = useState(true);
-  const [password, setPassword] = useState("");
-  const [again, setAgain] = useState("");
+  const [password, setPassword] = useState('');
+  const [again, setAgain] = useState('');
   return { generate, setGenerate, password, setPassword, again, setAgain };
 }
 
@@ -201,14 +206,13 @@ function passwordProblem(choice: PasswordChoice): string | undefined {
   if (length < PASSWORD_MIN || length > PASSWORD_MAX) {
     return `Use ${PASSWORD_MIN} to ${PASSWORD_MAX} characters for the password.`;
   }
-  if (choice.password !== choice.again)
-    return "The two passwords are not equal.";
+  if (choice.password !== choice.again) return 'The two passwords are not equal.';
   return undefined;
 }
 
 function clearPasswords(choice: PasswordChoice) {
-  choice.setPassword("");
-  choice.setAgain("");
+  choice.setPassword('');
+  choice.setAgain('');
 }
 
 function PasswordFields({ choice }: { choice: PasswordChoice }) {
@@ -272,6 +276,27 @@ function PasswordFields({ choice }: { choice: PasswordChoice }) {
 type Generated = { password?: string };
 type Closed = (reload: boolean) => void;
 
+function RoleSelect({ value, onChange }: { value: Role; onChange: (role: Role) => void }) {
+  return (
+    <label>
+      Role
+      <select
+        value={value}
+        onChange={(e) => {
+          const next = e.currentTarget.value;
+          if (isRole(next)) onChange(next);
+        }}
+      >
+        {ROLES.map((r) => (
+          <option key={r.value} value={r.value}>
+            {r.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function AddUserDialog({
   onDone,
   onClose,
@@ -279,8 +304,8 @@ function AddUserDialog({
   onDone: (created: User & Generated) => void;
   onClose: Closed;
 }) {
-  const [name, setName] = useState("");
-  const [role, setRole] = useState<Role>("viewer");
+  const [name, setName] = useState('');
+  const [role, setRole] = useState<Role>('viewer');
   const choice = usePasswordChoice();
 
   return (
@@ -288,11 +313,9 @@ function AddUserDialog({
       title="Add user"
       submitLabel="Add user"
       onCreate
-      validate={() =>
-        NAME_PATTERN.test(name) ? passwordProblem(choice) : NAME_PROBLEM
-      }
+      validate={() => (NAME_PATTERN.test(name) ? passwordProblem(choice) : NAME_PROBLEM)}
       run={() =>
-        api.send<User & Generated>("POST", "/users", {
+        api.send<User & Generated>('POST', '/users', {
           name,
           role,
           ...(choice.generate ? {} : { password: choice.password }),
@@ -321,33 +344,6 @@ function AddUserDialog({
   );
 }
 
-function RoleSelect({
-  value,
-  onChange,
-}: {
-  value: Role;
-  onChange: (role: Role) => void;
-}) {
-  return (
-    <label>
-      Role
-      <select
-        value={value}
-        onChange={(e) => {
-          const next = e.currentTarget.value;
-          if (isRole(next)) onChange(next);
-        }}
-      >
-        {ROLES.map((r) => (
-          <option key={r.value} value={r.value}>
-            {r.label}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
 interface RowDialogProps {
   user: User;
   own: boolean;
@@ -362,7 +358,7 @@ function RoleDialog({ user, own, onDone, onClose }: RowDialogProps) {
       title="Change role"
       submitLabel="Change role"
       submitDisabled={role === user.role}
-      run={() => api.send<User>("PATCH", `/users/${seg(user.id)}`, { role })}
+      run={() => api.send<User>('PATCH', `/users/${seg(user.id)}`, { role })}
       onDone={onDone}
       onClose={onClose}
     >
@@ -377,9 +373,7 @@ function DisableDialog({ user, own, onDone, onClose }: RowDialogProps) {
     <Frame
       title="Disable user"
       submitLabel="Disable user"
-      run={() =>
-        api.send<User>("PATCH", `/users/${seg(user.id)}`, { disabled: true })
-      }
+      run={() => api.send<User>('PATCH', `/users/${seg(user.id)}`, { disabled: true })}
       onDone={onDone}
       onClose={onClose}
     >
@@ -394,7 +388,7 @@ function RemoveDialog({ user, own, onDone, onClose }: RowDialogProps) {
     <Frame
       title="Remove user"
       submitLabel="Remove user"
-      run={() => api.send<void>("DELETE", `/users/${seg(user.id)}`)}
+      run={() => api.send<void>('DELETE', `/users/${seg(user.id)}`)}
       onDone={onDone}
       onClose={onClose}
     >
@@ -404,12 +398,16 @@ function RemoveDialog({ user, own, onDone, onClose }: RowDialogProps) {
   );
 }
 
+/** Never opened for the own account: the server would end the session that shows the new password. */
 function ResetDialog({
   user,
-  own,
   onDone,
   onClose,
-}: Omit<RowDialogProps, "onDone"> & { onDone: (answer: Generated) => void }) {
+}: {
+  user: User;
+  onDone: (answer: Generated) => void;
+  onClose: Closed;
+}) {
   const choice = usePasswordChoice();
   return (
     <Frame
@@ -418,7 +416,7 @@ function ResetDialog({
       validate={() => passwordProblem(choice)}
       run={() =>
         api.send<Generated>(
-          "POST",
+          'POST',
           `/users/${seg(user.id)}/password`,
           choice.generate ? {} : { password: choice.password },
         )
@@ -430,7 +428,6 @@ function ResetDialog({
       onClose={onClose}
     >
       <p>{`All sessions of ${user.name} end.`}</p>
-      <OwnSessionWarning own={own} />
       <PasswordFields choice={choice} />
     </Frame>
   );
@@ -438,20 +435,18 @@ function ResetDialog({
 
 // ---------------------------------------------------------------- Page
 
-type Open =
-  | { kind: "add" }
-  | { kind: "role" | "disable" | "reset" | "remove"; user: User }
-  | undefined;
+type RowKind = 'role' | 'disable' | 'reset' | 'remove';
+type Open = { kind: 'add' } | { kind: RowKind; user: User } | undefined;
 
 export function AdministrationPage() {
   const { user: me } = useSession();
   const now = useNow();
+  const mounted = useMounted();
   const [query, setQuery] = useQueryState();
-  const offset = parseOffset(query.get("offset"));
+  const offset = parseOffset(query.get('offset'));
 
   const users = usePolled(
-    (signal) =>
-      api.get<Listed<User>>("/users", { limit: LIMIT, offset }, signal),
+    (signal) => api.get<Listed<User>>('/users', { limit: LIMIT, offset }, signal),
     [offset],
   );
   const [open, setOpen] = useState<Open>(undefined);
@@ -464,12 +459,15 @@ export function AdministrationPage() {
   const total = answer?.total ?? 0;
   const beyond = answer !== undefined && total > 0 && total <= offset;
 
+  // Another page: the failure of an Enable on the old one no longer applies.
+  useEffect(() => {
+    setFailure(undefined);
+  }, [offset]);
+
   // Fewer users than the offset: go back to the last page that exists (once; the next answer is in range).
   useEffect(() => {
     if (!users.pending && beyond) {
-      setQuery({
-        offset: offsetParam(Math.floor((total - 1) / LIMIT) * LIMIT),
-      });
+      setQuery({ offset: offsetParam(Math.floor((total - 1) / LIMIT) * LIMIT) });
     }
   }, [users.pending, beyond, total]);
 
@@ -481,24 +479,27 @@ export function AdministrationPage() {
   };
   const done = () => {
     setOpen(undefined);
+    setFailure(undefined);
     users.reload();
   };
   const gotPassword = (title: string, answered: Generated) => {
     done();
-    if (typeof answered.password === "string")
-      setSecret({ title, value: answered.password });
+    if (typeof answered.password === 'string') setSecret({ title, value: answered.password });
   };
 
   const enable = (user: User) => {
     if (enabling !== undefined) return;
     setEnabling(user.id);
     setFailure(undefined);
-    api.send<User>("PATCH", `/users/${seg(user.id)}`, { disabled: false }).then(
+    api.send<User>('PATCH', `/users/${seg(user.id)}`, { disabled: false }).then(
       () => {
+        if (!mounted.current) return;
         setEnabling(undefined);
+        setFailure(undefined);
         users.reload();
       },
       (e: unknown) => {
+        if (!mounted.current) return;
         const { text, gone } = explain(e);
         setFailure(text);
         setEnabling(undefined);
@@ -507,16 +508,11 @@ export function AdministrationPage() {
     );
   };
 
-  const button = (
-    user: User,
-    kind: "role" | "disable" | "reset" | "remove",
-    label: string,
-    what: string,
-  ) => (
+  const rowButton = (user: User, kind: RowKind, label: string, aria: string) => (
     <button
       type="button"
       class="btn"
-      aria-label={`${label}${what} ${user.name}`}
+      aria-label={aria}
       disabled={enabling === user.id}
       onClick={() => {
         setOpen({ kind, user });
@@ -533,7 +529,7 @@ export function AdministrationPage() {
         <h2>Users</h2>
         {failed && (
           <Banner kind="warning">
-            Could not load the users.{" "}
+            Could not load the users.{' '}
             <button type="button" class="btn" onClick={users.reload}>
               Try again
             </button>
@@ -544,7 +540,7 @@ export function AdministrationPage() {
             type="button"
             class="btn"
             onClick={() => {
-              setOpen({ kind: "add" });
+              setOpen({ kind: 'add' });
             }}
           >
             Add user
@@ -559,7 +555,7 @@ export function AdministrationPage() {
           // Everything below comes from the last answer: while the answer for a new page is
           // outstanding it is dimmed and marked busy.
           <div
-            class={users.pending ? "admin-result is-busy" : "admin-result"}
+            class={users.pending ? 'admin-result is-busy' : 'admin-result'}
             aria-busy={users.pending}
           >
             {answer.total === 0 ? (
@@ -581,47 +577,51 @@ export function AdministrationPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {answer.items.map((u) => (
-                        <tr
-                          key={u.id}
-                          class={u.disabled ? "admin-dim-row" : undefined}
-                        >
-                          <th scope="row">
-                            <span class="admin-name">{u.name}</span>
-                            {u.name === me.name && (
-                              <span class="admin-you">you</span>
-                            )}
-                          </th>
-                          <td>{roleWord(u.role)}</td>
-                          <td>{u.disabled ? "Disabled" : "Active"}</td>
-                          <td>
-                            <TimeText iso={u.created_at} now={now} />
-                          </td>
-                          <td>
-                            <TimeText iso={u.password_changed_at} now={now} />
-                          </td>
-                          <td class="admin-actions">
-                            {button(u, "role", "Change role", " of")}
-                            {u.disabled ? (
-                              <button
-                                type="button"
-                                class="btn"
-                                aria-label={`Enable ${u.name}`}
-                                disabled={enabling === u.id}
-                                onClick={() => {
-                                  enable(u);
-                                }}
-                              >
-                                Enable
-                              </button>
-                            ) : (
-                              button(u, "disable", "Disable", "")
-                            )}
-                            {button(u, "reset", "Reset password", " of")}
-                            {button(u, "remove", "Remove", "")}
-                          </td>
-                        </tr>
-                      ))}
+                      {answer.items.map((u) => {
+                        const own = u.name === me.name;
+                        return (
+                          <tr key={u.id} class={u.disabled ? 'admin-dim-row' : undefined}>
+                            <th scope="row">
+                              <span class="admin-name">{u.name}</span>
+                              {own && <span class="admin-you">you</span>}
+                            </th>
+                            <td>{roleWord(u.role)}</td>
+                            <td>{u.disabled ? 'Disabled' : 'Active'}</td>
+                            <td>
+                              <TimeText iso={u.created_at} now={now} />
+                            </td>
+                            <td>
+                              <TimeText iso={u.password_changed_at} now={now} />
+                            </td>
+                            <td class="admin-actions">
+                              {rowButton(u, 'role', 'Change role', `Change role of ${u.name}`)}
+                              {u.disabled ? (
+                                <button
+                                  type="button"
+                                  class="btn"
+                                  aria-label={`Enable ${u.name}`}
+                                  disabled={enabling !== undefined}
+                                  onClick={() => {
+                                    enable(u);
+                                  }}
+                                >
+                                  Enable
+                                </button>
+                              ) : (
+                                rowButton(u, 'disable', 'Disable', `Disable ${u.name}`)
+                              )}
+                              {own ? (
+                                <span class="dim admin-hint">
+                                  Use Change password for your own account.
+                                </span>
+                              ) : (
+                                rowButton(u, 'reset', 'Reset password', `Reset password of ${u.name}`)
+                              )}
+                              {rowButton(u, 'remove', 'Remove', `Remove ${u.name}`)}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 ) : (
@@ -640,7 +640,7 @@ export function AdministrationPage() {
           </div>
         )}
       </section>
-      {open?.kind === "add" && (
+      {open?.kind === 'add' && (
         <AddUserDialog
           onDone={(created) => {
             gotPassword(`Password of ${created.name}`, created);
@@ -648,14 +648,8 @@ export function AdministrationPage() {
           onClose={closeDialog}
         />
       )}
-      {open !== undefined && open.kind !== "add" && (
-        <RowDialog
-          open={open}
-          me={me.name}
-          onDone={gotPassword}
-          onClose={closeDialog}
-          done={done}
-        />
+      {open !== undefined && open.kind !== 'add' && (
+        <RowDialog open={open} me={me.name} onDone={done} onPassword={gotPassword} onClose={closeDialog} />
       )}
       {secret !== undefined && (
         <SecretDialog
@@ -672,36 +666,29 @@ export function AdministrationPage() {
 }
 
 interface RowDialogHostProps {
-  open: { kind: "role" | "disable" | "reset" | "remove"; user: User };
+  open: { kind: RowKind; user: User };
   me: string;
-  done: () => void;
-  onDone: (title: string, answer: Generated) => void;
+  onDone: () => void;
+  onPassword: (title: string, answer: Generated) => void;
   onClose: Closed;
 }
 
-function RowDialog({ open, me, done, onDone, onClose }: RowDialogHostProps) {
+function RowDialog({ open, me, onDone, onPassword, onClose }: RowDialogHostProps) {
   const { user } = open;
   const own = user.name === me;
   switch (open.kind) {
-    case "role":
-      return (
-        <RoleDialog user={user} own={own} onDone={done} onClose={onClose} />
-      );
-    case "disable":
-      return (
-        <DisableDialog user={user} own={own} onDone={done} onClose={onClose} />
-      );
-    case "remove":
-      return (
-        <RemoveDialog user={user} own={own} onDone={done} onClose={onClose} />
-      );
-    case "reset":
+    case 'role':
+      return <RoleDialog user={user} own={own} onDone={onDone} onClose={onClose} />;
+    case 'disable':
+      return <DisableDialog user={user} own={own} onDone={onDone} onClose={onClose} />;
+    case 'remove':
+      return <RemoveDialog user={user} own={own} onDone={onDone} onClose={onClose} />;
+    case 'reset':
       return (
         <ResetDialog
           user={user}
-          own={own}
           onDone={(answer) => {
-            onDone(`Password of ${user.name}`, answer);
+            onPassword(`Password of ${user.name}`, answer);
           }}
           onClose={onClose}
         />

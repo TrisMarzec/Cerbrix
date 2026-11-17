@@ -85,3 +85,7 @@
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+.admin-hint {
+  margin: 0 8px;
+}
