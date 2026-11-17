@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/preact';
+import { render, screen, waitFor } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'preact/hooks';
 
@@ -26,6 +26,115 @@ function Host({ onClose }: { onClose?: () => void }) {
     </>
   );
 }
+
+function Nested({ innerButtons = 1 }: { innerButtons?: number }) {
+  const [confirm, setConfirm] = useState(false);
+  return (
+    <Dialog title="Outer" onClose={() => {}}>
+      <button type="button" onClick={() => setConfirm(true)}>
+        Delete
+      </button>
+      <button type="button">Other</button>
+      {confirm && (
+        <Dialog title="Confirm" onClose={() => setConfirm(false)}>
+          <button type="button">Yes</button>
+          {innerButtons > 1 && <button type="button">No</button>}
+        </Dialog>
+      )}
+    </Dialog>
+  );
+}
+
+describe('nested Dialog', () => {
+  it('closes only the inner dialog on Escape and returns focus to its opener', async () => {
+    const user = userEvent.setup();
+    render(<Nested />);
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    expect(screen.getAllByRole('dialog')).toHaveLength(2);
+    await user.keyboard('{Escape}');
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    expect(screen.getByRole('dialog', { name: 'Outer' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete' })).toHaveFocus();
+  });
+
+  it('keeps Tab and Shift+Tab in an inner dialog with one focusable element', async () => {
+    const user = userEvent.setup();
+    render(<Nested />);
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    const yes = screen.getByRole('button', { name: 'Yes' });
+    expect(yes).toHaveFocus();
+    await user.tab();
+    expect(yes).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(yes).toHaveFocus();
+  });
+
+  it('cycles inside an inner dialog with two focusable elements', async () => {
+    const user = userEvent.setup();
+    render(<Nested innerButtons={2} />);
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'No' })).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Yes' })).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(screen.getByRole('button', { name: 'No' })).toHaveFocus();
+  });
+
+  it('lets the outer dialog work again after the inner one closed', async () => {
+    const user = userEvent.setup();
+    render(<Nested />);
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await user.keyboard('{Escape}');
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Other' })).toHaveFocus();
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Delete' })).toHaveFocus();
+  });
+});
+
+describe('Dialog focus', () => {
+  it('keeps focus inside when the focused element disappears', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    function Form() {
+      const [sent, setSent] = useState(false);
+      return (
+        <Dialog title="Form" onClose={onClose}>
+          {!sent && (
+            <button type="button" onClick={() => setSent(true)}>
+              Send
+            </button>
+          )}
+          <button type="button">Close</button>
+        </Dialog>
+      );
+    }
+    render(<Form />);
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await user.tab();
+    expect(screen.getByRole('dialog')).toContainElement(document.activeElement as HTMLElement);
+  });
+
+  it('focuses main when the opener is gone at close', async () => {
+    const main = document.createElement('main');
+    document.body.append(main);
+    const opener = document.createElement('button');
+    main.append(opener);
+    opener.focus();
+    const { unmount } = render(
+      <Dialog title="T" onClose={() => {}}>
+        <button type="button">In</button>
+      </Dialog>,
+    );
+    opener.remove();
+    unmount();
+    await waitFor(() => expect(main).toHaveFocus());
+    main.remove();
+  });
+});
 
 describe('Dialog', () => {
   it('is modal and labelled by its title', async () => {

@@ -23,6 +23,32 @@ function setClipboard(value: unknown) {
 }
 
 describe('SecretDialog', () => {
+  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  afterEach(() => {
+    if (original === undefined) {
+      Reflect.deleteProperty(navigator, 'clipboard');
+    } else {
+      Object.defineProperty(navigator, 'clipboard', original);
+    }
+  });
+
+  it('is not closed by a click on the backdrop but by Escape', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Host />);
+    const backdrop = container.querySelector('.dialog-backdrop');
+    await user.click(backdrop as Element);
+    expect(screen.getByDisplayValue('s3cr3t-value')).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(screen.getByText('closed')).toBeInTheDocument();
+  });
+
+  it('switches off autocomplete and spellcheck', () => {
+    render(<Host />);
+    const field = screen.getByDisplayValue('s3cr3t-value');
+    expect(field).toHaveAttribute('autocomplete', 'off');
+    expect(field).toHaveAttribute('spellcheck', 'false');
+  });
+
   it('shows the secret in a read-only field with the note', () => {
     render(<Host />);
     const field = screen.getByDisplayValue('s3cr3t-value');

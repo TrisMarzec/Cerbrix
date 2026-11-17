@@ -34,6 +34,12 @@ describe('StateText', () => {
     expect(container).toHaveTextContent('Warning: Memory high (acknowledged) and 1 more');
   });
 
+  it('keeps a long trigger name inside the wrapping element', () => {
+    const long = 'y'.repeat(200);
+    const { container } = render(<StateText state={{ ...criticalState, trigger: long }} />);
+    expect(container.querySelector('.state-text')).toHaveTextContent(long);
+  });
+
   it('shows the summary for no data', () => {
     const { container } = render(<StateText state={noDataState} />);
     expect(container).toHaveTextContent('Critical: no data for 5m');

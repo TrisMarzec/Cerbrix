@@ -33,7 +33,21 @@ describe('HostSquares', () => {
         ]}
       />,
     );
-    expect(getByRole('img')).toHaveAccessibleName('2 hosts, 1 with problems');
+    expect(getByRole('img')).toHaveAccessibleName('2 hosts, 1 with a problem');
+  });
+
+  it('words the label for none, one and several', () => {
+    const none = Array.from({ length: 1 }, () => ({ name: 'a', state: null }));
+    const many = Array.from({ length: 12 }, (_, i) => ({
+      name: `h${i}`,
+      state: i < 2 ? criticalState : null,
+    }));
+    const { getByRole, rerender } = render(<HostSquares hosts={none} />);
+    expect(getByRole('img')).toHaveAccessibleName('1 host, none with problems');
+    rerender(<HostSquares hosts={many} />);
+    expect(getByRole('img')).toHaveAccessibleName('12 hosts, 2 with problems');
+    rerender(<HostSquares hosts={many.slice(1)} />);
+    expect(getByRole('img')).toHaveAccessibleName('11 hosts, 1 with a problem');
   });
 
   it('cuts the strip at max and says how many are left', () => {

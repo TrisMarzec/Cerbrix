@@ -172,6 +172,7 @@ textarea {
 }
 
 .state-text {
+  overflow-wrap: anywhere;
   color: var(--sev);
   font-weight: 600;
 }
@@ -236,10 +237,13 @@ textarea {
 }
 
 .problem-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-weight: 500;
 }
 
 .problem-summary {
+  min-width: 0;
   color: var(--dim);
   overflow-wrap: anywhere;
 }

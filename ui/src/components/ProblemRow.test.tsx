@@ -51,6 +51,15 @@ describe('ProblemRow', () => {
     expect(screen.getByTitle(host)).toBeInTheDocument();
   });
 
+  it('puts long unbroken text in elements that wrap', () => {
+    const long = 'x'.repeat(200);
+    const problem = { ...criticalProblem, trigger: long, instance: `path=/${long}`, summary: long };
+    const { container } = renderAt((now) => <ProblemRow problem={problem} now={now} />);
+    expect(container.querySelector('.problem-name')).toHaveTextContent(long);
+    expect(container.querySelector('.problem-name')).toHaveTextContent(`path=/${long}`);
+    expect(container.querySelector('.problem-summary')).toHaveTextContent(long);
+  });
+
   it('renders actions at the end', () => {
     renderAt((now) => (
       <ProblemRow

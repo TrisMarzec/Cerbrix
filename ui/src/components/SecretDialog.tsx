@@ -1,4 +1,4 @@
-import { useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { Dialog } from './Dialog';
 
@@ -16,6 +16,11 @@ export function SecretDialog({ title, secret, note, onClose }: Props) {
   const field = useRef<HTMLInputElement>(null);
   const [copy, setCopy] = useState<CopyState>('idle');
 
+  // Set as an attribute: a false property would drop it instead of writing spellcheck="false".
+  useEffect(() => {
+    field.current?.setAttribute('spellcheck', 'false');
+  }, []);
+
   async function onCopy() {
     try {
       if (navigator.clipboard === undefined) throw new Error('no clipboard');
@@ -29,7 +34,7 @@ export function SecretDialog({ title, secret, note, onClose }: Props) {
   }
 
   return (
-    <Dialog title={title} onClose={onClose}>
+    <Dialog title={title} onClose={onClose} closeOnBackdrop={false}>
       <p>{note}</p>
       <p class="dim">This is shown once.</p>
       <input
@@ -37,6 +42,7 @@ export function SecretDialog({ title, secret, note, onClose }: Props) {
         class="secret-field"
         type="text"
         readOnly
+        autoComplete="off"
         value={secret}
         aria-label={title}
         onFocus={(e) => e.currentTarget.select()}

@@ -64,6 +64,60 @@ describe('age', () => {
   });
 });
 
+describe('edge cases', () => {
+  const now = at(2026, 10, 17, 14, 30);
+
+  it('does not throw on an unparsable time', () => {
+    expect(clock('not a time', now)).toBe('–');
+    expect(duration('not a time', now)).toBe('–');
+    expect(age('not a time', now)).toBe('–');
+    expect(clock('', now)).toBe('–');
+  });
+
+  it('counts elapsed time across a daylight-saving change', () => {
+    // 24 real hours, whatever the wall clock did in between.
+    expect(duration('2026-03-28T12:00:00Z', new Date('2026-03-29T12:00:00Z'))).toBe('1 d');
+    expect(duration('2026-10-24T12:00:00Z', new Date('2026-10-25T12:00:00Z'))).toBe('1 d');
+    expect(age('2026-03-29T00:30:00Z', new Date('2026-03-29T03:30:00Z'))).toBe('3 h ago');
+  });
+
+  it('adds the year from 31 Dec to the next 1 Jan', () => {
+    const jan = at(2027, 0, 1, 0, 10);
+    expect(clock(at(2026, 11, 31, 23, 50).toISOString(), jan)).toBe('31 Dec 2026 23:50');
+    expect(clock(at(2027, 0, 1, 0, 5).toISOString(), jan)).toBe('00:05');
+  });
+
+  it('uses English month names', () => {
+    expect(clock(at(2026, 8, 2, 8, 0).toISOString(), now)).toBe('2 Sep 08:00');
+  });
+});
+
+describe('value edge cases', () => {
+  it('shows a dash for NaN and infinities', () => {
+    expect(value('load.1m', Number.NaN)).toBe('–');
+    expect(value('cpu.usage', Number.POSITIVE_INFINITY)).toBe('–');
+    expect(value('memory.used', Number.NEGATIVE_INFINITY)).toBe('–');
+  });
+
+  it('handles negative values', () => {
+    expect(value('load.1m', -1.5)).toBe('-1.5');
+    expect(value('memory.used', -2048)).toBe('-2.0 KiB');
+  });
+
+  it('chooses the byte unit after rounding', () => {
+    expect(value('memory.used', 1023.96)).toBe('1.0 KiB');
+    expect(value('memory.used', 1024)).toBe('1.0 KiB');
+    expect(value('memory.used', 1023)).toBe('1023 B');
+    expect(value('memory.used', 1048575)).toBe('1.0 MiB');
+    expect(value('memory.used', 1024 ** 5)).toBe('1024.0 TiB');
+  });
+
+  it('rounds a percentage that reaches 100', () => {
+    expect(value('cpu.usage', 99.95)).toBe((99.95).toFixed(1) + ' %');
+    expect(value('memory.used_percent', 99.96)).toBe('100.0 %');
+  });
+});
+
 describe('value', () => {
   it('shows a dash for null', () => {
     expect(value('cpu.usage', null)).toBe('–');

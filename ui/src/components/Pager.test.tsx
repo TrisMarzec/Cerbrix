@@ -41,6 +41,16 @@ describe('Pager', () => {
     expect(onChange).toHaveBeenLastCalledWith(0);
   });
 
+  it('shows the last existing page when the offset is beyond the total', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<Pager total={137} limit={50} offset={200} onChange={onChange} />);
+    expect(screen.getByText('101–137 of 137')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Previous' }));
+    expect(onChange).toHaveBeenLastCalledWith(100);
+  });
+
   it('renders nothing for an empty list', () => {
     const { container } = render(<Pager total={0} limit={50} offset={0} onChange={() => {}} />);
     expect(container).toBeEmptyDOMElement();

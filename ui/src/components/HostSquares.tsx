@@ -21,7 +21,14 @@ export function HostSquares({ hosts, max }: { hosts: SquareHost[]; max?: number 
   const shown = max === undefined ? hosts : hosts.slice(0, max);
   const left = hosts.length - shown.length;
   const withProblems = hosts.filter((h) => h.state !== null).length;
-  const label = `${hosts.length} ${hosts.length === 1 ? 'host' : 'hosts'}, ${withProblems} with problems`;
+  const hostsText = `${hosts.length} ${hosts.length === 1 ? 'host' : 'hosts'}`;
+  const problemsText =
+    withProblems === 0
+      ? 'none with problems'
+      : withProblems === 1
+        ? '1 with a problem'
+        : `${withProblems} with problems`;
+  const label = `${hostsText}, ${problemsText}`;
   return (
     <span class="host-squares">
       <span class="squares" role="img" aria-label={label}>
