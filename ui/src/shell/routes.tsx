@@ -5,6 +5,7 @@ import { NotFoundPage } from '../pages/NotFoundPage';
 import { DashboardsPage } from '../pages/DashboardsPage';
 import { HostPage } from '../pages/HostPage';
 import { HostsPage } from '../pages/HostsPage';
+import { ProblemsPage } from '../pages/ProblemsPage';
 import { RequireRole } from './RequireRole';
 
 function Placeholder({ heading }: { heading: string }) {
@@ -44,7 +45,7 @@ const ROUTES: RouteDef[] = [
     pattern: '/problems',
     nav: '/problems',
     title: () => 'Problems',
-    element: () => <Placeholder heading="Problems" />,
+    element: () => <ProblemsPage />,
   },
   {
     pattern: '/configuration',

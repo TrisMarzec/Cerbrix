@@ -1,0 +1,94 @@
+.problems-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.problems-tabs button[aria-selected="true"] {
+  border-color: var(--git);
+  font-weight: 600;
+}
+
+.problems-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+  margin-bottom: 14px;
+}
+
+.problems-tools label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--dim);
+  font-size: 14px;
+}
+
+.problems-search {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.problems-search input {
+  width: 22em;
+  max-width: 100%;
+}
+
+.problems-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  overflow-wrap: anywhere;
+}
+
+.problems-result.is-busy {
+  opacity: 0.6;
+}
+
+.problems-table .cell-sev {
+  padding: 0;
+  width: 6px;
+  background: var(--sev);
+}
+
+.problems-table tr.is-acknowledged .cell-sev {
+  opacity: 0.5;
+}
+
+.problems-table tr.is-acknowledged .problem-main,
+.problems-table tr.is-acknowledged .problem-host {
+  color: var(--dim);
+}
+
+.problems-table .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.problems-table .problem-host-link,
+.problems-table .problem-dashboards,
+.problems-table .problem-end small {
+  overflow-wrap: anywhere;
+}
+
+.problems-table .problem-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.problems-total {
+  margin-top: 10px;
+  color: var(--dim);
+}

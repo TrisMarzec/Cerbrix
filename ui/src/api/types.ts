@@ -219,3 +219,9 @@ export interface Series {
   points: [number, number][];
   thresholds: Threshold[];
 }
+
+/** `GET /problems`: a page of problems, the number of all matching problems, and the dashboards of each host on the page. */
+export interface ProblemsAnswer extends Listed<Problem> {
+  /** For every host in `items`: the dashboards that show it (sorted by name); empty for a host in none. */
+  dashboards: Record<string, { id: string; name: string }[]>;
+}
