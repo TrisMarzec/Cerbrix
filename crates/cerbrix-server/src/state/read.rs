@@ -81,6 +81,8 @@ pub struct HostDetail {
     pub config: Option<EffectiveHost>,
     /// When the host enrolled; `None` when it has no credential.
     pub enrolled_at: Option<OffsetDateTime>,
+    /// The version the agent reported in its last request that carried one.
+    pub agent_version: Option<String>,
     /// Names of the triggers with at least one firing instance.
     pub firing: BTreeSet<String>,
 }
@@ -252,15 +254,19 @@ impl StateStore {
         let Some(row) = self.host_row(name).await? else {
             return Ok(None);
         };
-        let (config, enrolled_at): (Option<Json<EffectiveHost>>, Option<OffsetDateTime>) =
-            sqlx::query_as(
-                "SELECT h.config, \
-                        (SELECT c.enrolled_at FROM agent_credentials c WHERE c.host_id = h.id) \
-                 FROM hosts h WHERE h.id = $1",
-            )
-            .bind(row.id)
-            .fetch_one(&self.pool)
-            .await?;
+        let (config, enrolled_at, agent_version): (
+            Option<Json<EffectiveHost>>,
+            Option<OffsetDateTime>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT h.config, \
+                    (SELECT c.enrolled_at FROM agent_credentials c WHERE c.host_id = h.id), \
+                    h.agent_version \
+             FROM hosts h WHERE h.id = $1",
+        )
+        .bind(row.id)
+        .fetch_one(&self.pool)
+        .await?;
         let firing: Vec<String> = sqlx::query_scalar(
             "SELECT DISTINCT trigger_name FROM trigger_states WHERE host_id = $1 AND firing",
         )
@@ -271,6 +277,7 @@ impl StateStore {
             row,
             config: config.map(|c| c.0),
             enrolled_at,
+            agent_version,
             firing: firing.into_iter().collect(),
         }))
     }
@@ -392,8 +399,9 @@ impl StateStore {
     /// `dashboard_hosts` limits the problems to those hosts when given (the hosts the
     /// dashboard named in `q.dashboard` selects, from [`StateStore::dashboard_host_ids`]).
     ///
-    /// Order: open problems unacknowledged first, most severe first, oldest first; resolved
-    /// ones and all: newest start first. Ties by id. Filtered, ordered and cut in SQL.
+    /// Order: open problems unacknowledged first, most severe first, newest start first;
+    /// resolved ones and all: newest start first. Ties by id. (The alarm target of wall
+    /// displays is a different order, `view::dashboard::urgency`: the older alarm wins.) Filtered, ordered and cut in SQL.
     pub async fn problems_page(
         &self,
         q: &ProblemQuery,
@@ -426,7 +434,7 @@ impl StateStore {
                 "ORDER BY (p.acknowledged_at IS NOT NULL), \
                           CASE p.severity WHEN 'critical' THEN 3 WHEN 'high' THEN 2 \
                                           WHEN 'warning' THEN 1 ELSE 0 END DESC, \
-                          p.started_at, p.id LIMIT $7 OFFSET $8"
+                          p.started_at DESC, p.id LIMIT $7 OFFSET $8"
             )),
             ProblemStateFilter::Resolved | ProblemStateFilter::All => problem_query!(concat!(
                 problem_filters!(),
@@ -522,16 +530,7 @@ impl StateStore {
     /// Every dashboard and every active host with its open problems: three queries, however
     /// many dashboards and hosts there are. Dashboards are ordered by id, hosts by name.
     pub async fn board_inputs(&self) -> Result<BoardInputs, StateError> {
-        let rows: Vec<(String, String, Json<serde_json::Value>)> = sqlx::query_as(
-            "SELECT id, source_file, body FROM config_documents \
-             WHERE kind = 'dashboard' ORDER BY id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let dashboards = rows
-            .into_iter()
-            .map(|(id, file, body)| Ok((id, file, decode_dashboard(body.0)?)))
-            .collect::<Result<_, StateError>>()?;
+        let dashboards = self.dashboards().await?;
         let mut hosts = self.active_hosts().await?;
         let ids: Vec<Uuid> = hosts.iter().map(|h| h.id).collect();
         let mut open = self.open_problems_of(&ids).await?;
@@ -596,8 +595,21 @@ impl StateStore {
             .transpose()
     }
 
+    /// Every dashboard (id, source file, content), ordered by id.
+    pub async fn dashboards(&self) -> Result<Vec<(String, String, DashboardFile)>, StateError> {
+        let rows: Vec<(String, String, Json<serde_json::Value>)> = sqlx::query_as(
+            "SELECT id, source_file, body FROM config_documents \
+             WHERE kind = 'dashboard' ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|(id, file, body)| Ok((id, file, decode_dashboard(body.0)?)))
+            .collect()
+    }
+
     /// The active hosts, ordered by name, without their open problems.
-    async fn active_hosts(&self) -> Result<Vec<HostRow>, StateError> {
+    pub async fn active_hosts(&self) -> Result<Vec<HostRow>, StateError> {
         let columns: Vec<HostColumns> = sqlx::query_as(
             "SELECT id, name, address, groups, source_file, last_seen_at \
              FROM hosts WHERE active ORDER BY name, id",
@@ -1039,7 +1051,7 @@ mod tests {
         let store = StateStore::from_pool(pool);
         let h = host(&store, "h").await;
         let c = ProblemKind::Compare;
-        // Unacknowledged: most severe first, equal severity oldest first.
+        // Unacknowledged: most severe first, equal severity newest first.
         open(&store, h, "info", Severity::Info, c, T0_MS).await;
         open(&store, h, "high-new", Severity::High, c, T0_MS + 20).await;
         open(&store, h, "warn", Severity::Warning, c, T0_MS).await;
@@ -1054,8 +1066,8 @@ mod tests {
             triggers(&store, &pquery()).await,
             [
                 "crit",
-                "high-old",
                 "high-new",
+                "high-old",
                 "warn",
                 "info",
                 "acked-crit",
@@ -1085,7 +1097,7 @@ mod tests {
         };
         assert_eq!(
             triggers(&store, &min(Severity::High)).await,
-            ["a-crit", "a-high", "b-high"]
+            ["a-crit", "b-high", "a-high"]
         );
         assert_eq!(triggers(&store, &min(Severity::Critical)).await, ["a-crit"]);
         assert_eq!(triggers(&store, &min(Severity::Info)).await.len(), 5);
@@ -1258,9 +1270,9 @@ mod tests {
         };
         assert_eq!(
             page(3, 0).await,
-            (vec!["t0".to_owned(), "t1".into(), "t2".into()], 7)
+            (vec!["t6".to_owned(), "t5".into(), "t4".into()], 7)
         );
-        assert_eq!(page(3, 6).await, (vec!["t6".to_owned()], 7));
+        assert_eq!(page(3, 6).await, (vec!["t0".to_owned()], 7));
         assert_eq!(page(3, 30).await, (Vec::<String>::new(), 7));
     }
 

@@ -542,13 +542,30 @@ impl StateStore {
         now: OffsetDateTime,
         series: &[(String, Params)],
     ) -> Result<(), StateError> {
+        self.touch_seen_versioned(host_id, now, series, None).await
+    }
+
+    /// [`touch_seen`](Self::touch_seen) that also records the agent's version in the same
+    /// statement. `None` leaves the stored version alone; a version equal to the stored one
+    /// assigns the column its own value, so the column does not change.
+    pub async fn touch_seen_versioned(
+        &self,
+        host_id: Uuid,
+        now: OffsetDateTime,
+        series: &[(String, Params)],
+        agent_version: Option<&str>,
+    ) -> Result<(), StateError> {
         let mut tx = self.pool.begin().await?;
         let config: Option<Option<serde_json::Value>> = sqlx::query_scalar(
-            "UPDATE hosts SET last_seen_at = GREATEST(COALESCE(last_seen_at, $2), $2) \
+            "UPDATE hosts SET last_seen_at = GREATEST(COALESCE(last_seen_at, $2), $2), \
+                 agent_version = CASE WHEN $3::text IS NOT NULL \
+                                       AND agent_version IS DISTINCT FROM $3 \
+                                      THEN $3 ELSE agent_version END \
              WHERE id = $1 AND active RETURNING config",
         )
         .bind(host_id)
         .bind(now)
+        .bind(agent_version)
         .fetch_optional(&mut *tx)
         .await?;
         let Some(config) = config else {
@@ -2018,6 +2035,89 @@ mod tests {
             .await
             .unwrap();
         assert!(series_rows(&pool).await.is_empty());
+    }
+
+    async fn agent_version_of(pool: &PgPool, host: Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT agent_version FROM hosts WHERE id = $1")
+            .bind(host)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn agent_version_is_recorded_from_values(pool: PgPool) {
+        let (store, host) = setup_watching(pool.clone()).await;
+        assert_eq!(agent_version_of(&pool, host).await, None);
+        store
+            .touch_seen_versioned(host, at(T0_MS), &[], Some("1.2.3"))
+            .await
+            .unwrap();
+        assert_eq!(
+            agent_version_of(&pool, host).await.as_deref(),
+            Some("1.2.3")
+        );
+        store
+            .touch_seen_versioned(host, at(T0_MS + 1000), &[], Some("1.3.0"))
+            .await
+            .unwrap();
+        assert_eq!(
+            agent_version_of(&pool, host).await.as_deref(),
+            Some("1.3.0")
+        );
+        // No version leaves the stored one alone.
+        store
+            .touch_seen_versioned(host, at(T0_MS + 2000), &[], None)
+            .await
+            .unwrap();
+        store.touch_seen(host, at(T0_MS + 3000), &[]).await.unwrap();
+        assert_eq!(
+            agent_version_of(&pool, host).await.as_deref(),
+            Some("1.3.0")
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn agent_version_is_not_rewritten_when_equal(pool: PgPool) {
+        let (store, host) = setup_watching(pool.clone()).await;
+        // The statement's own `last_seen_at` write makes a new row version on every call, so
+        // `xmin` cannot tell. A trigger sees what the statement assigns: it records, per
+        // update, whether the stored version changed.
+        sqlx::raw_sql(
+            "CREATE TABLE version_writes (changed boolean NOT NULL); \
+             CREATE FUNCTION note_version_write() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 INSERT INTO version_writes VALUES (OLD.agent_version IS DISTINCT FROM NEW.agent_version); \
+                 RETURN NEW; \
+             END $$; \
+             CREATE TRIGGER note_version_write BEFORE UPDATE ON hosts \
+                 FOR EACH ROW EXECUTE FUNCTION note_version_write();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (offset, version) in [
+            (0, Some("1.2.3")),
+            (1000, Some("1.2.3")),
+            (2000, Some("1.2.3")),
+            (3000, None),
+            (4000, Some("1.3.0")),
+            (5000, Some("1.3.0")),
+        ] {
+            store
+                .touch_seen_versioned(host, at(T0_MS + offset), &[], version)
+                .await
+                .unwrap();
+        }
+        let changed: Vec<bool> = sqlx::query_scalar("SELECT changed FROM version_writes")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(changed, [true, false, false, false, true, false]);
+        assert_eq!(
+            agent_version_of(&pool, host).await.as_deref(),
+            Some("1.3.0")
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]

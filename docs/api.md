@@ -288,10 +288,13 @@ All group names, sorted. Not paged.
 One host with its effective configuration (what the host and its templates give together) and
 its open problems. `origin` of an item or trigger is `host` or `template:<name>`; `firing` says
 whether the trigger has an open problem. A host created by hand has no configuration: `templates`,
-`items` and `triggers` are empty. `404` for an unknown host.
+`items` and `triggers` are empty. `agent_version` is the version the agent reported in the
+`User-Agent` of its last request with values (`cerbrix-agent/<version>`), or `null` when no
+such request has arrived. `dashboards` lists the dashboards that show the host (`id` and
+`name`), sorted by name; it is empty for a host in none. `404` for an unknown host.
 
 ```json
-{"name":"e2e-host","address":null,"groups":["e2e"],"templates":["linux-base"],"source_file":"hosts/e2e-host.json","managed_by_git":true,"enrolled_at":"2026-11-16T21:52:06.337437Z","last_seen_at":"2026-11-16T21:53:02.051491Z","state":{"severity":"critical","acknowledged":false,"kind":"no_data","trigger":"Agent silent","instance":"","summary":"no data for 1m","open_problems":2},"items":[{"key":"cpu.usage","params":null,"interval_secs":5,"origin":"host"}],"triggers":[{"name":"Agent silent","expression":"no data for 1m","severity":"critical","origin":"host","firing":true},{"name":"Disk almost full","expression":"disk.used_percent > 90 for 10m","severity":"high","origin":"template:linux-base","firing":false}],"open_problems":[{"id":"0c208a84-6643-46d4-86ab-066f04916ecc","host":"e2e-host","trigger":"Agent silent","instance":"","severity":"critical","kind":"no_data","summary":"no data for 1m","started_at":"2026-11-16T21:54:05.114Z","resolved_at":null,"resolve_reason":null,"acknowledged_at":null,"acknowledged_by":null,"ack_comment":null,"closed_by":null,"close_comment":null}]}
+{"name":"e2e-host","address":null,"groups":["e2e"],"templates":["linux-base"],"source_file":"hosts/e2e-host.json","managed_by_git":true,"enrolled_at":"2026-11-16T21:52:06.337437Z","last_seen_at":"2026-11-16T21:53:02.051491Z","agent_version":"0.1.0","dashboards":[{"id":"e2e","name":"E2E"}],"state":{"severity":"critical","acknowledged":false,"kind":"no_data","trigger":"Agent silent","instance":"","summary":"no data for 1m","open_problems":2},"items":[{"key":"cpu.usage","params":null,"interval_secs":5,"origin":"host"}],"triggers":[{"name":"Agent silent","expression":"no data for 1m","severity":"critical","origin":"host","firing":true},{"name":"Disk almost full","expression":"disk.used_percent > 90 for 10m","severity":"high","origin":"template:linux-base","firing":false}],"open_problems":[{"id":"0c208a84-6643-46d4-86ab-066f04916ecc","host":"e2e-host","trigger":"Agent silent","instance":"","severity":"critical","kind":"no_data","summary":"no data for 1m","started_at":"2026-11-16T21:54:05.114Z","resolved_at":null,"resolve_reason":null,"acknowledged_at":null,"acknowledged_by":null,"ack_comment":null,"closed_by":null,"close_comment":null}]}
 ```
 
 (`items`, `triggers` and `open_problems` are shortened here.)
@@ -357,7 +360,7 @@ A problem has these fields; every route that returns a problem uses this form.
 
 ### `GET /api/v1/problems` (viewer)
 
-Problems, paged (`limit`, `offset`). Open problems are listed unacknowledged first, then by severity (most severe first), then oldest first; resolved problems and `all` newest first. Parameters:
+Problems, paged (`limit`, `offset`). Open problems are listed unacknowledged first, then by severity (most severe first), then newest first (the start time, then the id); resolved problems and `all` newest first. The answer also has `dashboards`: for every host that appears in `items`, the dashboards that show it (`id` and `name`, sorted by name), an empty list for a host in none. Parameters:
 
 | Parameter | Meaning |
 | --- | --- |
@@ -373,7 +376,7 @@ curl -sS -b cookies.txt 'http://127.0.0.1:18443/api/v1/problems?state=open&limit
 ```
 
 ```json
-{"items":[{"id":"0c208a84-6643-46d4-86ab-066f04916ecc","host":"e2e-host","trigger":"Agent silent","instance":"","severity":"critical","kind":"no_data","summary":"no data for 1m","started_at":"2026-11-16T21:54:05.114Z","resolved_at":null,"resolve_reason":null,"acknowledged_at":null,"acknowledged_by":null,"ack_comment":null,"closed_by":null,"close_comment":null},{"id":"6fa4ff3a-6224-462b-a96f-ab6f3daca0f1","host":"e2e-host","trigger":"E2E second","instance":"","severity":"warning","kind":"compare","summary":"memory.used_percent >= 0: value 47.123","started_at":"2026-11-16T21:52:07.614Z","resolved_at":null,"resolve_reason":null,"acknowledged_at":"2026-11-16T21:54:28.337312Z","acknowledged_by":"e2e-admin","ack_comment":"e2e api check","closed_by":null,"close_comment":null}],"total":2}
+{"items":[{"id":"0c208a84-6643-46d4-86ab-066f04916ecc","host":"e2e-host","trigger":"Agent silent","instance":"","severity":"critical","kind":"no_data","summary":"no data for 1m","started_at":"2026-11-16T21:54:05.114Z","resolved_at":null,"resolve_reason":null,"acknowledged_at":null,"acknowledged_by":null,"ack_comment":null,"closed_by":null,"close_comment":null},{"id":"6fa4ff3a-6224-462b-a96f-ab6f3daca0f1","host":"e2e-host","trigger":"E2E second","instance":"","severity":"warning","kind":"compare","summary":"memory.used_percent >= 0: value 47.123","started_at":"2026-11-16T21:52:07.614Z","resolved_at":null,"resolve_reason":null,"acknowledged_at":"2026-11-16T21:54:28.337312Z","acknowledged_by":"e2e-admin","ack_comment":"e2e api check","closed_by":null,"close_comment":null}],"total":2,"dashboards":{"e2e-host":[{"id":"e2e","name":"E2E"}]}}
 ```
 
 ### `GET /api/v1/problems/{id}` (viewer)
@@ -440,7 +443,7 @@ the 12 by 6 grid (`x`, `y`, `w`, `h`) and its data. `404` for an unknown dashboa
 
 | Panel `type` | Data |
 | --- | --- |
-| `problems` | `problems`: the open problems of the dashboard's hosts (at most 100), and `more`, how many open problems are not in the list. |
+| `problems` | `problems`: the open problems of the dashboard's hosts (at most 100; unacknowledged first, most severe first, newest first), and `more`, how many open problems are not in the list. |
 | `host-states` | `total`, `without_problems` and `hosts`, the hosts with their state, problem hosts first. |
 | `graph` | `host`, `item`, `params`, `range`, `step_secs`, `points` (`[timestamp_ms, value]`) and `thresholds`. |
 | `value` | `host`, `item`, `params`, `value` and `at`, when the value was measured. |

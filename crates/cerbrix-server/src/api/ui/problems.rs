@@ -1,19 +1,22 @@
 //! The problems list and the acknowledging and closing of problems.
 
+use std::collections::BTreeMap;
+
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use cerbrix_common::config::Severity;
 use cerbrix_common::validate_host_name;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{ApiError, ApiJson, Entry, Listed, Page, invalid, query_text};
+use super::{ApiError, ApiJson, Entry, Page, invalid, query_text};
 use crate::api::AppState;
 use crate::auth::{Operator, Viewer};
 use crate::gitops::replace_control_by_space;
 use crate::state::{Problem, ProblemQuery, ProblemStateFilter, StateError};
+use crate::view::dashboard::{DashboardRef, dashboards_of_hosts};
 
 pub(super) fn entries() -> Vec<Entry> {
     vec![
@@ -75,12 +78,22 @@ fn parse_severity(raw: &str) -> Result<Severity, ApiError> {
     }
 }
 
+/// One page of problems and the dashboards of the hosts on it.
+#[derive(Debug, Serialize)]
+struct ProblemsListed {
+    items: Vec<Problem>,
+    total: i64,
+    /// For every host name in `items`, the dashboards that select it (sorted by name; empty
+    /// for a host in none, an inactive host included).
+    dashboards: BTreeMap<String, Vec<DashboardRef>>,
+}
+
 async fn list(
     State(app): State<AppState>,
     Viewer(_): Viewer,
     page: Page,
     params: Result<Query<ProblemParams>, axum::extract::rejection::QueryRejection>,
-) -> Result<Json<Listed<Problem>>, ApiError> {
+) -> Result<Json<ProblemsListed>, ApiError> {
     let Query(params) = params.map_err(|_| invalid("the query parameters are malformed"))?;
     for (value, max, message) in [
         (
@@ -130,9 +143,10 @@ async fn list(
         .as_deref()
         .is_some_and(|h| validate_host_name(h).is_err())
     {
-        return Ok(Json(Listed {
+        return Ok(Json(ProblemsListed {
             items: Vec::new(),
             total: 0,
+            dashboards: BTreeMap::new(),
         }));
     }
     let query = ProblemQuery {
@@ -150,7 +164,32 @@ async fn list(
         .problems_page(&query, dashboard_hosts.as_deref())
         .await
         .map_err(|e| store_failed("listing problems failed", &e))?;
-    Ok(Json(Listed { items, total }))
+    // Two more store calls whatever the page holds: every dashboard and the active hosts;
+    // membership is `selected_hosts`, applied to the hosts on this page.
+    let mut dashboards: BTreeMap<String, Vec<DashboardRef>> =
+        items.iter().map(|p| (p.host.clone(), Vec::new())).collect();
+    if !items.is_empty() {
+        let all_dashboards = app
+            .store
+            .dashboards()
+            .await
+            .map_err(|e| store_failed("reading dashboards failed", &e))?;
+        let active = app
+            .store
+            .active_hosts()
+            .await
+            .map_err(|e| store_failed("reading hosts failed", &e))?;
+        let on_page: Vec<_> = active
+            .into_iter()
+            .filter(|h| dashboards.contains_key(&h.name))
+            .collect();
+        dashboards.extend(dashboards_of_hosts(&all_dashboards, &on_page));
+    }
+    Ok(Json(ProblemsListed {
+        items,
+        total,
+        dashboards,
+    }))
 }
 
 async fn show(
@@ -342,6 +381,150 @@ mod tests {
             (triggers(&reply), reply.json()["total"].as_i64()),
             (vec!["Crit".to_owned()], Some(2))
         );
+    }
+
+    async fn add_dashboard(fx: &Fixture, id: &str, body: &str) {
+        sqlx::query(
+            "INSERT INTO config_documents (kind, id, source_file, body)              VALUES ('dashboard', $1, $2, $3::jsonb)",
+        )
+        .bind(id)
+        .bind(format!("dashboards/{id}.json"))
+        .bind(body)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn open_problems_are_newest_first_within_a_severity(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        open(&fx, "web", "Old high", Severity::High, T0_MS, false).await;
+        open(&fx, "web", "New high", Severity::High, T0_MS + 5000, false).await;
+        open(&fx, "web", "Mid high", Severity::High, T0_MS + 2000, false).await;
+        open(
+            &fx,
+            "web",
+            "Old crit",
+            Severity::Critical,
+            T0_MS - 9000,
+            false,
+        )
+        .await;
+        let acked = open(
+            &fx,
+            "web",
+            "Newest acked",
+            Severity::Critical,
+            T0_MS + 9000,
+            false,
+        )
+        .await;
+        let reply = post(
+            &fx,
+            Role::Operator,
+            &format!("/api/v1/problems/{acked}/ack"),
+            "{}",
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let reply = get(&fx, Role::Viewer, "/api/v1/problems").await;
+        assert_eq!(
+            triggers(&reply),
+            [
+                "Old crit",
+                "New high",
+                "Mid high",
+                "Old high",
+                "Newest acked"
+            ]
+        );
+        // Resolved problems and all: newest first, as before.
+        let reply = get(&fx, Role::Viewer, "/api/v1/problems?state=all").await;
+        assert_eq!(triggers(&reply)[0], "Newest acked");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problems_list_names_dashboards_of_its_hosts(pool: PgPool) {
+        let fx = Fixture::new(pool.clone()).await;
+        open(&fx, "a-host", "Cpu", Severity::Critical, T0_MS + 3, false).await;
+        open(&fx, "b-host", "Cpu", Severity::Critical, T0_MS + 2, false).await;
+        // On another page: the newest two are the page.
+        open(&fx, "c-host", "Cpu", Severity::Critical, T0_MS + 1, false).await;
+        sqlx::query("UPDATE hosts SET groups = ARRAY['prod'] WHERE name = 'a-host'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        add_dashboard(&fx, "z", r#"{"name":"Zulu","hosts":{"groups":["prod"]}}"#).await;
+        add_dashboard(
+            &fx,
+            "y",
+            r#"{"name":"Alpha","hosts":{"names":["a-host","c-host"]}}"#,
+        )
+        .await;
+        let body = get(&fx, Role::Viewer, "/api/v1/problems?limit=2")
+            .await
+            .json();
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            body["dashboards"],
+            serde_json::json!({
+                "a-host": [{"id": "y", "name": "Alpha"}, {"id": "z", "name": "Zulu"}],
+                "b-host": []
+            })
+        );
+        // Nothing to list: an empty map.
+        let body = get(&fx, Role::Viewer, "/api/v1/problems?host=nope")
+            .await
+            .json();
+        assert_eq!(body["dashboards"], serde_json::json!({}));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn problems_list_with_many_hosts(pool: PgPool) {
+        let fx = Fixture::new(pool.clone()).await;
+        sqlx::query(
+            "INSERT INTO hosts (id, name, groups)              SELECT gen_random_uuid(), 'h' || lpad(i::text, 3, '0'), ARRAY['g' || (i % 3)]              FROM generate_series(1, 300) AS i",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO problems (id, host_id, trigger_name, instance, severity, summary,              started_at)              SELECT gen_random_uuid(), h.id, 'T', '', 'critical', 's',                     now() - (substr(h.name, 2)::int || ' minutes')::interval              FROM hosts h WHERE h.name LIKE 'h%'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for g in 0..3 {
+            add_dashboard(
+                &fx,
+                &format!("g{g}"),
+                &format!(r#"{{"name":"Group {g}","hosts":{{"groups":["g{g}"]}}}}"#),
+            )
+            .await;
+        }
+        let body = get(&fx, Role::Viewer, "/api/v1/problems?limit=50")
+            .await
+            .json();
+        assert_eq!(body["total"], 300);
+        let on_page: std::collections::BTreeSet<String> = body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["host"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(on_page.len(), 50);
+        let map = body["dashboards"].as_object().unwrap();
+        assert_eq!(
+            map.keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            on_page
+        );
+        for (host, list) in map {
+            let n: usize = host[1..].parse().unwrap();
+            assert_eq!(list.as_array().unwrap().len(), 1, "{host}");
+            assert_eq!(list[0]["id"], format!("g{}", n % 3), "{host}");
+        }
     }
 
     #[sqlx::test(migrations = "./migrations")]
