@@ -63,6 +63,25 @@ function lastHostQuery() {
   return hostRequests().at(-1)?.query ?? new URLSearchParams();
 }
 
+function region(): HTMLElement {
+  const el = document.querySelector<HTMLElement>('.hosts-result');
+  if (el === null) throw new Error('no result region');
+  return el;
+}
+
+/** An answer that waits until release() is called. */
+function held(answer: ReturnType<typeof hostsAnswer>) {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const responder: Responder = async () => {
+    await gate;
+    return answer;
+  };
+  return { responder, release: () => release() };
+}
+
 function rowAt(i: number): HTMLElement {
   const row = dataRows()[i];
   if (row === undefined) throw new Error(`no row ${i}`);
@@ -385,18 +404,17 @@ describe('failure and change of query', () => {
         return hostsAnswer([hostRowFixture({ name: 'new-01' })]);
       },
     ]);
-    expect(screen.getByRole('table', { name: 'Hosts' })).toHaveAttribute('aria-busy', 'false');
+    expect(region()).toHaveAttribute('aria-busy', 'false');
     fireEvent.change(screen.getByRole('combobox', { name: 'State' }), {
       target: { value: 'problems' },
     });
     await advance(0);
-    const table = screen.getByRole('table', { name: 'Hosts' });
-    expect(table).toHaveAttribute('aria-busy', 'true');
+    expect(region()).toHaveAttribute('aria-busy', 'true');
     expect(screen.getByText('old-01')).toBeInTheDocument();
     release();
     await advance(0);
     expect(screen.getByText('new-01')).toBeInTheDocument();
-    expect(screen.getByRole('table', { name: 'Hosts' })).toHaveAttribute('aria-busy', 'false');
+    expect(region()).toHaveAttribute('aria-busy', 'false');
   });
 
   it('shows the failure, not the old rows, when the first answer for a new filter fails', async () => {
@@ -437,5 +455,147 @@ describe('offset beyond the last page', () => {
     await advance(0);
     expect(hostRequests().map((r) => r.query.get('offset'))).toEqual(['200', '100']);
     expect(window.location.search).toBe('?offset=100');
+  });
+});
+
+describe('while the answer for a new query is outstanding', () => {
+  it('hides the empty sentence and shows the next rows when they arrive', async () => {
+    const next = held(hostsAnswer([hostRowFixture({ name: 'new-01' })]));
+    await open('/hosts?search=zzz', [hostsAnswer([], { total: 0 }), next.responder]);
+    expect(screen.getByText('No host matches.')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox', { name: 'State' }), { target: { value: 'ok' } });
+    await advance(0);
+    expect(screen.queryByText('No host matches.')).not.toBeInTheDocument();
+    expect(screen.queryByText('No hosts yet.')).not.toBeInTheDocument();
+    expect(region()).toHaveAttribute('aria-busy', 'true');
+    next.release();
+    await advance(0);
+    expect(screen.getByText('new-01')).toBeInTheDocument();
+    expect(region()).toHaveAttribute('aria-busy', 'false');
+  });
+
+  it('keeps the banner, footer and pager inside the busy region', async () => {
+    const next = held(hostsAnswer([hostRowFixture()]));
+    await open('/hosts', [
+      hostsAnswer([hostRowFixture()], { total: 120, metrics_available: false }),
+      next.responder,
+    ]);
+    fireEvent.change(screen.getByRole('combobox', { name: 'State' }), { target: { value: 'ok' } });
+    await advance(0);
+    const busy = region();
+    expect(busy).toHaveAttribute('aria-busy', 'true');
+    expect(
+      within(busy).getByText('Current values are not available right now.'),
+    ).toBeInTheDocument();
+    expect(within(busy).getByText('120 hosts')).toBeInTheDocument();
+    expect(within(busy).getByRole('navigation', { name: 'Pages' })).toBeInTheDocument();
+  });
+});
+
+describe('an answer with hosts counted but none listed', () => {
+  it('says Nothing on this page. and keeps the pager', async () => {
+    await open('/hosts?offset=0', hostsAnswer([], { total: 3 }));
+    expect(screen.getByText('Nothing on this page.')).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'Pages' })).toBeInTheDocument();
+    expect(screen.getByText('3 hosts')).toBeInTheDocument();
+  });
+});
+
+describe('group in the address that is too long', () => {
+  it('sends no group, warns and offers a link that removes it', async () => {
+    await open(
+      '/hosts?search=a&group=' + 'g'.repeat(64) + '&offset=50',
+      hostsAnswer([hostRowFixture()]),
+    );
+    expect(lastHostQuery().has('group')).toBe(false);
+    expect(screen.getByText(/The group in the address is not valid\./)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'Show all groups' });
+    expect(link).toHaveAttribute('href', '/hosts?search=a');
+    fireEvent.click(link);
+    await advance(0);
+    expect(window.location.search).toBe('?search=a');
+    expect(screen.queryByText(/The group in the address is not valid\./)).not.toBeInTheDocument();
+  });
+});
+
+describe('search field details', () => {
+  it('does not write the URL or ask again when the text ends up as it was', async () => {
+    await open('/hosts?search=web&offset=50', hostsAnswer([hostRowFixture()], { total: 80 }));
+    const writes = vi.spyOn(window.history, 'replaceState');
+    const input = screen.getByRole('searchbox', { name: 'Search' });
+    fireEvent.input(input, { target: { value: 'webx' } });
+    fireEvent.input(input, { target: { value: 'web' } });
+    await advance(300);
+    fireEvent.submit(input);
+    await advance(0);
+    expect(writes).not.toHaveBeenCalled();
+    expect(window.location.search).toBe('?search=web&offset=50');
+    expect(hostRequests()).toHaveLength(1);
+    writes.mockRestore();
+  });
+
+  it('does nothing on Enter without a change', async () => {
+    await open('/hosts', hostsAnswer([hostRowFixture()]));
+    fireEvent.submit(screen.getByRole('searchbox', { name: 'Search' }));
+    await advance(0);
+    expect(hostRequests()).toHaveLength(1);
+  });
+
+  it('returns focus to the search field after Clear search', async () => {
+    await open('/hosts?search=web', hostsAnswer([hostRowFixture()]));
+    const clear = screen.getByRole('button', { name: 'Clear search' });
+    clear.focus();
+    fireEvent.click(clear);
+    await advance(0);
+    expect(screen.getByRole('searchbox', { name: 'Search' })).toHaveFocus();
+  });
+
+  it('writes nothing after the page is gone', async () => {
+    const view = await open('/hosts', hostsAnswer([hostRowFixture()]));
+    fireEvent.input(screen.getByRole('searchbox', { name: 'Search' }), { target: { value: 'db' } });
+    view.unmount();
+    await advance(500);
+    expect(window.location.search).toBe('');
+    expect(hostRequests()).toHaveLength(1);
+  });
+
+  it('writes the URL once and sends one request when Enter comes during the debounce', async () => {
+    await open('/hosts', hostsAnswer([hostRowFixture()]));
+    const writes = vi.spyOn(window.history, 'replaceState');
+    const input = screen.getByRole('searchbox', { name: 'Search' });
+    fireEvent.input(input, { target: { value: 'db' } });
+    fireEvent.submit(input);
+    await advance(500);
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(hostRequests().filter((r) => r.query.get('search') === 'db')).toHaveLength(1);
+    writes.mockRestore();
+  });
+
+  it('keeps the group and the typed search when the group changes during the debounce', async () => {
+    await open('/hosts', hostsAnswer([hostRowFixture()]));
+    fireEvent.input(screen.getByRole('searchbox', { name: 'Search' }), { target: { value: 'db' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Group' }), { target: { value: 'web' } });
+    await advance(300);
+    const url = new URLSearchParams(window.location.search);
+    expect(url.get('group')).toBe('web');
+    expect(url.get('search')).toBe('db');
+    expect(lastHostQuery().get('group')).toBe('web');
+    expect(lastHostQuery().get('search')).toBe('db');
+    expect(screen.getByRole('searchbox', { name: 'Search' })).toHaveValue('db');
+  });
+});
+
+describe('other details', () => {
+  it('shows what age() says for a last value in the future', async () => {
+    const future = new Date(NOW.getTime() + 60_000).toISOString();
+    await open('/hosts', hostsAnswer([hostRowFixture({ last_seen_at: future })]));
+    expect(rowAt(0)).toHaveTextContent('0 s ago');
+  });
+
+  it('loads the groups once, not with every poll', async () => {
+    await open('/hosts', hostsAnswer([hostRowFixture()]));
+    await advance(30_000);
+    expect(hostRequests().length).toBeGreaterThan(1);
+    expect(mock.count('GET /host-groups')).toBe(1);
   });
 });

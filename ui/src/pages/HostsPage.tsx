@@ -18,6 +18,8 @@ const LIMIT = 50;
 const SEARCH_MAX = 200;
 const GROUP_MAX = 63;
 const SEARCH_DELAY_MS = 300;
+/** `usePolled` has no "never": about 23 days is the same for a page that is open for a visit. */
+const NO_POLL_MS = 2_000_000_000;
 
 type StateFilter = 'problems' | 'no_data' | 'ok';
 
@@ -70,9 +72,14 @@ function SearchField({ urlValue, onCommit }: SearchProps) {
   }, [urlValue]);
   useEffect(() => cancel, []);
 
+  const current = useRef(urlValue);
+  current.current = urlValue;
+  const input = useRef<HTMLInputElement>(null);
+
+  // Text equal to what the URL already has changes nothing: no write, no offset reset, no request.
   const commit = (next: string) => {
     cancel();
-    onCommit(next);
+    if (next !== current.current) onCommit(next);
   };
 
   return (
@@ -87,6 +94,7 @@ function SearchField({ urlValue, onCommit }: SearchProps) {
       <label>
         Search
         <input
+          ref={input}
           type="search"
           value={text}
           maxLength={SEARCH_MAX}
@@ -96,8 +104,7 @@ function SearchField({ urlValue, onCommit }: SearchProps) {
             setText(next);
             cancel();
             timer.current = setTimeout(() => {
-              timer.current = undefined;
-              onCommit(next);
+              commit(next);
             }, SEARCH_DELAY_MS);
           }}
         />
@@ -109,6 +116,7 @@ function SearchField({ urlValue, onCommit }: SearchProps) {
           onClick={() => {
             setText('');
             commit('');
+            input.current?.focus();
           }}
         >
           Clear search
@@ -127,9 +135,9 @@ function rowClass(h: HostRow): string | undefined {
   return classes.length === 0 ? undefined : classes.join(' ');
 }
 
-function HostTable({ rows, busy, now }: { rows: HostRow[]; busy: boolean; now: Date }) {
+function HostTable({ rows, now }: { rows: HostRow[]; now: Date }) {
   return (
-    <table class={`hosts-table${busy ? ' is-busy' : ''}`} aria-label="Hosts" aria-busy={busy}>
+    <table class="hosts-table" aria-label="Hosts">
       <thead>
         <tr>
           <th scope="col">
@@ -179,8 +187,13 @@ export function HostsPage() {
 
   const search = (query.get('search') ?? '').slice(0, SEARCH_MAX);
   const rawGroup = query.get('group') ?? '';
-  // A group name has at most 63 characters; a longer one cannot exist and is ignored.
-  const group = rawGroup.length > GROUP_MAX ? '' : rawGroup;
+  // A group name has at most 63 characters; the server refuses a longer one, so none is sent.
+  const groupInvalid = rawGroup.length > GROUP_MAX;
+  const group = groupInvalid ? '' : rawGroup;
+  const withoutGroup = new URLSearchParams(query);
+  withoutGroup.delete('group');
+  withoutGroup.delete('offset');
+  const withoutGroupText = withoutGroup.toString();
   const state = parseState(query.get('state'));
   const offset = parseOffset(query.get('offset'));
 
@@ -202,6 +215,8 @@ export function HostsPage() {
   const groups = usePolled(
     (signal) => api.get<{ items: string[] }>('/host-groups', undefined, signal),
     [],
+    // Loaded once per mount (and by "Try again"): a very long interval instead of polling.
+    NO_POLL_MS,
   );
 
   const answer = hosts.data;
@@ -257,38 +272,60 @@ export function HostsPage() {
         </label>
       </div>
 
+      {groupInvalid && (
+        <Banner kind="warning">
+          The group in the address is not valid.{' '}
+          <Link href={withoutGroupText === '' ? '/hosts' : '/hosts?' + withoutGroupText}>
+            Show all groups
+          </Link>
+        </Banner>
+      )}
       {failed && (
         <Banner kind="warning">
           Could not load the hosts.{' '}
-          <button type="button" class="btn" onClick={hosts.reload}>
+          <button
+            type="button"
+            class="btn"
+            onClick={() => {
+              hosts.reload();
+              if (groups.data === undefined) groups.reload();
+            }}
+          >
             Try again
           </button>
         </Banner>
       )}
       {answer !== undefined && (
-        <>
+        // Everything below comes from the last answer: while the answer for a new query is
+        // outstanding it is dimmed and marked busy (the empty sentence is not shown at all).
+        <div
+          class={hosts.pending ? 'hosts-result is-busy' : 'hosts-result'}
+          aria-busy={hosts.pending}
+        >
           {!answer.metrics_available && (
             <Banner kind="warning">Current values are not available right now.</Banner>
           )}
           {answer.total === 0 ? (
-            <Empty>{filtered ? 'No host matches.' : 'No hosts yet.'}</Empty>
-          ) : (
-            answer.items.length > 0 && (
-              <>
-                <HostTable rows={answer.items} busy={hosts.pending} now={now} />
-                <p class="hosts-total num">
-                  {answer.total === 1 ? '1 host' : `${answer.total} hosts`}
-                </p>
-                <Pager
-                  total={answer.total}
-                  limit={LIMIT}
-                  offset={offset}
-                  onChange={(next) => setQuery({ offset: offsetParam(next) })}
-                />
-              </>
-            )
+            !hosts.pending && <Empty>{filtered ? 'No host matches.' : 'No hosts yet.'}</Empty>
+          ) : beyond ? null : (
+            <>
+              {answer.items.length > 0 ? (
+                <HostTable rows={answer.items} now={now} />
+              ) : (
+                !hosts.pending && <Empty>Nothing on this page.</Empty>
+              )}
+              <p class="hosts-total num">
+                {answer.total === 1 ? '1 host' : answer.total + ' hosts'}
+              </p>
+              <Pager
+                total={answer.total}
+                limit={LIMIT}
+                offset={offset}
+                onChange={(next) => setQuery({ offset: offsetParam(next) })}
+              />
+            </>
           )}
-        </>
+        </div>
       )}
     </>
   );
