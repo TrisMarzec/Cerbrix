@@ -1,4 +1,4 @@
-import type { HostState, Problem, Status } from '../api/types';
+import type { DashboardSummary, Display, HostState, Problem, Status } from '../api/types';
 
 /** The fixed "now" of the tests: 17 Nov 2026, 14:30 local time. */
 export const NOW = new Date(2026, 10, 17, 14, 30, 0);
@@ -113,6 +113,40 @@ export function statusFixture(overrides: Partial<Status> = {}): Status {
       warning: { ...NO_PROBLEMS },
       info: { ...NO_PROBLEMS },
     },
+    ...overrides,
+  };
+}
+
+const NO_COUNTS = { critical: 0, high: 0, warning: 0, info: 0 };
+
+/** A dashboard with no hosts and no problems; override what a test needs. */
+export function dashboardFixture(overrides: Partial<DashboardSummary> = {}): DashboardSummary {
+  return {
+    id: 'e2e',
+    name: 'E2E',
+    file: 'dashboards/e2e.json',
+    priority: 0,
+    host_count: 0,
+    hosts_by_state: { critical: 0, high: 0, warning: 0, info: 0, acknowledged: 0, ok: 0 },
+    open_problems: { ...NO_COUNTS },
+    unacknowledged: { ...NO_COUNTS },
+    ...overrides,
+  };
+}
+
+/** A display that shows one dashboard, does not switch and follows its setting. */
+export function displayFixture(overrides: Partial<Display> = {}): Display {
+  return {
+    id: 'e2e-wall',
+    name: 'E2E wall',
+    file: 'displays/e2e-wall.json',
+    show: { dashboard: 'e2e' },
+    switch_on_alarm: null,
+    dashboards: null,
+    token_created_at: null,
+    target: null,
+    causes: [],
+    waiting: [],
     ...overrides,
   };
 }

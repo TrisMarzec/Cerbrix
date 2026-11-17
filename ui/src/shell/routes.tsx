@@ -2,6 +2,7 @@ import type { ComponentChildren } from 'preact';
 
 import { match } from '../lib/router';
 import { NotFoundPage } from '../pages/NotFoundPage';
+import { DashboardsPage } from '../pages/DashboardsPage';
 import { RequireRole } from './RequireRole';
 
 function Placeholder({ heading }: { heading: string }) {
@@ -22,7 +23,7 @@ const ROUTES: RouteDef[] = [
     pattern: '/dashboards',
     nav: '/dashboards',
     title: () => 'Dashboards',
-    element: () => <Placeholder heading="Dashboards" />,
+    element: () => <DashboardsPage />,
   },
   {
     pattern: '/hosts',

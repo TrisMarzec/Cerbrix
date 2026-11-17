@@ -89,3 +89,41 @@ export interface Listed<T> {
   items: T[];
   total: number;
 }
+
+/** How many hosts of a dashboard are in each state (`GET /dashboards`). */
+export interface HostsByState {
+  critical: number;
+  high: number;
+  warning: number;
+  info: number;
+  acknowledged: number;
+  ok: number;
+}
+
+/** One entry of `GET /dashboards`. */
+export interface DashboardSummary {
+  id: string;
+  name: string;
+  file: string;
+  priority: number;
+  host_count: number;
+  hosts_by_state: HostsByState;
+  open_problems: Record<Severity, number>;
+  unacknowledged: Record<Severity, number>;
+}
+
+export type DisplayShow = { dashboard: string } | { rotate: string[]; every: string };
+
+/** One entry of `GET /displays`. */
+export interface Display {
+  id: string;
+  name: string;
+  file: string;
+  show: DisplayShow;
+  switch_on_alarm: { min_severity: Severity } | null;
+  dashboards: string[] | null;
+  token_created_at: string | null;
+  target: string | null;
+  causes: string[];
+  waiting: string[];
+}

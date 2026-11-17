@@ -1,0 +1,32 @@
+.dashboard-hosts {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dashboard-hosts .num {
+  color: var(--dim);
+}
+
+.dashboard-name,
+.dashboard-file {
+  overflow-wrap: anywhere;
+}
+
+.displays {
+  margin-top: 28px;
+}
+
+.displays th[scope='row'] {
+  color: inherit;
+  font-size: inherit;
+  font-weight: 600;
+}
+
+.display-now {
+  overflow-wrap: anywhere;
+}
+
+.display-now > span {
+  display: block;
+}
