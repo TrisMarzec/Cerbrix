@@ -110,4 +110,16 @@ describe('AckDialog', () => {
     expect(onClose).toHaveBeenCalled();
     expect(mock.requests).toHaveLength(0);
   });
+
+  it('cannot be dismissed while the request runs', async () => {
+    const { user, onClose } = setup(() => new Promise<never>(() => {}));
+    
+    await user.click(screen.getByRole('button', { name: 'Acknowledge' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    });
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

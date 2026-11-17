@@ -1,6 +1,6 @@
 import './HostPage.css';
 
-import { useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import { api, seg } from '../api/client';
 import type {
@@ -9,6 +9,7 @@ import type {
   HostValuesAnswer,
   Problem,
   Severity,
+  HostValue,
 } from '../api/types';
 import { AckDialog } from '../components/AckDialog';
 import { describeActionError } from '../components/actionError';
@@ -27,6 +28,7 @@ import {
   DEFAULT_RANGE,
   graphSpecs,
   RANGES,
+  seriesId,
   seriesTitle,
   SeriesGraph,
   type Range,
@@ -81,7 +83,13 @@ function ReleaseDialog({ host, onDone, onClose, onGone }: ReleaseProps) {
   };
 
   return (
-    <Dialog title="Release agent binding" onClose={onClose}>
+    <Dialog
+      title="Release agent binding"
+      closeOnBackdrop={!busy}
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+    >
       <p>
         Release the agent binding of <strong>{host}</strong>? The agent on this host must enrol
         again with a new key.
@@ -92,7 +100,7 @@ function ReleaseDialog({ host, onDone, onClose, onGone }: ReleaseProps) {
         </p>
       )}
       <div class="dialog-actions">
-        <button type="button" class="btn" onClick={onClose}>
+        <button type="button" class="btn" disabled={busy} onClick={onClose}>
           Cancel
         </button>
         <button type="button" class="btn" disabled={busy} onClick={release}>
@@ -103,9 +111,10 @@ function ReleaseDialog({ host, onDone, onClose, onGone }: ReleaseProps) {
   );
 }
 
-function Head({ host, now }: { host: HostDetail; now: Date }) {
-  const worstSeverity = worst(host.open_problems);
-  const count = host.open_problems.length;
+function Head({ host, problems, now }: { host: HostDetail; problems: Problem[]; now: Date }) {
+  const worstSeverity = worst(problems);
+  const count = problems.length;
+  const allAcknowledged = count > 0 && problems.every((p) => p.acknowledged_at !== null);
   return (
     <div class="panel host-head">
       <div class="host-head-top">
@@ -113,7 +122,7 @@ function Head({ host, now }: { host: HostDetail; now: Date }) {
           <span class="host-pill is-ok">No problems</span>
         ) : (
           <span class={`host-pill sev-${worstSeverity}`}>
-            {`${count} open ${count === 1 ? 'problem' : 'problems'}`}
+            {`${count} open ${count === 1 ? 'problem' : 'problems'} · ${severityWord(worstSeverity)}${allAcknowledged ? ' (acknowledged)' : ''}`}
           </span>
         )}
         {host.managed_by_git && <span class="host-git">Managed by Git</span>}
@@ -191,11 +200,22 @@ export function HostPage({ name }: { name: string }) {
   const [released, setReleased] = useState(false);
   const [gone, setGone] = useState(false);
 
+  // A problem the server returned for an action, shown until the reload's answer arrives.
+  const [patches, setPatches] = useState<Record<string, Problem>>({});
+
   const host = detail.data;
-  const valueItems = values.data?.items;
+  useEffect(() => {
+    setPatches({});
+  }, [host]);
+
+  // The graph list comes only from an answer that has values. A failed poll or an answer without
+  // metrics leaves the last good list in place, so the graphs are not torn down and rebuilt.
+  const goodValues = useRef<HostValue[] | undefined>(undefined);
+  if (values.data?.metrics_available === true) goodValues.current = values.data.items;
+  const good = goodValues.current;
   const specs = useMemo(
-    () => (host === undefined ? undefined : graphSpecs(host.items, valueItems ?? [])),
-    [host?.items, valueItems],
+    () => (host === undefined || good === undefined ? undefined : graphSpecs(host.items, good)),
+    [host?.items, good],
   );
 
   const notFound = gone || detail.error?.status === 404 || values.error?.status === 404;
@@ -232,14 +252,21 @@ export function HostPage({ name }: { name: string }) {
     // A refused action (a problem that was resolved meanwhile) leaves the list out of date.
     detail.reload();
   };
+  const actionDone = (p: Problem) => {
+    setPatches((previous) => ({ ...previous, [p.id]: p }));
+    closeDialog();
+  };
+  const openProblems = host.open_problems
+    .map((p) => patches[p.id] ?? p)
+    .filter((p) => p.resolved_at === null);
   const canAct = can('operator');
-  const valuesReady = values.data !== undefined || values.error !== undefined;
+  const valuesAnswered = values.data !== undefined || values.error !== undefined;
 
   return (
     <>
       <h1>{name}</h1>
       {released && <Banner kind="info">Agent binding released.</Banner>}
-      <Head host={host} now={now} />
+      <Head host={host} problems={openProblems} now={now} />
       <div class="host-tools">
         <Link href={`/problems?state=resolved&host=${encodeURIComponent(name)}`}>
           Past problems of this host
@@ -249,6 +276,7 @@ export function HostPage({ name }: { name: string }) {
             type="button"
             class="btn"
             onClick={() => {
+              setReleased(false);
               setReleasing(true);
             }}
           >
@@ -261,11 +289,11 @@ export function HostPage({ name }: { name: string }) {
         <div class="host-left">
           <section>
             <h2>Open problems</h2>
-            {host.open_problems.length === 0 ? (
+            {openProblems.length === 0 ? (
               <Empty>No open problems.</Empty>
             ) : (
               <div class="host-problems">
-                {host.open_problems.map((p) => (
+                {openProblems.map((p) => (
                   <ProblemRow
                     key={p.id}
                     problem={p}
@@ -278,6 +306,7 @@ export function HostPage({ name }: { name: string }) {
                             class="btn"
                             aria-label={`${p.acknowledged_at === null ? 'Acknowledge' : 'Acknowledge again'} ${problemName(p)}`}
                             onClick={() => {
+                              setReleased(false);
                               setDialog({ kind: 'ack', problem: p });
                             }}
                           >
@@ -288,6 +317,7 @@ export function HostPage({ name }: { name: string }) {
                             class="btn"
                             aria-label={`Close problem ${problemName(p)}`}
                             onClick={() => {
+                              setReleased(false);
                               setDialog({ kind: 'close', problem: p });
                             }}
                           >
@@ -313,6 +343,7 @@ export function HostPage({ name }: { name: string }) {
                     class="btn"
                     aria-pressed={r === range}
                     onClick={() => {
+                      setReleased(false);
                       setQuery({ range: r === DEFAULT_RANGE ? undefined : r });
                     }}
                   >
@@ -324,17 +355,27 @@ export function HostPage({ name }: { name: string }) {
             {host.items.length === 0 ? (
               <Empty>This host has no items configured.</Empty>
             ) : (
-              valuesReady &&
-              specs !== undefined && (
+              (specs !== undefined ? (
                 <>
                   {specs.graphs.map((spec) => (
-                    <SeriesGraph key={spec.id} host={name} spec={spec} range={range} />
+                    <SeriesGraph
+                      key={spec.id}
+                      host={name}
+                      spec={spec}
+                      range={range}
+                      now={now}
+                      valuesHaveKey={(good ?? []).some((v) => v.key === spec.key)}
+                    />
                   ))}
                   {specs.waiting.map((key) => (
                     <p key={key} class="dim">{`No values yet for ${key}`}</p>
                   ))}
                 </>
-              )
+              ) : (
+                valuesAnswered && (
+                  <Empty>Graphs are shown once the current values could be loaded.</Empty>
+                )
+              ))
             )}
           </section>
         </div>
@@ -344,7 +385,16 @@ export function HostPage({ name }: { name: string }) {
             <h2>Current values</h2>
             {values.data?.metrics_available === false ? (
               <Empty>Current values are not available right now.</Empty>
-            ) : values.data === undefined ? null : values.data.items.length === 0 ? (
+            ) : values.data === undefined ? (
+              values.error !== undefined && (
+                <Banner kind="warning">
+                  Could not load the current values.{' '}
+                  <button type="button" class="btn" onClick={values.reload}>
+                    Try again
+                  </button>
+                </Banner>
+              )
+            ) : values.data.items.length === 0 ? (
               <Empty>No current values.</Empty>
             ) : (
               <table aria-label="Current values">
@@ -363,7 +413,7 @@ export function HostPage({ name }: { name: string }) {
                   {values.data.items.map((v) => {
                     const title = seriesTitle(v.key, v.params);
                     return (
-                      <tr key={title}>
+                      <tr key={seriesId(v.key, v.params)}>
                         <td class="host-item">{title}</td>
                         <td class="right num">{value(v.key, v.value)}</td>
                         <td class="right num dim">{age(v.at, now)}</td>
@@ -410,10 +460,10 @@ export function HostPage({ name }: { name: string }) {
       </div>
 
       {dialog?.kind === 'ack' && (
-        <AckDialog problem={dialog.problem} onDone={closeDialog} onClose={closeDialog} />
+        <AckDialog problem={dialog.problem} onDone={actionDone} onClose={closeDialog} />
       )}
       {dialog?.kind === 'close' && (
-        <CloseDialog problem={dialog.problem} onDone={closeDialog} onClose={closeDialog} />
+        <CloseDialog problem={dialog.problem} onDone={actionDone} onClose={closeDialog} />
       )}
       {releasing && (
         <ReleaseDialog

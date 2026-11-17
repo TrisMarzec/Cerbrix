@@ -4,6 +4,7 @@ import { api, seg } from '../api/client';
 import type { HostItem, HostValue, Series } from '../api/types';
 import { Banner } from '../components/Banner';
 import { Graph } from '../components/Graph';
+import { clock } from '../lib/format';
 import { usePolled } from '../lib/poll';
 
 export type Range = '1h' | '6h' | '24h' | '7d';
@@ -35,6 +36,12 @@ export function seriesTitle(key: string, params: Record<string, string> | null):
   return `${key} · ${entries.map(([name, v]) => `${name}=${v}`).join(', ')}`;
 }
 
+/** The identity of a series: the key and its sorted parameter entries, as JSON (never the display title). */
+export function seriesId(key: string, params: Record<string, string>): string {
+  const entries = Object.entries(params).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return JSON.stringify([key, entries]);
+}
+
 function hasParams(params: Record<string, string> | null): params is Record<string, string> {
   return params !== null && Object.keys(params).length > 0;
 }
@@ -59,10 +66,10 @@ export function graphSpecs(
   const waiting: string[] = [];
   const seen = new Set<string>();
   const add = (key: string, params: Record<string, string>) => {
-    const title = seriesTitle(key, params);
-    if (seen.has(title)) return;
-    seen.add(title);
-    graphs.push({ id: title, key, params, title });
+    const id = seriesId(key, params);
+    if (seen.has(id)) return;
+    seen.add(id);
+    graphs.push({ id, key, params, title: seriesTitle(key, params) });
   };
 
   for (const item of items) {
@@ -91,10 +98,16 @@ interface LoadedProps {
   host: string;
   spec: GraphSpec;
   range: Range;
+  now: Date;
+  /** Whether the last good `/values` answer has an entry for the key of this graph. */
+  valuesHaveKey: boolean;
 }
 
 /** Loads the series of one graph (and again every minute) and draws it. */
-function LoadedGraph({ host, spec, range }: LoadedProps) {
+function LoadedGraph({ host, spec, range, now, valuesHaveKey }: LoadedProps) {
+  // Once a graph has been visible it keeps polling every 60 seconds, also after it scrolled out of
+  // view. With thirty graphs that is thirty requests a minute: accepted, because every request is
+  // small and the metrics store answers from its own cache.
   const series = usePolled(
     (signal) => {
       const query: Record<string, string> = { item: spec.key, range };
@@ -109,12 +122,15 @@ function LoadedGraph({ host, spec, range }: LoadedProps) {
   if (answer === undefined) {
     const error = series.error;
     if (error === undefined) return null;
-    // 400: the item needs a parameter and the host has reported no instance of it yet.
-    if (error.status === 400) return <p class="graph-empty">No data in this range</p>;
     if (error.status === 503) return <p class="graph-empty">The metrics store did not answer</p>;
+    // 400 for an item asked for without parameters, of which the host has no value at all: the item
+    // needs a parameter and no instance has reported yet.
+    if (error.status === 400 && Object.keys(spec.params).length === 0 && !valuesHaveKey) {
+      return <p class="graph-empty">{`No values yet for ${spec.key}`}</p>;
+    }
     return (
       <Banner kind="warning">
-        Could not load this graph.{' '}
+        {`Could not load this graph: ${error.message}`}{' '}
         <button type="button" class="btn" onClick={series.reload}>
           Try again
         </button>
@@ -128,14 +144,18 @@ function LoadedGraph({ host, spec, range }: LoadedProps) {
         thresholds={answer.thresholds}
         unitKey={spec.key}
         stepSecs={answer.step_secs}
+        now={now}
         label={`${spec.title} over the last ${RANGE_WORDS[range]}`}
       />
+      {series.staleSince !== undefined && (
+        <p class="graph-stale dim">{`Not updated since ${clock(series.staleSince.toISOString(), now)}`}</p>
+      )}
     </div>
   );
 }
 
 /** One graph with its title. Its series is requested only after it has been on screen. */
-export function SeriesGraph({ host, spec, range }: LoadedProps) {
+export function SeriesGraph({ host, spec, range, now, valuesHaveKey }: LoadedProps) {
   const frame = useRef<HTMLElement>(null);
   // Without IntersectionObserver there is no way to know: load at once.
   const [visible, setVisible] = useState(() => typeof IntersectionObserver === 'undefined');
@@ -158,7 +178,9 @@ export function SeriesGraph({ host, spec, range }: LoadedProps) {
   return (
     <section class="graph-frame" ref={frame}>
       <h3 title={spec.title}>{spec.title}</h3>
-      {visible && <LoadedGraph host={host} spec={spec} range={range} />}
+      {visible && (
+        <LoadedGraph host={host} spec={spec} range={range} now={now} valuesHaveKey={valuesHaveKey} />
+      )}
     </section>
   );
 }

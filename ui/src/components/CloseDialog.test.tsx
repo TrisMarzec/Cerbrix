@@ -69,4 +69,16 @@ describe('CloseDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Close problem' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach the server.');
   });
+
+  it('cannot be dismissed while the request runs', async () => {
+    const { user, onClose } = setup(() => new Promise<never>(() => {}));
+    await user.type(screen.getByLabelText('Reason'), 'gone');
+    await user.click(screen.getByRole('button', { name: 'Close problem' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    });
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

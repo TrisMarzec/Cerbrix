@@ -43,8 +43,15 @@ export function AckDialog({ problem, onDone, onClose }: Props) {
       );
   };
 
+  // While the request runs the dialog cannot be dismissed, so a failure is never dropped unseen.
   return (
-    <Dialog title="Acknowledge problem" onClose={onClose}>
+    <Dialog
+      title="Acknowledge problem"
+      closeOnBackdrop={!busy}
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+    >
       <ProblemBrief problem={problem} />
       <form class="dialog-form" onSubmit={submit}>
         <label>
@@ -64,7 +71,7 @@ export function AckDialog({ problem, onDone, onClose }: Props) {
           </p>
         )}
         <div class="dialog-actions">
-          <button type="button" class="btn" onClick={onClose}>
+          <button type="button" class="btn" disabled={busy} onClick={onClose}>
             Cancel
           </button>
           <button type="submit" class="btn" disabled={busy}>

@@ -1,11 +1,13 @@
 import type {
   DashboardSummary,
   Display,
+  EnrollmentKey,
   HostDetail,
   HostRow,
   HostState,
   Problem,
   Status,
+  SyncHistoryEntry,
 } from '../api/types';
 
 /** The fixed "now" of the tests: 17 Nov 2026, 14:30 local time. */
@@ -199,6 +201,37 @@ export function hostDetailFixture(overrides: Partial<HostDetail> = {}): HostDeta
       },
     ],
     open_problems: [],
+    ...overrides,
+  };
+}
+
+const NO_NAMES = { added: [], changed: [], removed: [] };
+
+/** An applied revision that changed nothing; override `changes` or the rest. */
+export function syncEntryFixture(overrides: Partial<SyncHistoryEntry> = {}): SyncHistoryEntry {
+  return {
+    commit: '253a2994b13aca387e272ff08db9eb858b436b66',
+    applied_at: new Date(2026, 10, 17, 13, 0, 0).toISOString(),
+    changes: {
+      hosts: { ...NO_NAMES },
+      templates: { ...NO_NAMES },
+      notifications: { ...NO_NAMES },
+      dashboards: { ...NO_NAMES },
+      displays: { ...NO_NAMES },
+    },
+    ...overrides,
+  };
+}
+
+/** An active enrolment key; override what a test needs. */
+export function keyFixture(overrides: Partial<EnrollmentKey> = {}): EnrollmentKey {
+  return {
+    id: 'd5293479-d2de-4693-9da5-99c726925d97',
+    description: 'web-02',
+    created_at: new Date(2026, 10, 17, 12, 0, 0).toISOString(),
+    expires_at: new Date(2026, 10, 18, 12, 0, 0).toISOString(),
+    revoked_at: null,
+    state: 'active',
     ...overrides,
   };
 }

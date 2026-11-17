@@ -225,3 +225,46 @@ export interface ProblemsAnswer extends Listed<Problem> {
   /** For every host in `items`: the dashboards that show it (sorted by name); empty for a host in none. */
   dashboards: Record<string, { id: string; name: string }[]>;
 }
+
+/** The names of one kind of configuration object in one applied revision. */
+export interface ChangeLists {
+  added: string[];
+  changed: string[];
+  removed: string[];
+}
+
+/** What a revision changed (`GET /sync/history`). */
+export interface SyncChanges {
+  hosts: ChangeLists;
+  templates: ChangeLists;
+  notifications: ChangeLists;
+  dashboards: ChangeLists;
+  displays: ChangeLists;
+}
+
+/** One applied revision of the configuration repository. */
+export interface SyncHistoryEntry {
+  commit: string;
+  applied_at: string;
+  changes: SyncChanges;
+}
+
+/** An agent that tried to enrol under a name that is not a registered host (`GET /unknown-agents`). */
+export interface UnknownAgent {
+  host_name: string;
+  first_seen: string;
+  last_seen: string;
+  attempts: number;
+}
+
+export type EnrollmentKeyState = 'active' | 'expired' | 'revoked';
+
+/** An enrolment key without the key itself (`GET /enrollment-keys`). */
+export interface EnrollmentKey {
+  id: string;
+  description: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  state: EnrollmentKeyState;
+}

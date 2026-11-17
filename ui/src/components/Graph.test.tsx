@@ -2,6 +2,7 @@ import { act, render, screen } from '@testing-library/preact';
 import type uPlot from 'uplot';
 
 import type { Threshold } from '../api/types';
+import { NOW } from '../test/fixtures';
 import { Graph } from './Graph';
 
 interface Instance {
@@ -119,13 +120,13 @@ function fakeCanvas(width = 400) {
 
 describe('Graph', () => {
   it.each([[null], [[]]])('says there is no data for %j and creates no plot', (given) => {
-    render(<Graph points={given} thresholds={[]} unitKey="cpu.usage" />);
+    render(<Graph now={NOW} points={given} thresholds={[]} unitKey="cpu.usage" />);
     expect(screen.getByText('No data in this range')).toBeInTheDocument();
     expect(instances).toHaveLength(0);
   });
 
   it('hands the points to uPlot as seconds and values, with the Git colour for the line', () => {
-    render(<Graph points={points([10, 20, 30])} thresholds={[]} unitKey="cpu.usage" />);
+    render(<Graph now={NOW} points={points([10, 20, 30])} thresholds={[]} unitKey="cpu.usage" />);
     const { opts, data } = last();
     expect(data).toEqual([[T0 / 1000, T0 / 1000 + 60, T0 / 1000 + 120], [10, 20, 30]]);
     expect(opts.series[1]?.stroke).toBe('git-colour');
@@ -135,12 +136,12 @@ describe('Graph', () => {
 
   it('falls back to currentColor where a custom property is empty', () => {
     document.documentElement.removeAttribute('style');
-    render(<Graph points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
     expect(last().opts.series[1]?.stroke).toBe('currentColor');
   });
 
   it('uses the width of the container, 600 where it has none (jsdom)', () => {
-    render(<Graph points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" height={140} />);
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" height={140} />);
     expect(last().opts.width).toBe(600);
     expect(last().opts.height).toBe(140);
   });
@@ -151,7 +152,7 @@ describe('Graph', () => {
       [T0 + 90_000, 2],
       [T0 + 90_000 * 10, 3],
     ];
-    render(<Graph points={given} thresholds={[]} unitKey="cpu.usage" stepSecs={90} />);
+    render(<Graph now={NOW} points={given} thresholds={[]} unitKey="cpu.usage" stepSecs={90} />);
     const [xs, ys] = last().data as [number[], (number | null)[]];
     expect(ys).toEqual([1, 2, null, 3]);
     expect(xs).toHaveLength(4);
@@ -164,19 +165,19 @@ describe('Graph', () => {
       [T0, 1],
       [T0 + 270_000, 2],
     ];
-    render(<Graph points={given} thresholds={[]} unitKey="cpu.usage" stepSecs={90} />);
+    render(<Graph now={NOW} points={given} thresholds={[]} unitKey="cpu.usage" stepSecs={90} />);
     expect((last().data as number[][])[1]).toEqual([1, 2]);
   });
 
   it('formats the y axis and the readout with value() of the unit key', () => {
-    render(<Graph points={points([29.44, 30])} thresholds={[]} unitKey="cpu.usage" />);
+    render(<Graph now={NOW} points={points([29.44, 30])} thresholds={[]} unitKey="cpu.usage" />);
     const axis = last().opts.axes?.[1];
     const values = axis?.values as (u: unknown, splits: number[]) => string[];
     expect(values({}, [0, 50])).toEqual(['0.0 %', '50.0 %']);
   });
 
   it('draws one dashed line per threshold in its severity colour, labelled with the trigger name', () => {
-    render(<Graph points={points([50, 60])} thresholds={THRESHOLDS} unitKey="disk.used_percent" />);
+    render(<Graph now={NOW} points={points([50, 60])} thresholds={THRESHOLDS} unitKey="disk.used_percent" />);
     const hooks = last().opts.hooks?.draw;
     const draw = Array.isArray(hooks) ? hooks[0] : hooks;
     const { u, calls } = fakeCanvas();
@@ -191,7 +192,7 @@ describe('Graph', () => {
 
   it('draws info thresholds in the dim colour', () => {
     const info: Threshold[] = [{ trigger: 'Note', severity: 'info', op: '>', value: 5 }];
-    render(<Graph points={points([1, 2])} thresholds={info} unitKey="x" />);
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={info} unitKey="x" />);
     const hooks = last().opts.hooks?.draw;
     const draw = Array.isArray(hooks) ? hooks[0] : hooks;
     const { u, calls } = fakeCanvas();
@@ -200,7 +201,7 @@ describe('Graph', () => {
   });
 
   it('extends the y range to include a threshold outside the data', () => {
-    render(<Graph points={points([10, 20])} thresholds={THRESHOLDS} unitKey="disk.used_percent" />);
+    render(<Graph now={NOW} points={points([10, 20])} thresholds={THRESHOLDS} unitKey="disk.used_percent" />);
     const range = last().opts.scales?.['y']?.range as (
       u: unknown,
       min: number,
@@ -212,7 +213,7 @@ describe('Graph', () => {
   });
 
   it('gives a flat series a range with some height', () => {
-    render(<Graph points={points([5, 5])} thresholds={[]} unitKey="x" />);
+    render(<Graph now={NOW} points={points([5, 5])} thresholds={[]} unitKey="x" />);
     const range = last().opts.scales?.['y']?.range as (
       u: unknown,
       min: number,
@@ -224,7 +225,7 @@ describe('Graph', () => {
 
   it('describes the graph for a screen reader', () => {
     render(
-      <Graph
+      <Graph now={NOW}
         points={points([10, 29.4])}
         thresholds={THRESHOLDS}
         unitKey="cpu.usage"
@@ -239,7 +240,7 @@ describe('Graph', () => {
   });
 
   it('shows the value and time under the cursor as text', () => {
-    render(<Graph points={points([10, 29.4])} thresholds={[]} unitKey="cpu.usage" />);
+    render(<Graph now={NOW} points={points([10, 29.4])} thresholds={[]} unitKey="cpu.usage" />);
     const hooks = last().opts.hooks?.setCursor;
     const setCursor = Array.isArray(hooks) ? hooks[0] : hooks;
     act(() => {
@@ -256,7 +257,7 @@ describe('Graph', () => {
   });
 
   it('destroys the plot on unmount', () => {
-    const view = render(<Graph points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
     const { destroy } = last();
     act(() => {
       view.unmount();
@@ -265,14 +266,14 @@ describe('Graph', () => {
   });
 
   it('feeds new points into the same plot', () => {
-    const view = render(<Graph points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
-    view.rerender(<Graph points={points([3, 4])} thresholds={[]} unitKey="cpu.usage" />);
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
+    view.rerender(<Graph now={NOW} points={points([3, 4])} thresholds={[]} unitKey="cpu.usage" />);
     expect(instances).toHaveLength(1);
     expect(last().setData).toHaveBeenCalledWith([[T0 / 1000, T0 / 1000 + 60], [3, 4]]);
   });
 
   it('resizes the plot when its container resizes', () => {
-    render(<Graph points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" height={150} />);
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" height={150} />);
     const observer = FakeResizeObserver.all[0];
     expect(observer?.observe).toHaveBeenCalled();
     observer?.fire(480);
@@ -280,7 +281,7 @@ describe('Graph', () => {
   });
 
   it('stops observing on unmount', () => {
-    const view = render(<Graph points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
     const observer = FakeResizeObserver.all[0];
     act(() => {
       view.unmount();
@@ -290,18 +291,18 @@ describe('Graph', () => {
 
   it('works where ResizeObserver does not exist', () => {
     vi.stubGlobal('ResizeObserver', undefined);
-    render(<Graph points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" />);
     expect(instances).toHaveLength(1);
   });
 
   it('formats x ticks as hours and minutes up to a day, as day and month beyond', () => {
-    render(<Graph points={points([1, 2])} thresholds={[]} unitKey="x" />);
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" />);
     const short = last().opts.axes?.[0]?.values as (u: unknown, splits: number[]) => string[];
     const noon = new Date(2026, 10, 17, 9, 5).getTime() / 1000;
     expect(short({}, [noon])).toEqual(['09:05']);
 
     render(
-      <Graph
+      <Graph now={NOW}
         points={points([1, 2], 3 * 24 * 3_600_000)}
         thresholds={[]}
         unitKey="x"

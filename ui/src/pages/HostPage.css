@@ -100,8 +100,15 @@
   color: var(--git);
 }
 
+/* Reserves the height of a loaded graph (GRAPH_HEIGHT 160 px, the title and the readout line) from the
+   start, so frames below the fold are below the fold before anything has loaded. */
 .graph-frame {
   margin-bottom: 18px;
+  min-height: 220px;
+}
+
+.graph-stale {
+  font-size: 14px;
 }
 
 .graph-frame h3 {

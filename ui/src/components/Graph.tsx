@@ -8,7 +8,8 @@ import type { Severity, Threshold } from '../api/types';
 import { clock, severityWord, value } from '../lib/format';
 
 const DEFAULT_WIDTH = 600;
-const DEFAULT_HEIGHT = 160;
+/** The default height of the plot in pixels; the frame of a graph on a page reserves at least this much (HostPage.css). */
+export const GRAPH_HEIGHT = 160;
 /** A gap of more than this many steps is not drawn as a line. */
 const GAP_STEPS = 3;
 /** A span longer than this many seconds (a day and a little) labels the x axis with dates. */
@@ -22,6 +23,8 @@ interface Props {
   /** The item key; it decides how values are written. */
   unitKey: string;
   height?: number;
+  /** The shell's clock, for the time of the crosshair. */
+  now: Date;
   /** Seconds between two points; a gap of more than three steps breaks the line. */
   stepSecs?: number;
   /** What the graph shows, for a screen reader; defaults to the unit key. */
@@ -107,7 +110,8 @@ export function Graph({
   points,
   thresholds,
   unitKey,
-  height = DEFAULT_HEIGHT,
+  height = GRAPH_HEIGHT,
+  now,
   stepSecs,
   label,
 }: Props) {
@@ -234,7 +238,7 @@ export function Graph({
       <div class="graph-canvas" role="img" aria-label={description} ref={container} />
       <p class="graph-readout num" data-testid="graph-readout" aria-hidden="true">
         {hover !== undefined &&
-          `${value(unitKey, hover.value)} · ${clock(new Date(hover.at * 1000).toISOString(), new Date())}`}
+          `${value(unitKey, hover.value)} · ${clock(new Date(hover.at * 1000).toISOString(), now)}`}
       </p>
       {thresholds.length > 0 && (
         <ul class="graph-limits">

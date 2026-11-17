@@ -1,8 +1,12 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { act, render, screen, within } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
 import type uPlot from 'uplot';
 
 import type { HostDetail, HostValue, Role, Series } from '../api/types';
+import { GRAPH_HEIGHT } from '../components/Graph';
 import { SessionProvider } from '../session';
 import { NowContext } from '../shell/context';
 import {
@@ -15,12 +19,13 @@ import { mockFetch, type FetchMock, type Responder } from '../test/mockFetch';
 import { advance } from '../test/timers';
 import { HostPage } from './HostPage';
 
-const plots: { data: uPlot.AlignedData; destroy: () => void }[] = [];
+const plots: { data: uPlot.AlignedData; destroy: ReturnType<typeof vi.fn>; destroyed: () => boolean }[] = [];
 
 vi.mock('uplot', () => ({
   default: class {
     data: uPlot.AlignedData;
     destroy = vi.fn();
+    destroyed = () => this.destroy.mock.calls.length > 0;
     setData = vi.fn();
     setSize = vi.fn();
     constructor(_opts: uPlot.Options, data: uPlot.AlignedData) {
@@ -167,8 +172,13 @@ describe('head', () => {
         open_problems: [acknowledgedProblem, criticalProblem],
       }),
     });
-    const pill = screen.getByText('2 open problems');
+    const pill = screen.getByText('2 open problems · Critical');
     expect(pill).toHaveClass('sev-critical');
+  });
+
+  it('says one open problem in the singular and marks all-acknowledged', async () => {
+    await open({ detail: detailWith({ open_problems: [acknowledgedProblem] }) });
+    expect(screen.getByText('1 open problem · Warning (acknowledged)')).toBeInTheDocument();
   });
 
   it('links to the past problems of a host whose name has a dot', async () => {
@@ -209,7 +219,7 @@ describe('failures', () => {
     });
     expect(screen.getByRole('alert')).toHaveTextContent('Could not load the host.');
     await user.click(screen.getByRole('button', { name: 'Try again' }));
-    await advance(0);
+    await advance(50);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByText('Current values')).toBeInTheDocument();
   });
@@ -505,9 +515,9 @@ describe('graphs', () => {
         ],
       },
     });
-    expect(screen.getByText(/Could not load this graph\./)).toBeInTheDocument();
+    expect(screen.getByText(/Could not load this graph: boom/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Try again' }));
-    await advance(0);
+    await advance(50);
     expect(plots).toHaveLength(1);
   });
 
@@ -643,5 +653,222 @@ describe('current values and triggers', () => {
     });
     expect(document.querySelector('img')).toBeNull();
     expect(screen.getAllByText(hostile).length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('values failures', () => {
+  const diskHost = detailWith({
+    items: [{ key: 'disk.used_percent', params: null, interval_secs: 300, origin: 'host' }],
+  });
+  const diskValues = values([
+    { key: 'disk.used_percent', params: { mount: '/' }, value: 41.5, at: cpuValue.at },
+    { key: 'disk.used_percent', params: { mount: '/data' }, value: 10, at: cpuValue.at },
+  ]);
+
+  it('shows a banner and requests no graph when the first values load fails', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await open({
+      detail: diskHost,
+      values: [{ status: 500, json: { error: 'internal', message: 'boom' } }, diskValues],
+    });
+    expect(screen.getByText(/Could not load the current values\./)).toBeInTheDocument();
+    expect(
+      screen.getByText('Graphs are shown once the current values could be loaded.'),
+    ).toBeInTheDocument();
+    expect(seriesRequests()).toHaveLength(0);
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await advance(50);
+    expect(seriesRequests()).toHaveLength(2);
+  });
+
+  it('shows no graphs without metrics and says the values are not available', async () => {
+    await open({ detail: diskHost, values: values([], false) });
+    expect(screen.getByText('Current values are not available right now.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Graphs are shown once the current values could be loaded.'),
+    ).toBeInTheDocument();
+    expect(seriesRequests()).toHaveLength(0);
+    expect(screen.queryByText(/No values yet/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the graphs through a poll without metrics and a failed poll, and after recovery', async () => {
+    await open({
+      detail: diskHost,
+      values: [diskValues, values([], false), 'network', diskValues],
+    });
+    expect(plots).toHaveLength(2);
+    const requests = seriesRequests().length;
+    await advance(10_000);
+    expect(screen.getByText('Current values are not available right now.')).toBeInTheDocument();
+    await advance(10_000);
+    expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(2);
+    expect(plots).toHaveLength(2);
+    expect(plots.every((p) => !p.destroyed())).toBe(true);
+    expect(seriesRequests()).toHaveLength(requests);
+    await advance(10_000);
+    expect(screen.getByRole('table', { name: 'Current values' })).toBeInTheDocument();
+    expect(plots).toHaveLength(2);
+    expect(plots.every((p) => !p.destroyed())).toBe(true);
+    expect(seriesRequests()).toHaveLength(requests);
+  });
+});
+
+describe('series errors', () => {
+  it('says there are no values yet for an item asked for without parameters that has none', async () => {
+    await open({
+      detail: detailWith({
+        items: [{ key: 'disk.used_percent', params: null, interval_secs: 300, origin: 'host' }],
+      }),
+      values: values([cpuValue]),
+      routes: {
+        'GET /hosts/web-01/series': {
+          status: 400,
+          json: { error: 'invalid', message: 'disk.used_percent needs the parameter p_mount' },
+        },
+      },
+    });
+    expect(screen.getByText('No values yet for disk.used_percent')).toBeInTheDocument();
+  });
+
+  it('shows the server message for any other 400, with Try again', async () => {
+    await open({
+      routes: {
+        'GET /hosts/web-01/series': {
+          status: 400,
+          json: { error: 'invalid', message: 'unknown parameter p_x' },
+        },
+      },
+    });
+    expect(screen.getByText(/Could not load this graph: unknown parameter p_x/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(screen.queryByText(/No values yet/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the metrics store sentence for 503', async () => {
+    await open({
+      routes: {
+        'GET /hosts/web-01/series': {
+          status: 503,
+          json: { error: 'metrics_unavailable', message: 'x' },
+        },
+      },
+    });
+    expect(screen.getByText('The metrics store did not answer')).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load this graph/)).not.toBeInTheDocument();
+  });
+
+  it('says when a graph was last updated after a poll failed, and keeps its picture', async () => {
+    await open({
+      routes: {
+        'GET /hosts/web-01/series': [{ json: series() }, 'network'],
+      },
+    });
+    expect(screen.queryByText(/Not updated since/)).not.toBeInTheDocument();
+    await advance(60_000);
+    expect(screen.getByText(/^Not updated since \d\d:\d\d$/)).toBeInTheDocument();
+    expect(plots).toHaveLength(1);
+  });
+});
+
+describe('graph identity and frames', () => {
+  it('keeps series apart whose parameters read the same as text', async () => {
+    await open({
+      detail: detailWith({
+        items: [{ key: 'net.rx', params: null, interval_secs: 5, origin: 'host' }],
+      }),
+      values: values([
+        { key: 'net.rx', params: { a: '1, b=2' }, value: 1, at: cpuValue.at },
+        { key: 'net.rx', params: { a: '1', b: '2' }, value: 2, at: cpuValue.at },
+      ]),
+    });
+    const requests = seriesRequests();
+    expect(requests).toHaveLength(2);
+    expect(requests.map((r) => r.query.toString()).sort()).toEqual([
+      'item=net.rx&range=6h&p_a=1%2C+b%3D2',
+      'item=net.rx&range=6h&p_a=1&p_b=2',
+    ]);
+  });
+
+  it('gives every frame the class that reserves the height of a loaded graph', async () => {
+    await open();
+    expect(document.querySelector('section.graph-frame')).not.toBeNull();
+    const css = readFileSync(join(import.meta.dirname, 'HostPage.css'), 'utf8');
+    const rule = /\n\.graph-frame\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    const height = Number(/min-height:\s*(\d+)px/.exec(rule)?.[1]);
+    // The plot plus the title and the readout line.
+    expect(height).toBeGreaterThanOrEqual(GRAPH_HEIGHT + 40);
+  });
+});
+
+describe('optimistic actions', () => {
+  function pendingReload(first: HostDetail) {
+    let calls = 0;
+    return () => {
+      calls += 1;
+      return calls === 1 ? { json: first } : new Promise<never>(() => {});
+    };
+  }
+
+  it('shows the row acknowledged before the reload answers', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await open({
+      role: 'operator',
+      detail: pendingReload(hostDetailFixture({ open_problems: [criticalProblem] })),
+      routes: {
+        [`POST /problems/${criticalProblem.id}/ack`]: {
+          json: { ...criticalProblem, acknowledged_at: NOW.toISOString(), acknowledged_by: 'anna' },
+        },
+      },
+    });
+    await user.click(screen.getByRole('button', { name: /^Acknowledge / }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Acknowledge' }));
+    await advance(0);
+    expect(screen.getByText(/acknowledged by anna/)).toBeInTheDocument();
+    expect(screen.getByText('1 open problem · Critical (acknowledged)')).toBeInTheDocument();
+  });
+
+  it('removes a closed problem at once', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await open({
+      role: 'operator',
+      detail: pendingReload(hostDetailFixture({ open_problems: [criticalProblem] })),
+      routes: {
+        [`POST /problems/${criticalProblem.id}/close`]: {
+          json: { ...criticalProblem, resolved_at: NOW.toISOString() },
+        },
+      },
+    });
+    await user.click(screen.getByRole('button', { name: /^Close problem / }));
+    await user.type(screen.getByLabelText('Reason'), 'gone');
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close problem' }));
+    await advance(0);
+    expect(screen.getByText('No open problems.')).toBeInTheDocument();
+  });
+});
+
+describe('release', () => {
+  it('removes the banner when the next action starts', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await open({ role: 'admin', routes: { 'POST /hosts/web-01/release': { status: 204 } } });
+    await user.click(screen.getByRole('button', { name: 'Release agent binding' }));
+    await user.click(screen.getByRole('button', { name: 'Release binding' }));
+    await advance(0);
+    expect(screen.getByText('Agent binding released.')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '24 h' }));
+    await advance(0);
+    expect(screen.queryByText('Agent binding released.')).not.toBeInTheDocument();
+  });
+
+  it('cannot be dismissed while the request runs', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await open({
+      role: 'admin',
+      routes: { 'POST /hosts/web-01/release': () => new Promise<never>(() => {}) },
+    });
+    await user.click(screen.getByRole('button', { name: 'Release agent binding' }));
+    await user.click(screen.getByRole('button', { name: 'Release binding' }));
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 });

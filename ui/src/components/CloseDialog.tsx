@@ -41,8 +41,15 @@ export function CloseDialog({ problem, onDone, onClose }: Props) {
     );
   };
 
+  // While the request runs the dialog cannot be dismissed, so a failure is never dropped unseen.
   return (
-    <Dialog title="Close problem" onClose={onClose}>
+    <Dialog
+      title="Close problem"
+      closeOnBackdrop={!busy}
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+    >
       <ProblemBrief problem={problem} />
       <p>
         Closing ends this problem by hand. Use it when the thing it is about no longer exists, for
@@ -68,7 +75,7 @@ export function CloseDialog({ problem, onDone, onClose }: Props) {
           </p>
         )}
         <div class="dialog-actions">
-          <button type="button" class="btn" onClick={onClose}>
+          <button type="button" class="btn" disabled={busy} onClick={onClose}>
             Cancel
           </button>
           <button type="submit" class="btn" disabled={busy}>
