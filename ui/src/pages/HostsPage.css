@@ -1,0 +1,63 @@
+.hosts-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+  margin-bottom: 14px;
+}
+
+.hosts-tools label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--dim);
+  font-size: 14px;
+}
+
+.hosts-search {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.hosts-search input {
+  width: 22em;
+  max-width: 100%;
+}
+
+.hosts-table.is-busy {
+  opacity: 0.6;
+}
+
+.hosts-table .cell-sev {
+  padding: 0;
+  width: 6px;
+}
+
+.hosts-table tr.is-problem .cell-sev {
+  background: var(--sev);
+}
+
+.hosts-table tr.is-problem.is-acknowledged .cell-sev {
+  opacity: 0.5;
+}
+
+.hosts-table .visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.hosts-table .host-name,
+.hosts-table .host-address,
+.hosts-table .host-groups {
+  overflow-wrap: anywhere;
+}
+
+.hosts-total {
+  margin-top: 10px;
+  color: var(--dim);
+}

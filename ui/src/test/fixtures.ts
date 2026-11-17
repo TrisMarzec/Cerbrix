@@ -1,4 +1,4 @@
-import type { DashboardSummary, Display, HostState, Problem, Status } from '../api/types';
+import type { DashboardSummary, Display, HostRow, HostState, Problem, Status } from '../api/types';
 
 /** The fixed "now" of the tests: 17 Nov 2026, 14:30 local time. */
 export const NOW = new Date(2026, 10, 17, 14, 30, 0);
@@ -147,6 +147,21 @@ export function displayFixture(overrides: Partial<Display> = {}): Display {
     target: null,
     causes: [],
     waiting: [],
+    ...overrides,
+  };
+}
+
+/** A healthy host that reported 10 seconds before `NOW`; override what a test needs. */
+export function hostRowFixture(overrides: Partial<HostRow> = {}): HostRow {
+  return {
+    name: 'web-01',
+    address: '10.20.1.21',
+    groups: ['web'],
+    state: null,
+    last_seen_at: new Date(NOW.getTime() - 10_000).toISOString(),
+    managed_by_git: true,
+    cpu: 41.2,
+    memory: 58.04,
     ...overrides,
   };
 }

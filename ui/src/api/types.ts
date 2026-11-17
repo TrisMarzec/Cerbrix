@@ -38,6 +38,26 @@ export interface HostState {
   open_problems: number;
 }
 
+/** One row of `GET /hosts`. */
+export interface HostRow {
+  name: string;
+  address: string | null;
+  groups: string[];
+  /** `null` without open problems. */
+  state: HostState | null;
+  last_seen_at: string | null;
+  managed_by_git: boolean;
+  /** Newest `cpu.usage` of the last ten minutes. */
+  cpu: number | null;
+  /** Newest `memory.used_percent` of the last ten minutes. */
+  memory: number | null;
+}
+
+/** `GET /hosts`: a page of hosts, the number of all matching hosts, and whether the values could be read. */
+export interface HostsAnswer extends Listed<HostRow> {
+  metrics_available: boolean;
+}
+
 export type Role = 'viewer' | 'operator' | 'admin';
 
 /** The logged-in user (`GET /session`, `POST /session`). */

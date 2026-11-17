@@ -25,6 +25,9 @@ async function open(path: string, role: Role, status: Responder | Responder[]) {
   mock = mockFetch({
     'GET /session': { json: { name: 'anna', role } },
     'GET /status': status,
+    // The page behind /hosts loads its own data.
+    'GET /hosts': { json: { items: [], total: 0, metrics_available: true } },
+    'GET /host-groups': { json: { items: [] } },
   });
   render(<App />);
   // The session answers first, then the shell mounts and asks for the status.
