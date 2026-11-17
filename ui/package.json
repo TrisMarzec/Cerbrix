@@ -8,8 +8,8 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && node scripts/build.mjs",
-    "check": "tsc --noEmit && tsc --noEmit -p e2e && vitest run",
+    "build": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && node scripts/build.mjs",
+    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p e2e && vitest run",
     "test": "vitest",
     "smoke": "playwright test"
   },
