@@ -158,7 +158,9 @@ function resolveText(p: Problem): string | undefined {
     case "trigger_removed":
       return "trigger removed";
     case "closed_by_operator":
-      return `closed by ${p.closed_by ?? "unknown"}`;
+      return p.closed_by === null
+        ? "closed by hand"
+        : `closed by ${p.closed_by}`;
     case null:
       return undefined;
     default:
@@ -203,6 +205,8 @@ interface TableProps {
   state: StateFilter;
   now: Date;
   canAct: boolean;
+  /** True while the answer for a new query is outstanding: nothing can be acted on. */
+  busy: boolean;
   onAck: (p: Problem) => void;
   onClose: (p: Problem) => void;
 }
@@ -213,6 +217,7 @@ function ProblemTable({
   state,
   now,
   canAct,
+  busy,
   onAck,
   onClose,
 }: TableProps) {
@@ -258,7 +263,7 @@ function ProblemTable({
                     {severityWord(p.severity)}
                   </span>
                   {acknowledged && (
-                    <span>{` · acknowledged by ${p.acknowledged_by ?? "unknown"}, ${clock(p.acknowledged_at ?? "", now)}`}</span>
+                    <span>{` · acknowledged${p.acknowledged_by === null ? "" : ` by ${p.acknowledged_by}`}, ${clock(p.acknowledged_at ?? "", now)}`}</span>
                   )}
                   {acknowledged &&
                     p.ack_comment !== null &&
@@ -268,7 +273,14 @@ function ProblemTable({
                 </div>
               </td>
               <td class="problem-dashboards">
-                <DashboardLinks list={dashboards[p.host] ?? []} state={state} />
+                <DashboardLinks
+                  list={
+                    Object.hasOwn(dashboards, p.host)
+                      ? (dashboards[p.host] ?? [])
+                      : []
+                  }
+                  state={state}
+                />
               </td>
               <td>
                 <TimeText iso={p.started_at} now={now} />
@@ -286,6 +298,7 @@ function ProblemTable({
                     <button
                       type="button"
                       class="btn"
+                      disabled={busy}
                       aria-label={`${acknowledged ? "Acknowledge again" : "Acknowledge"} ${problemName(p)} on ${p.host}`}
                       onClick={() => {
                         onAck(p);
@@ -296,6 +309,7 @@ function ProblemTable({
                     <button
                       type="button"
                       class="btn"
+                      disabled={busy}
                       aria-label={`Close problem ${problemName(p)} on ${p.host}`}
                       onClick={() => {
                         onClose(p);
@@ -313,6 +327,9 @@ function ProblemTable({
     </table>
   );
 }
+
+/** An answer together with the tab it was fetched for, so rows and tab can never disagree. */
+type Loaded = ProblemsAnswer & { forState: StateFilter };
 
 type DialogState = { kind: "ack" | "close"; problem: Problem } | undefined;
 
@@ -335,6 +352,12 @@ export function ProblemsPage() {
     rawGroup.length > GROUP_MAX ||
     rawHost.length > HOST_MAX ||
     rawSearch.length > SEARCH_MAX;
+  const dropped = [
+    rawDashboard.length > DASHBOARD_MAX ? "dashboard" : "",
+    rawGroup.length > GROUP_MAX ? "group" : "",
+    rawHost.length > HOST_MAX ? "host" : "",
+    rawSearch.length > SEARCH_MAX ? "search" : "",
+  ].filter((w) => w !== "");
   const dashboard = rawDashboard.length > DASHBOARD_MAX ? "" : rawDashboard;
   const group = rawGroup.length > GROUP_MAX ? "" : rawGroup;
   const host = rawHost.length > HOST_MAX ? "" : rawHost;
@@ -345,20 +368,22 @@ export function ProblemsPage() {
 
   const problems = usePolled(
     (signal) =>
-      api.get<ProblemsAnswer>(
-        "/problems",
-        {
-          state,
-          severity,
-          dashboard: dashboard === "" ? undefined : dashboard,
-          group: group === "" ? undefined : group,
-          host: host === "" ? undefined : host,
-          search: search === "" ? undefined : search,
-          limit: LIMIT,
-          offset,
-        },
-        signal,
-      ),
+      api
+        .get<ProblemsAnswer>(
+          "/problems",
+          {
+            state,
+            severity,
+            dashboard: dashboard === "" ? undefined : dashboard,
+            group: group === "" ? undefined : group,
+            host: host === "" ? undefined : host,
+            search: search === "" ? undefined : search,
+            limit: LIMIT,
+            offset,
+          },
+          signal,
+        )
+        .then((a): Loaded => ({ ...a, forState: state })),
     [state, severity, dashboard, group, host, search, offset],
   );
   const dashboardList = usePolled(
@@ -383,6 +408,8 @@ export function ProblemsPage() {
   }, [state, severity, dashboard, group, host, search, offset]);
 
   const answer = problems.data;
+  // The tab the rows belong to; while a new query is pending it is not the URL's.
+  const answerState = answer?.forState ?? state;
   const total = answer?.total ?? 0;
   const beyond = answer !== undefined && total > 0 && total <= offset;
 
@@ -420,14 +447,13 @@ export function ProblemsPage() {
   return (
     <>
       <h1>Problems</h1>
-      <div class="problems-tabs" role="tablist" aria-label="Problem state">
+      <div class="problems-tabs" role="group" aria-label="Problems to show">
         {(["open", "resolved"] as const).map((s) => (
           <button
             key={s}
             type="button"
-            role="tab"
             class="btn"
-            aria-selected={state === s}
+            aria-pressed={state === s}
             onClick={() => {
               if (state !== s)
                 setQuery({ state: s === "open" ? undefined : s });
@@ -510,7 +536,9 @@ export function ProblemsPage() {
 
       {invalid && (
         <Banner kind="warning">
-          A filter in the address is not valid.{" "}
+          {dropped.map((what) => (
+            <span key={what}>The {what} in the address is not valid. </span>
+          ))}
           <Link href={clearFiltersHref}>Clear filters</Link>
         </Banner>
       )}
@@ -551,7 +579,7 @@ export function ProblemsPage() {
           {answer.total === 0 ? (
             !problems.pending && (
               <Empty>
-                {state === "open"
+                {answerState === "open"
                   ? "No open problems."
                   : "No resolved problems match."}
               </Empty>
@@ -562,9 +590,10 @@ export function ProblemsPage() {
                 <ProblemTable
                   rows={answer.items}
                   dashboards={answer.dashboards}
-                  state={state}
+                  state={answerState}
                   now={now}
                   canAct={canAct}
+                  busy={problems.pending}
                   onAck={(p) => {
                     setDialog({ kind: "ack", problem: p });
                   }}

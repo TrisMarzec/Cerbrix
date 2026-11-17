@@ -162,9 +162,10 @@ describe("request", () => {
     const q = lastQuery();
     for (const key of ["search", "group", "host", "dashboard"])
       expect(q.has(key)).toBe(false);
-    expect(
-      screen.getByText(/A filter in the address is not valid/),
-    ).toBeInTheDocument();
+    for (const w of ["dashboard", "group", "host", "search"])
+      expect(
+        screen.getByText(`The ${w} in the address is not valid.`),
+      ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Clear filters" })).toHaveAttribute(
       "href",
       "/problems",
@@ -177,16 +178,16 @@ describe("tabs and filters", () => {
     await open("/problems?offset=50&severity=high", {
       problems: answer([criticalProblem], { total: 80 }),
     });
-    fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resolved" }));
     await advance(0);
     expect(window.location.search).toBe("?severity=high&state=resolved");
     expect(lastQuery().get("state")).toBe("resolved");
     expect(lastQuery().get("offset")).toBe("0");
-    expect(screen.getByRole("tab", { name: "Resolved" })).toHaveAttribute(
-      "aria-selected",
+    expect(screen.getByRole("button", { name: "Resolved" })).toHaveAttribute(
+      "aria-pressed",
       "true",
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Open" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
     await advance(0);
     expect(window.location.search).toBe("?severity=high");
   });
@@ -501,7 +502,7 @@ describe("states", () => {
     await open("/problems", {
       problems: [answer([criticalProblem]), slow.responder],
     });
-    fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resolved" }));
     await advance(0);
     expect(region()).toHaveAttribute("aria-busy", "true");
     expect(region()).toHaveClass("is-busy");
@@ -519,7 +520,7 @@ describe("states", () => {
         { status: 500, json: { error: "internal", message: "x" } },
       ],
     });
-    fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resolved" }));
     await advance(0);
     expect(
       screen.getByText(/Could not load the problems\./),
@@ -699,5 +700,132 @@ describe("polling", () => {
     });
     expect(problemRequests()).toHaveLength(2);
     expect(screen.getByRole("table", { name: "Problems" })).toBeInTheDocument();
+  });
+});
+
+describe("rows belong to the query they were fetched for", () => {
+  function acknowledgeButtons() {
+    return screen.queryAllByRole("button", {
+      name: /^Acknowledge|^Close problem/,
+    });
+  }
+
+  it("has no live action and no Action column for resolved rows after switching to Open", async () => {
+    const slow = held(answer([criticalProblem]));
+    await open("/problems?state=resolved", {
+      problems: [answer([resolvedProblem]), slow.responder],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    await advance(0);
+    expect(region()).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByText("Agent silent")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Action" }),
+    ).not.toBeInTheDocument();
+    expect(acknowledgeButtons()).toHaveLength(0);
+    slow.release();
+    await advance(0);
+    expect(
+      screen.getByRole("columnheader", { name: "Action" }),
+    ).toBeInTheDocument();
+    expect(
+      acknowledgeButtons().every((b) => !(b as HTMLButtonElement).disabled),
+    ).toBe(true);
+    expect(acknowledgeButtons()).toHaveLength(2);
+  });
+
+  it("keeps the dashboard links of old rows on the old state while pending", async () => {
+    const slow = held(answer([criticalProblem]));
+    await open("/problems?state=resolved", {
+      problems: [
+        answer([resolvedProblem], {
+          dashboards: { "web-01": [{ id: "e2e", name: "E2E" }] },
+        }),
+        slow.responder,
+      ],
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    await advance(0);
+    expect(screen.getByRole("link", { name: "E2E" })).toHaveAttribute(
+      "href",
+      "/problems?dashboard=e2e&state=resolved",
+    );
+    slow.release();
+    await advance(0);
+  });
+
+  it("disables the actions of old rows while a filter change on the Open tab is pending, then they work", async () => {
+    const slow = held(answer([criticalProblem]));
+    await open("/problems", {
+      problems: [answer([criticalProblem]), slow.responder],
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Severity" }), {
+      target: { value: "high" },
+    });
+    await advance(0);
+    const buttons = acknowledgeButtons();
+    expect(buttons).toHaveLength(2);
+    for (const b of buttons) expect(b).toBeDisabled();
+    slow.release();
+    await advance(0);
+    for (const b of acknowledgeButtons()) expect(b).toBeEnabled();
+    fireEvent.click(acknowledgeButtons()[0] as HTMLElement);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+});
+
+describe("hostile host names and missing data", () => {
+  it("shows a dash for hosts named like Object members that are absent from the map", async () => {
+    await open("/problems", {
+      problems: answer(
+        [
+          { ...criticalProblem, id: "1", host: "constructor" },
+          { ...criticalProblem, id: "2", host: "__proto__" },
+        ],
+        { dashboards: {} },
+      ),
+    });
+    expect(rows()).toHaveLength(2);
+    for (const r of rows())
+      expect(
+        within(r).getByText("–", { selector: "span" }),
+      ).toBeInTheDocument();
+  });
+
+  it("reads closed by hand when closed_by is null", async () => {
+    await open("/problems?state=resolved", {
+      problems: answer([
+        {
+          ...resolvedProblem,
+          resolve_reason: "closed_by_operator",
+          closed_by: null,
+        },
+      ]),
+    });
+    expect((rows()[0] as HTMLElement).textContent).toContain("closed by hand");
+  });
+
+  it("reads acknowledged without by when acknowledged_by is null", async () => {
+    await open("/problems", {
+      problems: answer([{ ...acknowledgedProblem, acknowledged_by: null }]),
+    });
+    const text = (rows()[0] as HTMLElement).textContent ?? "";
+    expect(text).toContain("acknowledged,");
+    expect(text).not.toContain("acknowledged by");
+  });
+
+  it("still shows who acknowledged and the comment on the Resolved tab", async () => {
+    await open("/problems?state=resolved", {
+      problems: answer([
+        {
+          ...acknowledgedProblem,
+          resolved_at: NOW.toISOString(),
+          resolve_reason: "condition_ended",
+        },
+      ]),
+    });
+    const row = rows()[0] as HTMLElement;
+    expect(within(row).getByText(/acknowledged by anna/)).toBeInTheDocument();
+    expect(within(row).getByText(/watching/)).toBeInTheDocument();
   });
 });

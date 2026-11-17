@@ -4,7 +4,7 @@
   margin-bottom: 12px;
 }
 
-.problems-tabs button[aria-selected="true"] {
+.problems-tabs button[aria-pressed="true"] {
   border-color: var(--git);
   font-weight: 600;
 }
