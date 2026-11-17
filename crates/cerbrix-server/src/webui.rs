@@ -36,7 +36,8 @@ fn find(path: &str) -> Option<&'static Asset> {
 async fn serve(method: Method, uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path();
     if path == "/api" || path.starts_with("/api/") || path == "/healthz" {
-        // Exactly the answer the router gave before the UI existed: an empty 404.
+        // Intentionally the server's old answer, an empty 404 without the UI's headers: the
+        // UI must not dress up (or swallow) what belongs to the APIs.
         return StatusCode::NOT_FOUND.into_response();
     }
     if method != Method::GET && method != Method::HEAD {
@@ -46,15 +47,17 @@ async fn serve(method: Method, uri: Uri, headers: HeaderMap) -> Response {
             .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
         return response;
     }
-    if path.starts_with("/assets/") {
+    if path == "/assets" || path.starts_with("/assets/") {
         // An exact lookup: `..` and encoded dots never name a file.
         return match find(&path[1..]) {
             Some(asset) => asset_response(asset, IMMUTABLE, &headers),
             None => plain(StatusCode::NOT_FOUND, "not found"),
         };
     }
-    if path == "/licenses.txt" {
-        return match find("licenses.txt") {
+    // The root-level files: exact matches, 404 when the build does not contain them (never
+    // index.html, which would be a wrong answer for a file name).
+    if matches!(path, "/licenses.txt" | "/favicon.ico" | "/robots.txt") {
+        return match find(&path[1..]) {
             Some(asset) => asset_response(asset, NO_CACHE, &headers),
             None => plain(StatusCode::NOT_FOUND, "not found"),
         };
@@ -204,7 +207,12 @@ mod tests {
 
     #[tokio::test]
     async fn deep_link_serves_index() {
-        for uri in ["/hosts/db-02", "/problems?state=resolved", "/display/x"] {
+        for uri in [
+            "/hosts/db-02",
+            "/hosts/db-02.example",
+            "/problems?state=resolved",
+            "/display/x",
+        ] {
             let (status, headers, body) = send(&router(), "GET", uri, None).await;
             assert_eq!(status, StatusCode::OK, "{uri}");
             assert_eq!(body, index().bytes, "{uri}");
@@ -218,6 +226,8 @@ mod tests {
         let (status, headers, _) = send(&router(), "HEAD", "/", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(header_of(&headers, "etag"), index().etag);
+        assert_eq!(header_of(&headers, "cache-control"), "no-cache");
+        assert_secured(&headers);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -296,6 +306,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assets_directory_itself_is_404() {
+        for uri in ["/assets", "/assets/"] {
+            let (status, headers, body) = send(&router(), "GET", uri, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_ne!(body, index().bytes, "{uri}");
+            assert_secured(&headers);
+        }
+    }
+
+    /// Both paths are only ever looked up verbatim, never decoded or normalised: `//assets/x.js`
+    /// and `/%61ssets/x.js` do not start with `/assets/`, so they are page paths and answer
+    /// `index.html` (the client router shows its not-found page). No file is read from either;
+    /// that is safe because the answer is the same for every unknown page.
+    #[tokio::test]
+    async fn odd_spellings_of_assets_are_just_pages() {
+        for uri in ["//assets/x.js", "/%61ssets/x.js"] {
+            let (status, headers, body) = send(&router(), "GET", uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(body, index().bytes, "{uri}");
+            assert_eq!(header_of(&headers, "cache-control"), "no-cache", "{uri}");
+            assert_secured(&headers);
+        }
+    }
+
+    #[tokio::test]
+    async fn very_long_path_is_a_page() {
+        let uri = format!("/{}", "a".repeat(4000));
+        let (status, _, body) = send(&router(), "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, index().bytes);
+    }
+
+    #[tokio::test]
+    async fn root_files_are_served_or_404() {
+        for (uri, name) in [
+            ("/favicon.ico", "favicon.ico"),
+            ("/robots.txt", "robots.txt"),
+        ] {
+            let (status, headers, body) = send(&router(), "GET", uri, None).await;
+            match find(name) {
+                Some(asset) => {
+                    assert_eq!(status, StatusCode::OK, "{uri}");
+                    assert_eq!(body, asset.bytes, "{uri}");
+                    assert_eq!(header_of(&headers, "cache-control"), "no-cache", "{uri}");
+                    assert_eq!(header_of(&headers, "content-type"), asset.content_type);
+                }
+                None => {
+                    assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+                    assert!(header_of(&headers, "content-type").starts_with("text/plain"));
+                    assert_ne!(body, index().bytes, "{uri}");
+                }
+            }
+            assert_secured(&headers);
+        }
+        if PLACEHOLDER {
+            for uri in ["/favicon.ico", "/robots.txt"] {
+                let (status, _, _) = send(&router(), "GET", uri, None).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn if_none_match_gives_304() {
         let tag = index().etag;
         for value in [
@@ -308,6 +381,7 @@ mod tests {
             assert_eq!(status, StatusCode::NOT_MODIFIED, "{value}");
             assert!(body.is_empty());
             assert_eq!(header_of(&headers, "etag"), tag);
+            assert_secured(&headers);
         }
         let (status, _, _) = send(&router(), "GET", "/", Some("\"other\"")).await;
         assert_eq!(status, StatusCode::OK);
@@ -324,9 +398,11 @@ mod tests {
             let (status, headers, _) = send(&router(), "POST", uri, None).await;
             assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{uri}");
             assert_eq!(header_of(&headers, "allow"), "GET, HEAD");
+            assert_secured(&headers);
         }
-        let (status, _, _) = send(&router(), "DELETE", "/", None).await;
+        let (status, headers, _) = send(&router(), "DELETE", "/", None).await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_secured(&headers);
     }
 
     #[tokio::test]
@@ -337,8 +413,9 @@ mod tests {
             "/assets/..%2f..%2fCargo.toml",
             "/assets//etc/passwd",
         ] {
-            let (status, _, body) = send(&router(), "GET", uri, None).await;
+            let (status, headers, body) = send(&router(), "GET", uri, None).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_secured(&headers);
             assert!(!String::from_utf8_lossy(&body).contains("[package]"));
         }
     }
