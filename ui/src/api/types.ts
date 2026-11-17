@@ -37,3 +37,55 @@ export interface HostState {
   summary: string;
   open_problems: number;
 }
+
+export type Role = 'viewer' | 'operator' | 'admin';
+
+/** The logged-in user (`GET /session`, `POST /session`). */
+export interface SessionUser {
+  name: string;
+  role: Role;
+}
+
+export type SyncStatus = 'never' | 'in_sync' | 'out_of_sync';
+
+/** Why the last synchronisation failed; everything but `reason` can be null. */
+export interface SyncIssue {
+  file: string | null;
+  line: number | null;
+  column: number | null;
+  reason: string;
+}
+
+export interface SyncState {
+  status: SyncStatus;
+  active_commit: string | null;
+  last_success_at: string | null;
+  last_attempt_at: string | null;
+  issues: SyncIssue[];
+}
+
+export interface ProblemCount {
+  open: number;
+  unacknowledged: number;
+}
+
+/** `GET /status`: what the header of every page needs. */
+export interface Status {
+  version: string;
+  gitops: boolean;
+  mail: boolean;
+  sync: SyncState;
+  hosts: {
+    total: number;
+    with_problems: number;
+    without_problems: number;
+    never_seen: number;
+  };
+  problems: Record<Severity, ProblemCount>;
+}
+
+/** A paged list (`limit`/`offset`): the page and the number of all matching items. */
+export interface Listed<T> {
+  items: T[];
+  total: number;
+}

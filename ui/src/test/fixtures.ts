@@ -1,4 +1,4 @@
-import type { HostState, Problem } from '../api/types';
+import type { HostState, Problem, Status } from '../api/types';
 
 /** The fixed "now" of the tests: 17 Nov 2026, 14:30 local time. */
 export const NOW = new Date(2026, 10, 17, 14, 30, 0);
@@ -90,3 +90,29 @@ export const noDataState: HostState = {
   summary: 'no data for 5m',
   open_problems: 1,
 };
+
+const NO_PROBLEMS = { open: 0, unacknowledged: 0 };
+
+/** An in-sync installation with GitOps on and no open problems; override what a test needs. */
+export function statusFixture(overrides: Partial<Status> = {}): Status {
+  return {
+    version: '0.1.0',
+    gitops: true,
+    mail: true,
+    sync: {
+      status: 'in_sync',
+      active_commit: '253a2994b13aca387e272ff08db9eb858b436b66',
+      last_success_at: new Date(2026, 10, 17, 14, 28, 0).toISOString(),
+      last_attempt_at: new Date(2026, 10, 17, 14, 29, 0).toISOString(),
+      issues: [],
+    },
+    hosts: { total: 3, with_problems: 0, without_problems: 3, never_seen: 0 },
+    problems: {
+      critical: { ...NO_PROBLEMS },
+      high: { ...NO_PROBLEMS },
+      warning: { ...NO_PROBLEMS },
+      info: { ...NO_PROBLEMS },
+    },
+    ...overrides,
+  };
+}
