@@ -42,12 +42,17 @@ const DEFAULT_VALIDITY = '24h';
 
 /** A secret shown once; the page holds it only while its dialog is open. */
 interface Secret {
+  /** Distinguishes one shown secret from the next, so the dialog starts fresh each time. */
+  id: number;
   title: string;
   value: string;
   note: string;
 }
 
-type OnSecret = (secret: Secret) => void;
+type OnSecret = (secret: Omit<Secret, 'id'>) => void;
+
+/** Marks a request that produces a secret as in flight, so no second one can start meanwhile. */
+type Track = <T>(request: Promise<T>) => Promise<T>;
 
 function parseOffset(text: string | null): number {
   if (text === null || !/^\d+$/.test(text)) return 0;
@@ -167,7 +172,7 @@ function copyHash(hash: string, node: HTMLElement | null): Promise<boolean> {
 function CommitCopy({ hash }: { hash: string }) {
   const code = useRef<HTMLElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<'idle' | 'copied' | 'manual'>('idle');
 
   useEffect(
     () => () => {
@@ -178,11 +183,14 @@ function CommitCopy({ hash }: { hash: string }) {
 
   const onCopy = () => {
     void copyHash(hash, code.current).then((ok) => {
-      if (!ok) return;
-      setCopied(true);
       clearTimeout(timer.current);
+      if (!ok) {
+        setCopied('manual');
+        return;
+      }
+      setCopied('copied');
       timer.current = setTimeout(() => {
-        setCopied(false);
+        setCopied('idle');
       }, COPIED_MS);
     });
   };
@@ -191,8 +199,13 @@ function CommitCopy({ hash }: { hash: string }) {
     <span class="config-commit">
       <code ref={code}>{hash}</code>
       <button type="button" class="btn" onClick={onCopy}>
-        {copied ? 'Copied' : 'Copy'}
+        {copied === 'copied' ? 'Copied' : 'Copy'}
       </button>
+      {copied === 'manual' && (
+        <span class="dim" role="status">
+          Press Ctrl+C to copy
+        </span>
+      )}
     </span>
   );
 }
@@ -345,7 +358,15 @@ function HistorySection({ now }: { now: Date }) {
   );
   const answer = history.data;
   const failed = history.error !== undefined && answer === undefined;
-  const beyond = answer !== undefined && answer.total > 0 && offset >= answer.total;
+  const total = answer?.total ?? 0;
+  const beyond = answer !== undefined && total > 0 && offset >= total;
+
+  // Fewer entries than the offset: go to the last page that exists (once; the next answer is in range).
+  useEffect(() => {
+    if (!history.pending && beyond) {
+      setQuery({ history_offset: offsetParam(Math.floor((total - 1) / HISTORY_LIMIT) * HISTORY_LIMIT) });
+    }
+  }, [history.pending, beyond, total]);
 
   return (
     <section class="config-section">
@@ -463,11 +484,12 @@ function descriptionProblem(text: string): string | undefined {
 }
 
 interface CreateKeyProps {
+  track: Track;
   onCreated: (key: string) => void;
   onClose: () => void;
 }
 
-function CreateKeyDialog({ onCreated, onClose }: CreateKeyProps) {
+function CreateKeyDialog({ track, onCreated, onClose }: CreateKeyProps) {
   const [description, setDescription] = useState('');
   const [validity, setValidity] = useState(DEFAULT_VALIDITY);
   const [busy, setBusy] = useState(false);
@@ -483,12 +505,12 @@ function CreateKeyDialog({ onCreated, onClose }: CreateKeyProps) {
     }
     setBusy(true);
     setFailure(undefined);
-    api
-      .send<EnrollmentKey & { key: string }>('POST', '/enrollment-keys', {
+    track(
+      api.send<EnrollmentKey & { key: string }>('POST', '/enrollment-keys', {
         description,
         expires_in: validity,
-      })
-      .then(
+      }),
+    ).then(
         (created) => {
           onCreated(created.key);
         },
@@ -557,7 +579,15 @@ const KEY_STATE_WORD: Record<EnrollmentKey['state'], string> = {
 
 type KeyDialog = { kind: 'create' } | { kind: 'revoke'; key: EnrollmentKey } | undefined;
 
-function KeysSection({ now, onSecret }: { now: Date; onSecret: OnSecret }) {
+interface SecretSectionProps {
+  now: Date;
+  onSecret: OnSecret;
+  track: Track;
+  /** True while a secret is being created or shown: controls that create one are disabled. */
+  locked: boolean;
+}
+
+function KeysSection({ now, onSecret, track, locked }: SecretSectionProps) {
   const keys = usePolled(
     (signal) => api.get<{ items: EnrollmentKey[] }>('/enrollment-keys', undefined, signal),
     [],
@@ -571,17 +601,20 @@ function KeysSection({ now, onSecret }: { now: Date; onSecret: OnSecret }) {
       {keys.error !== undefined && answer === undefined && (
         <LoadFailed what="the enrolment keys" onRetry={keys.reload} />
       )}
-      <div class="config-toolbar">
-        <button
-          type="button"
-          class="btn"
-          onClick={() => {
-            setDialog({ kind: 'create' });
-          }}
-        >
-          Create key
-        </button>
-      </div>
+      {answer !== undefined && (
+        <div class="config-toolbar">
+          <button
+            type="button"
+            class="btn"
+            disabled={locked}
+            onClick={() => {
+              setDialog({ kind: 'create' });
+            }}
+          >
+            Create key
+          </button>
+        </div>
+      )}
       {answer !== undefined &&
         (answer.items.length === 0 ? (
           <Empty>No enrolment keys.</Empty>
@@ -630,6 +663,7 @@ function KeysSection({ now, onSecret }: { now: Date; onSecret: OnSecret }) {
         ))}
       {dialog?.kind === 'create' && (
         <CreateKeyDialog
+          track={track}
           onCreated={(key) => {
             setDialog(undefined);
             keys.reload();
@@ -681,19 +715,21 @@ type TokenDialog =
   | { kind: 'revoke'; display: Display }
   | undefined;
 
-function DisplaysSection({ now, onSecret }: { now: Date; onSecret: OnSecret }) {
+function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
   const displays = usePolled(
     (signal) => api.get<{ items: Display[] }>('/displays', undefined, signal),
     [],
   );
   const [dialog, setDialog] = useState<TokenDialog>(undefined);
   const [busyId, setBusyId] = useState<string | undefined>(undefined);
-  const [failure, setFailure] = useState<string | undefined>(undefined);
+  const [failure, setFailure] = useState<{ id: string; text: string } | undefined>(undefined);
   const answer = displays.data;
 
   /** Creates the token and hands it over as the secret to show; the caller passes it to the page. */
-  const createToken = async (display: Display): Promise<Secret> => {
-    const created = await api.send<{ token: string }>('POST', `/displays/${seg(display.id)}/token`);
+  const createToken = async (display: Display): Promise<Omit<Secret, 'id'>> => {
+    const created = await track(
+      api.send<{ token: string }>('POST', `/displays/${seg(display.id)}/token`),
+    );
     return {
       title: `Token of ${display.name}`,
       value: created.token,
@@ -712,7 +748,7 @@ function DisplaysSection({ now, onSecret }: { now: Date; onSecret: OnSecret }) {
         onSecret(secret);
       },
       (e: unknown) => {
-        setFailure(explainSyncing(e) ?? describeActionError(e));
+        setFailure({ id: display.id, text: explainSyncing(e) ?? describeActionError(e) });
         setBusyId(undefined);
       },
     );
@@ -724,7 +760,6 @@ function DisplaysSection({ now, onSecret }: { now: Date; onSecret: OnSecret }) {
       {displays.error !== undefined && answer === undefined && (
         <LoadFailed what="the displays" onRetry={displays.reload} />
       )}
-      <Failure text={failure} />
       {answer !== undefined &&
         (answer.items.length === 0 ? (
           <Empty>No wall displays configured.</Empty>
@@ -747,6 +782,7 @@ function DisplaysSection({ now, onSecret }: { now: Date; onSecret: OnSecret }) {
                     <td>
                       <div>{d.name}</div>
                       <small>{d.id}</small>
+                      {failure?.id === d.id && <Failure text={failure.text} />}
                     </td>
                     <td>
                       {d.token_created_at === null ? (
@@ -761,7 +797,7 @@ function DisplaysSection({ now, onSecret }: { now: Date; onSecret: OnSecret }) {
                       <button
                         type="button"
                         class="btn"
-                        disabled={busyId === d.id}
+                        disabled={locked || busyId === d.id}
                         aria-label={`${has ? 'Replace' : 'Create'} token of ${d.name}`}
                         onClick={() => {
                           if (has) {
@@ -840,6 +876,21 @@ export function ConfigurationPage() {
   const now = useNow();
   // The one place a key or token lives: set from an answer, cleared when its dialog closes.
   const [secret, setSecret] = useState<Secret | undefined>(undefined);
+  const [producing, setProducing] = useState(false);
+  const nextId = useRef(0);
+  const locked = producing || secret !== undefined;
+  const show: OnSecret = (made) => {
+    nextId.current += 1;
+    setSecret({ ...made, id: nextId.current });
+  };
+  const track: Track = (request) => {
+    setProducing(true);
+    const done = () => {
+      setProducing(false);
+    };
+    request.then(done, done);
+    return request;
+  };
 
   return (
     <>
@@ -847,10 +898,11 @@ export function ConfigurationPage() {
       <SyncSection status={status} now={now} />
       {status?.gitops === true && <HistorySection now={now} />}
       {can('operator') && <UnknownAgentsSection now={now} />}
-      {can('admin') && <KeysSection now={now} onSecret={setSecret} />}
-      {can('admin') && <DisplaysSection now={now} onSecret={setSecret} />}
+      {can('admin') && <KeysSection now={now} onSecret={show} track={track} locked={locked} />}
+      {can('admin') && <DisplaysSection now={now} onSecret={show} track={track} locked={locked} />}
       {secret !== undefined && (
         <SecretDialog
+          key={secret.id}
           title={secret.title}
           secret={secret.value}
           note={secret.note}

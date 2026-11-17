@@ -238,6 +238,18 @@ describe('synchronisation', () => {
     await advance(0);
     expect(window.getSelection()?.toString()).toBe('253a2994b13aca387e272ff08db9eb858b436b66');
     expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
+    expect(screen.getByText('Press Ctrl+C to copy')).toBeInTheDocument();
+  });
+
+  it('selects the hash and says so when the clipboard refuses', async () => {
+    const u = user();
+    const writeText = vi.fn(() => Promise.reject(new Error('denied')));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    await open();
+    await u.click(screen.getByRole('button', { name: 'Copy' }));
+    await advance(0);
+    expect(window.getSelection()?.toString()).toBe('253a2994b13aca387e272ff08db9eb858b436b66');
+    expect(screen.getByText('Press Ctrl+C to copy')).toBeInTheDocument();
   });
 });
 
@@ -252,12 +264,31 @@ describe('sync history', () => {
     expect(q?.get('offset')).toBe('40');
   });
 
-  it('falls back to the first page on garbage in the URL', async () => {
-    await open({ url: '/configuration?history_offset=-5' });
+  it.each(['-5', 'abc'])('falls back to the first page on history_offset=%s', async (garbage) => {
+    await open({ url: `/configuration?history_offset=${garbage}` });
     expect(sent('GET', '/sync/history')[0]?.query.get('offset')).toBe('0');
-    mock.restore();
-    await open({ url: '/configuration?history_offset=abc' });
-    expect(sent('GET', '/sync/history')[0]?.query.get('offset')).toBe('0');
+  });
+
+  it('moves to the last existing page when the offset is beyond the total', async () => {
+    const last = syncEntryFixture({ commit: 'ccccccc0000000000000000000000000000000000' });
+    await open({
+      url: '/configuration?history_offset=100',
+      routes: {
+        'GET /sync/history': (r) =>
+          r.query.get('offset') === '40'
+            ? { json: { items: [last], total: 45 } }
+            : { json: { items: [], total: 45 } },
+      },
+    });
+    expect(window.location.search).toBe('?history_offset=40');
+    expect(screen.getByText('ccccccc')).toBeInTheDocument();
+    expect(sent('GET', '/sync/history').map((r) => r.query.get('offset'))).toEqual(['100', '40']);
+  });
+
+  it('shows the empty sentence for an offset beyond an empty history', async () => {
+    await open({ url: '/configuration?history_offset=100' });
+    expect(screen.getByText('No revision has been applied yet.')).toBeInTheDocument();
+    expect(sent('GET', '/sync/history')).toHaveLength(1);
   });
 
   it('shows the commit short with the full hash as title', async () => {
@@ -528,6 +559,27 @@ describe('enrolment keys', () => {
       routes: { 'GET /enrollment-keys': { status: 500, json: { error: 'internal', message: 'x' } } },
     });
     expect(screen.getByText('Could not load the enrolment keys.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create key' })).not.toBeInTheDocument();
+  });
+
+  it('offers "Create key" only once the list has answered', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await open({
+      role: 'admin',
+      routes: {
+        'GET /enrollment-keys': async () => {
+          await gate;
+          return { json: { items: [] } };
+        },
+      },
+    });
+    expect(screen.queryByRole('button', { name: 'Create key' })).not.toBeInTheDocument();
+    release();
+    await advance(0);
+    expect(screen.getByRole('button', { name: 'Create key' })).toBeInTheDocument();
   });
 });
 
@@ -581,6 +633,7 @@ describe('display tokens', () => {
     expect(sent('GET', '/displays')).toHaveLength(2);
     await u.click(screen.getByRole('button', { name: 'Close' }));
     await advance(0);
+    expect(screen.queryByDisplayValue('cbx_dt_TOKENVALUE')).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain('TOKENVALUE');
   });
 
@@ -620,18 +673,61 @@ describe('display tokens', () => {
     );
   });
 
-  it('explains a 404 of a first token as a banner in the section', async () => {
+  it('explains a failed first token in the row of that display only', async () => {
     await open({
       role: 'admin',
       routes: {
-        ...withDisplays(displayFixture()),
-        'POST /displays/e2e-wall/token': { status: 404, json: { error: 'not_found', message: 'x' } },
+        ...withDisplays(displayFixture(), displayFixture({ id: 'hall', name: 'Hall' })),
+        'POST /displays/hall/token': { status: 404, json: { error: 'not_found', message: 'x' } },
       },
     });
-    await user().click(screen.getByRole('button', { name: /Create token/ }));
+    const table = () => within(screen.getByRole('table', { name: 'Display tokens' }));
+    await user().click(within(table().getAllByRole('row')[2] as HTMLElement).getByRole('button', { name: /Create token/ }));
     await advance(0);
-    expect(screen.getByRole('alert')).toHaveTextContent('The configuration is being synchronised. Try again.');
+    const rows = table().getAllByRole('row');
+    expect(within(rows[2] as HTMLElement).getByRole('alert')).toHaveTextContent(
+      'The configuration is being synchronised. Try again.',
+    );
+    expect(within(rows[1] as HTMLElement).queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create key' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Create token of Hall' })).toBeEnabled();
+  });
+
+  it('disables every other secret-producing control while a secret is made or shown', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await open({
+      role: 'admin',
+      routes: {
+        ...withDisplays(displayFixture(), displayFixture({ id: 'hall', name: 'Hall', token_created_at: created })),
+        'POST /displays/e2e-wall/token': async () => {
+          await gate;
+          return { status: 201, json: { token: 'cbx_dt_HELD' } };
+        },
+      },
+    });
+    const u = user();
+    await u.click(screen.getByRole('button', { name: 'Create token of E2E wall' }));
+    await advance(0);
+    expect(screen.getByRole('button', { name: 'Create key' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Replace token of Hall' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Create token of E2E wall' })).toBeDisabled();
+
+    release();
+    await advance(0);
+    expect(screen.getByDisplayValue('cbx_dt_HELD')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create key' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Replace token of Hall' })).toBeDisabled();
+
+    await u.click(screen.getByRole('button', { name: 'Close' }));
+    await advance(0);
+    expect(screen.queryByDisplayValue('cbx_dt_HELD')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create key' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Replace token of Hall' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Create token of E2E wall' })).toBeEnabled();
   });
 
   it('asks before revoking a token, then deletes it and reloads', async () => {

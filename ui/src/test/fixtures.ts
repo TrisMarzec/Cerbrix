@@ -226,7 +226,10 @@ export function hostDetailFixture(
   };
 }
 
-const NO_NAMES = { added: [], changed: [], removed: [] };
+/** Fresh arrays every time, so fixtures never share them. */
+function noNames() {
+  return { added: [], changed: [], removed: [] };
+}
 
 /** An applied revision that changed nothing; override `changes` or the rest. */
 export function syncEntryFixture(
@@ -236,11 +239,11 @@ export function syncEntryFixture(
     commit: "253a2994b13aca387e272ff08db9eb858b436b66",
     applied_at: new Date(2026, 10, 17, 13, 0, 0).toISOString(),
     changes: {
-      hosts: { ...NO_NAMES },
-      templates: { ...NO_NAMES },
-      notifications: { ...NO_NAMES },
-      dashboards: { ...NO_NAMES },
-      displays: { ...NO_NAMES },
+      hosts: noNames(),
+      templates: noNames(),
+      notifications: noNames(),
+      dashboards: noNames(),
+      displays: noNames(),
     },
     ...overrides,
   };
