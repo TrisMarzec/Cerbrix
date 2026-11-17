@@ -1,9 +1,18 @@
 # syntax=docker/dockerfile:1
 
+# UI stage: builds the web UI (ui/dist) that the server embeds. Only ui/ is copied, so a
+# change elsewhere does not rebuild it.
+FROM node:22-slim AS ui
+WORKDIR /ui
+COPY ui/ ./
+RUN npm ci && npm run build
+
 # Build stage: the official Rust image tracks the stable channel, like rust-toolchain.toml.
 FROM rust:1 AS build
 WORKDIR /src
 COPY . .
+# The server embeds the built UI at compile time (build.rs reads ui/dist).
+COPY --from=ui /ui/dist ui/dist
 # The cache mounts keep the cargo registry and the target directory between builds, so
 # only changed crates are recompiled. The binary is copied out inside the same RUN
 # because the target directory is not part of the image layer.

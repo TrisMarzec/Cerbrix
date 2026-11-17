@@ -3,6 +3,7 @@
 ## Prerequisites
 
 - Rust (stable); `rust-toolchain.toml` installs `rustfmt` and `clippy` automatically via rustup
+- Node 22 or newer with npm, for work on the web UI in `ui/` (the server alone does not need it)
 - Docker with Docker Compose, for the development databases
 - bash and curl, for the end-to-end check `scripts/e2e.sh` (Git Bash on Windows)
 
@@ -16,6 +17,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace --locked
 cargo test --workspace
 ```
+
+## Web UI
+
+The web UI is a Preact and TypeScript application in `ui/`. Run these in `ui/`:
+
+```sh
+npm ci            # install the locked dependencies
+npm run check     # type check and tests (run before every commit)
+npm run build     # type check, production build in ui/dist, licence file, size budget
+```
+
+`npm run dev` starts the Vite dev server with hot reload. It proxies `/api` and `/healthz` to
+`http://127.0.0.1:8443`, so run a Cerbrix server beside it that listens there (with
+`insecure_http` set, because the proxy speaks plain HTTP) and open the address Vite prints.
+
+The server embeds `ui/dist` when it is compiled. A plain `cargo build` on a checkout without
+`ui/dist` works without Node and embeds a placeholder page that says how to build the UI; run
+`npm run build` and build the server again to embed the real one.
 
 ## Development databases
 
