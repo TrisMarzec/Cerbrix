@@ -1,4 +1,12 @@
-import type { DashboardSummary, Display, HostRow, HostState, Problem, Status } from '../api/types';
+import type {
+  DashboardSummary,
+  Display,
+  HostDetail,
+  HostRow,
+  HostState,
+  Problem,
+  Status,
+} from '../api/types';
 
 /** The fixed "now" of the tests: 17 Nov 2026, 14:30 local time. */
 export const NOW = new Date(2026, 10, 17, 14, 30, 0);
@@ -162,6 +170,35 @@ export function hostRowFixture(overrides: Partial<HostRow> = {}): HostRow {
     managed_by_git: true,
     cpu: 41.2,
     memory: 58.04,
+    ...overrides,
+  };
+}
+
+/** A host that has reported, with one item, one trigger and no open problems; override what a test needs. */
+export function hostDetailFixture(overrides: Partial<HostDetail> = {}): HostDetail {
+  return {
+    name: 'web-01',
+    address: '10.20.1.21',
+    groups: ['web'],
+    templates: ['linux-base'],
+    source_file: 'hosts/web-01.json',
+    managed_by_git: true,
+    enrolled_at: new Date(2026, 10, 16, 21, 52).toISOString(),
+    last_seen_at: new Date(NOW.getTime() - 10_000).toISOString(),
+    agent_version: '0.1.0',
+    dashboards: [],
+    state: null,
+    items: [{ key: 'cpu.usage', params: null, interval_secs: 5, origin: 'host' }],
+    triggers: [
+      {
+        name: 'CPU high',
+        expression: 'cpu.usage > 90 for 5m',
+        severity: 'high',
+        origin: 'template:linux-base',
+        firing: false,
+      },
+    ],
+    open_problems: [],
     ...overrides,
   };
 }

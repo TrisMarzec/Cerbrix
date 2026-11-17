@@ -1,0 +1,136 @@
+.host-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.host-head-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.host-pill {
+  border: 1px solid var(--sev, var(--healthy-text));
+  border-radius: 999px;
+  padding: 1px 12px;
+  color: var(--sev, var(--healthy-text));
+  font-weight: 600;
+}
+
+.host-git {
+  color: var(--git);
+}
+
+.host-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 20px;
+}
+
+.host-facts dt {
+  color: var(--dim);
+  font-size: 14px;
+}
+
+.host-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.host-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
+  margin-bottom: 14px;
+}
+
+.host-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.host-left,
+.host-right {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-width: 0;
+}
+
+.host-left h2,
+.host-right h2 {
+  margin-bottom: 8px;
+}
+
+.host-problems {
+  border-bottom: 1px solid var(--line);
+}
+
+.problem-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.host-history-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+}
+
+.host-history-head h2 {
+  margin-bottom: 0;
+}
+
+.host-range {
+  display: flex;
+  gap: 6px;
+}
+
+.host-range .btn[aria-pressed='true'] {
+  border-color: var(--git);
+  color: var(--git);
+}
+
+.graph-frame {
+  margin-bottom: 18px;
+}
+
+.graph-frame h3 {
+  font-size: 17px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.graph-busy.is-busy {
+  opacity: 0.6;
+}
+
+.host-item,
+.host-expression {
+  overflow-wrap: anywhere;
+}
+
+.host-expression {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 15px;
+}
+
+.trigger-firing {
+  color: var(--sev);
+  font-weight: 600;
+}
+
+@media (max-width: 860px) {
+  .host-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

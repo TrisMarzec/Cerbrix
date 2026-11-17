@@ -147,3 +147,75 @@ export interface Display {
   causes: string[];
   waiting: string[];
 }
+
+/** One item of the effective configuration of a host (`GET /hosts/{name}`). */
+export interface HostItem {
+  key: string;
+  /** The instance the item is narrowed to, or `null`. */
+  params: Record<string, string> | null;
+  interval_secs: number;
+  /** `host` or `template:<name>`. */
+  origin: string;
+}
+
+/** One trigger of the effective configuration of a host. */
+export interface HostTrigger {
+  name: string;
+  expression: string;
+  severity: Severity;
+  /** `host` or `template:<name>`. */
+  origin: string;
+  firing: boolean;
+}
+
+/** `GET /hosts/{name}`: the host with its effective configuration and its open problems. */
+export interface HostDetail {
+  name: string;
+  address: string | null;
+  groups: string[];
+  templates: string[];
+  /** The file that defines the host; `null` for a host created by hand. */
+  source_file: string | null;
+  managed_by_git: boolean;
+  enrolled_at: string | null;
+  last_seen_at: string | null;
+  agent_version: string | null;
+  dashboards: { id: string; name: string }[];
+  state: HostState | null;
+  items: HostItem[];
+  triggers: HostTrigger[];
+  open_problems: Problem[];
+}
+
+/** One entry of `GET /hosts/{name}/values`: the newest value of one series. */
+export interface HostValue {
+  key: string;
+  params: Record<string, string>;
+  value: number;
+  at: string;
+}
+
+/** `GET /hosts/{name}/values`. */
+export interface HostValuesAnswer {
+  items: HostValue[];
+  metrics_available: boolean;
+}
+
+/** The limit of a comparison trigger, drawn into a graph. */
+export interface Threshold {
+  trigger: string;
+  severity: Severity;
+  op: string;
+  value: number;
+}
+
+/** `GET /hosts/{name}/series`: the history of one series. Points are `[timestamp_ms, value]`. */
+export interface Series {
+  key: string;
+  params: Record<string, string>;
+  from: string;
+  to: string;
+  step_secs: number;
+  points: [number, number][];
+  thresholds: Threshold[];
+}

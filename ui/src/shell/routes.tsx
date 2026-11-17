@@ -3,6 +3,7 @@ import type { ComponentChildren } from 'preact';
 import { match } from '../lib/router';
 import { NotFoundPage } from '../pages/NotFoundPage';
 import { DashboardsPage } from '../pages/DashboardsPage';
+import { HostPage } from '../pages/HostPage';
 import { HostsPage } from '../pages/HostsPage';
 import { RequireRole } from './RequireRole';
 
@@ -37,7 +38,7 @@ const ROUTES: RouteDef[] = [
     nav: '/hosts',
     title: (p) => p['name'] ?? 'Host',
     // Keyed by the name: another host is a fresh page, so no state or data carries over.
-    element: (p) => <Placeholder key={p['name']} heading={p['name'] ?? 'Host'} />,
+    element: (p) => <HostPage key={p['name']} name={p['name'] ?? ''} />,
   },
   {
     pattern: '/problems',
