@@ -200,7 +200,7 @@ describe('top bar', () => {
     expect(screen.getByRole('banner')).toHaveTextContent('3 min ago');
   });
 
-  it('shows no sync text with gitops off', async () => {
+  it('shows no sync state and no Git note with gitops off', async () => {
     await open('/hosts', 'viewer', { json: statusFixture({ gitops: false }) });
     const bar = screen.getByRole('banner');
     expect(bar).not.toHaveTextContent('In sync');
@@ -379,5 +379,39 @@ describe('the note of a page and the banner of the shell', () => {
     await advance(10_000);
     expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
     expect(screen.queryByText(/^Not updated since/)).not.toBeInTheDocument();
+  });
+});
+
+describe('the clock of the shell', () => {
+  const FAST = new Date(NOW.getTime() + 5 * 60_000);
+
+  it('follows the clock of the server when the browser clock is five minutes fast', async () => {
+    vi.setSystemTime(FAST);
+    await open('/hosts', 'viewer', { json: statusFixture(), headers: { Date: NOW.toUTCString() } });
+    // The last synchronisation was at 14:28 on the server's clock.
+    expect(screen.getByRole('banner')).toHaveTextContent('In sync · 253a299 · 2 min ago');
+  });
+
+  it('takes the browser clock when the answer has no Date header', async () => {
+    vi.setSystemTime(FAST);
+    await open('/hosts', 'viewer', { json: statusFixture() });
+    expect(screen.getByRole('banner')).toHaveTextContent('In sync · 253a299 · 7 min ago');
+  });
+
+  it('moves on at once when the tab becomes visible again', async () => {
+    await open('/hosts', 'viewer', { json: statusFixture() });
+    expect(screen.getByRole('banner')).toHaveTextContent('2 min ago');
+    // Time passes without a tick of the clock (a hidden tab's timers are slowed down).
+    vi.setSystemTime(new Date(NOW.getTime() + 70_000));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await advance(0);
+    expect(screen.getByRole('banner')).toHaveTextContent('3 min ago');
+  });
+});
+
+describe('top bar with GitOps off', () => {
+  it('says where the configuration is managed', async () => {
+    await open('/hosts', 'viewer', { json: statusFixture({ gitops: false }) });
+    expect(screen.getByRole('banner')).toHaveTextContent('Configuration is managed on the server');
   });
 });

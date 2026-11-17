@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import { api } from '../api/client';
 import type { Status } from '../api/types';
@@ -14,32 +14,57 @@ import { TopBar } from './TopBar';
 
 const NOTICE_MS = 8000;
 
+interface StatusAnswer {
+  status: Status;
+  /** How far the server's clock is ahead of the browser's, in ms; undefined without a Date header. */
+  skewMs: number | undefined;
+}
+
+/** The status, with the difference between the server's clock (its Date header) and the browser's. */
+async function loadStatus(signal: AbortSignal): Promise<StatusAnswer> {
+  const answer = await api.getDated<Status>('/status', undefined, signal);
+  const skewMs = answer.serverDate === undefined ? undefined : answer.serverDate.getTime() - Date.now();
+  return { status: answer.data, skewMs };
+}
+
 function unacknowledged(status: Status | undefined): number {
   if (status === undefined) return 0;
   return Object.values(status.problems).reduce((sum, count) => sum + count.unacknowledged, 0);
 }
 
-/** Navigation, top bar and the page of the current URL. Owns the one `GET /status` poll and the clock. */
+/**
+ * Navigation, top bar and the page of the current URL. Owns the one `GET /status` poll and the clock.
+ * The clock is the browser's, corrected by the server's Date header of the last status answer, so
+ * durations and "x ago" compare server timestamps with the server's time.
+ */
 export function Shell() {
   const { user, can, logout } = useSession();
   const { path } = useRoute();
-  const { data: status, staleSince, error, reload: reloadStatus } = usePolled(
-    (signal) => api.get<Status>('/status', undefined, signal),
-    [],
-  );
-  const [now, setNow] = useState(() => new Date());
+  const { data: answer, staleSince, error, reload: reloadStatus } = usePolled(loadStatus, []);
+  const status = answer?.status;
+  // The last known difference stays while a poll fails.
+  const skew = useRef(0);
+  if (answer?.skewMs !== undefined) skew.current = answer.skewMs;
+  const [tick, setTick] = useState(() => Date.now());
+  const now = useMemo(() => new Date(tick + skew.current), [tick, skew.current]);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [logoutFailed, setLogoutFailed] = useState(false);
   const main = useRef<HTMLElement>(null);
   const shownPath = useRef(path);
 
+  // A hidden tab's timers are slowed down: becoming visible moves the clock on at once.
   useEffect(() => {
     const id = setInterval(() => {
-      setNow(new Date());
+      setTick(Date.now());
     }, 10_000);
+    const onVisibility = () => {
+      if (!document.hidden) setTick(Date.now());
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, []);
 

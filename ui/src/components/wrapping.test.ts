@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
-const css = readFileSync(join(import.meta.dirname, '..', 'styles', 'base.css'), 'utf8');
+const css = readFileSync(`${import.meta.dirname}/../styles/base.css`, 'utf8');
 
 function rule(selector: string): string {
   const escaped = selector.replace(/[.]/g, '\\.');

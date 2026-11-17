@@ -1,5 +1,4 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 import { act, render, screen, within } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
@@ -798,8 +797,9 @@ describe('graph identity and frames', () => {
   it('gives every frame the class that reserves the height of a loaded graph', async () => {
     await open();
     expect(document.querySelector('section.graph-frame')).not.toBeNull();
-    const css = readFileSync(join(import.meta.dirname, 'HostPage.css'), 'utf8');
-    const rule = /\n\.graph-frame\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    // The literal in HostPage.css follows GRAPH_HEIGHT only through this test (comments in both files).
+    const hostCss = readFileSync(`${import.meta.dirname}/HostPage.css`, 'utf8');
+    const rule =/\n\.graph-frame\s*\{([^}]*)\}/.exec(hostCss)?.[1] ?? '';
     const height = Number(/min-height:\s*(\d+)px/.exec(rule)?.[1]);
     // The plot plus the title and the readout line.
     expect(height).toBeGreaterThanOrEqual(GRAPH_HEIGHT + 40);

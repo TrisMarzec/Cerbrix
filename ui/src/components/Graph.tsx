@@ -8,7 +8,11 @@ import type { Severity, Threshold } from '../api/types';
 import { clock, severityWord, value } from '../lib/format';
 
 const DEFAULT_WIDTH = 600;
-/** The default height of the plot in pixels; the frame of a graph on a page reserves at least this much (HostPage.css). */
+/**
+ * The default height of the plot in pixels. The frame of a graph on the host page reserves this plus
+ * the title and readout line as a literal in HostPage.css (.graph-frame min-height); a change here
+ * must change it too, and HostPage.test.tsx fails until it does.
+ */
 export const GRAPH_HEIGHT = 160;
 /** A gap of more than this many steps is not drawn as a line. */
 const GAP_STEPS = 3;

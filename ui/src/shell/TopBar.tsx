@@ -44,7 +44,9 @@ export function TopBar() {
 
   let left: string | undefined;
   let warn = false;
-  if (sync?.status === 'never') {
+  if (status?.gitops === false) {
+    left = 'Configuration is managed on the server';
+  } else if (sync?.status === 'never') {
     left = 'The configuration has not been synchronised yet';
     warn = true;
   } else if (sync !== undefined) {
@@ -60,7 +62,8 @@ export function TopBar() {
   return (
     <>
       <header class="bar">
-        <span class={warn ? 'sync is-warning' : 'sync'}>{left}</span>
+        {/* Without GitOps there is no sync state: the sentence is written in the plain bar colour. */}
+        <span class={status?.gitops === false ? undefined : warn ? 'sync is-warning' : 'sync'}>{left}</span>
         {status?.gitops === true && (
           <span class="git-note">Hosts, templates and dashboards are managed by Git</span>
         )}
