@@ -2,6 +2,7 @@ import type { ComponentChildren } from 'preact';
 
 import { match } from '../lib/router';
 import { NotFoundPage } from '../pages/NotFoundPage';
+import { ConfigurationPage } from '../pages/ConfigurationPage';
 import { DashboardsPage } from '../pages/DashboardsPage';
 import { HostPage } from '../pages/HostPage';
 import { HostsPage } from '../pages/HostsPage';
@@ -51,7 +52,7 @@ const ROUTES: RouteDef[] = [
     pattern: '/configuration',
     nav: '/configuration',
     title: () => 'Configuration',
-    element: () => <Placeholder heading="Configuration" />,
+    element: () => <ConfigurationPage />,
   },
   {
     pattern: '/administration',
