@@ -24,6 +24,20 @@ const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self'; s
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const NO_CACHE: &str = "no-cache";
 
+/// What the server says at start when it serves the placeholder page instead of the web UI.
+const PLACEHOLDER_NOTICE: &str = "this server binary was built without the web UI and serves a placeholder page at / instead; build the UI (`npm ci && npm run build` in ui/) and build the server again, or set CERBRIX_REQUIRE_UI=1 to make such a build fail";
+
+fn placeholder_notice(placeholder: bool) -> Option<&'static str> {
+    placeholder.then_some(PLACEHOLDER_NOTICE)
+}
+
+/// Logs one warning at server start when the binary embeds the placeholder page.
+pub fn warn_if_placeholder() {
+    if let Some(notice) = placeholder_notice(PLACEHOLDER) {
+        tracing::warn!("{notice}");
+    }
+}
+
 /// The routes of the UI: a fallback, so it never competes with a real route. Merge it last.
 pub fn router() -> Router {
     Router::new().fallback(serve)
@@ -428,6 +442,14 @@ mod tests {
             assert_secured(&headers);
             assert!(!String::from_utf8_lossy(&body).contains("[package]"));
         }
+    }
+
+    #[test]
+    fn the_placeholder_notice_is_given_only_for_the_placeholder() {
+        assert_eq!(placeholder_notice(false), None);
+        let notice = placeholder_notice(true).unwrap();
+        assert!(notice.contains("placeholder"));
+        assert!(notice.contains("npm ci && npm run build"));
     }
 
     #[tokio::test]

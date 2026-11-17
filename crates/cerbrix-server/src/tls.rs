@@ -55,6 +55,7 @@ pub async fn serve(
         _ => anyhow::bail!("no TLS certificate configured and server.insecure_http is not enabled"),
     };
 
+    crate::webui::warn_if_placeholder();
     let store = StateStore::connect(&config.database.url)
         .await
         .context("cannot connect to the state database")?;

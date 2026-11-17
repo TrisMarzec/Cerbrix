@@ -6,8 +6,11 @@
 //! never needs Node.
 //!
 //! Environment: `CERBRIX_UI_DIST` points at another UI directory (default `ui/dist` of the
-//! workspace; a relative path is taken relative to this crate); with `CERBRIX_REQUIRE_UI=1`
-//! a missing `index.html` fails the build instead of embedding the placeholder (releases).
+//! workspace; a relative path is taken relative to the workspace root); with
+//! `CERBRIX_REQUIRE_UI=1` (or `true`) a missing `index.html` fails the build instead of embedding
+//! the placeholder (releases). Any other non-empty value of `CERBRIX_REQUIRE_UI` fails the
+//! build, so a typo is not silently ignored. A release build that embeds the placeholder
+//! prints a cargo warning.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -26,10 +29,19 @@ fn main() {
         PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     let custom = std::env::var_os("CERBRIX_UI_DIST").filter(|v| !v.is_empty());
+    let workspace = manifest
+        .parent()
+        .and_then(Path::parent)
+        .expect("the crate sits two levels below the workspace root")
+        .to_path_buf();
+    // A relative `CERBRIX_UI_DIST` is taken relative to the workspace root; an absolute one
+    // replaces the base in `join`.
     let dist = match &custom {
-        Some(custom) => manifest.join(custom),
-        None => manifest.join("../../ui/dist"),
+        Some(custom) => workspace.join(custom),
+        None => workspace.join("ui/dist"),
     };
+    let require_ui = require_ui(std::env::var("CERBRIX_REQUIRE_UI").ok().as_deref())
+        .unwrap_or_else(|message| panic!("{message}"));
 
     if let Some(custom) = &custom {
         println!(
@@ -42,16 +54,21 @@ fn main() {
     // always stale. It is never created here.
     println!("cargo:rerun-if-changed={}", dist.display());
     if !dist.is_dir() {
+        let hint = if custom.is_none() {
+            "; restore it with `git checkout ui/dist/.gitkeep`"
+        } else {
+            ""
+        };
         println!(
-            "cargo:warning={} is missing, so cargo rebuilds the server on every call; restore it with `git checkout ui/dist/.gitkeep`",
+            "cargo:warning={} is missing, so cargo rebuilds the server on every call{hint}",
             dist.display()
         );
     }
 
     let built = dist.join("index.html").is_file();
-    if !built && std::env::var("CERBRIX_REQUIRE_UI").is_ok_and(|v| v == "1") {
+    if !built && require_ui {
         panic!(
-            "CERBRIX_REQUIRE_UI=1 but {} does not exist: build the web UI first (`npm ci && npm run build` in ui/)",
+            "CERBRIX_REQUIRE_UI is set but {} does not exist: build the web UI first (`npm ci && npm run build` in ui/)",
             dist.join("index.html").display()
         );
     }
@@ -68,6 +85,12 @@ fn main() {
         let placeholder = out_dir.join("placeholder.html");
         write_if_changed(&placeholder, PLACEHOLDER_HTML.as_bytes());
         files.push(("index.html".to_owned(), placeholder));
+        if std::env::var("PROFILE").is_ok_and(|p| p == "release") {
+            println!(
+                "cargo:warning=this release build embeds a placeholder page instead of the web UI ({} has no index.html); build the UI first (`npm ci && npm run build` in ui/) and build the server again, or set CERBRIX_REQUIRE_UI=1 to make this an error",
+                dist.display()
+            );
+        }
     }
 
     let mut code = String::new();
@@ -94,6 +117,17 @@ fn main() {
     }
     writeln!(code, "];").unwrap();
     write_if_changed(&out_dir.join("webui_assets.rs"), code.as_bytes());
+}
+
+/// `CERBRIX_REQUIRE_UI`: unset or empty is off, `1` and `true` are on, anything else is an error.
+fn require_ui(value: Option<&str>) -> Result<bool, String> {
+    match value {
+        None | Some("") => Ok(false),
+        Some("1" | "true") => Ok(true),
+        Some(other) => Err(format!(
+            "CERBRIX_REQUIRE_UI={other:?} is not understood: use 1 or true to require the web UI, or leave it unset"
+        )),
+    }
 }
 
 /// Writes `content` only when the file differs, so an unchanged result keeps its mtime.

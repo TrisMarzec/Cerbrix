@@ -33,7 +33,20 @@ impl EnrollError {
     }
 }
 
-/// Enrols a host and returns its new credential.
+/// The longest agent version stored.
+const MAX_AGENT_VERSION_CHARS: usize = 64;
+
+/// True for an agent version that may be stored: 1 to 64 characters of `[0-9A-Za-z.+-]`.
+/// The `User-Agent` of the agent's requests and the enrolment request are held to this rule.
+pub fn valid_agent_version(version: &str) -> bool {
+    (1..=MAX_AGENT_VERSION_CHARS).contains(&version.len())
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+}
+
+/// Enrols a host and returns its new credential. The version the agent reports is stored when
+/// it is valid; an invalid one is stored as NULL and does not fail the enrolment.
 ///
 /// Checks run in this order: host name format, key validity, host lookup. Only a request with
 /// a valid name and a valid key is recorded as an unknown agent, so callers without a key
@@ -55,7 +68,12 @@ pub async fn enroll(
         }
     };
     match store.bind_credential(host.id).await {
-        Ok(credential) => Ok(EnrollResponse { credential }),
+        Ok(credential) => {
+            let version =
+                valid_agent_version(&req.agent_version).then_some(req.agent_version.as_str());
+            store.set_agent_version(host.id, version).await?;
+            Ok(EnrollResponse { credential })
+        }
         Err(StateError::Conflict(_)) => Err(EnrollError::AlreadyBound),
         Err(StateError::NotFound) => {
             store.record_unknown_agent(&req.host, now).await?;
@@ -169,6 +187,60 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    async fn stored_version(pool: &PgPool, name: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT agent_version FROM hosts WHERE name = $1")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn enrolment_stores_the_reported_version_and_release_clears_it(pool: PgPool) {
+        let (store, key) = setup(pool.clone()).await;
+        let host = store.create_host("web-01").await.unwrap();
+        assert_eq!(stored_version(&pool, "web-01").await, None);
+        enroll(&store, &req("web-01", &key), now()).await.unwrap();
+        assert_eq!(
+            stored_version(&pool, "web-01").await.as_deref(),
+            Some("0.1.0")
+        );
+        store.release_binding(host.id).await.unwrap();
+        assert_eq!(stored_version(&pool, "web-01").await, None);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_invalid_version_is_stored_as_null_and_enrols(pool: PgPool) {
+        let (store, key) = setup(pool.clone()).await;
+        let host = store.create_host("web-01").await.unwrap();
+        store
+            .set_agent_version(host.id, Some("9.9.9"))
+            .await
+            .unwrap();
+        let mut bad = req("web-01", &key);
+        bad.agent_version = "1.0 <b>".to_owned();
+        let resp = enroll(&store, &bad, now()).await.unwrap();
+        assert!(resp.credential.starts_with("cbx_ac_"));
+        assert_eq!(stored_version(&pool, "web-01").await, None);
+    }
+
+    #[test]
+    fn the_version_rule() {
+        assert!(valid_agent_version("1.2.3"));
+        assert!(valid_agent_version("0.1.0-rc.1+b5"));
+        assert!(valid_agent_version(&"a".repeat(64)));
+        for bad in [
+            "",
+            "1 2",
+            "1.0
+",
+            "é",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_agent_version(bad), "{bad:?}");
+        }
     }
 
     #[sqlx::test(migrations = "./migrations")]

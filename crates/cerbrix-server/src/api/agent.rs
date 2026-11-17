@@ -166,18 +166,12 @@ pub(super) async fn values(
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
-/// The longest agent version stored.
-const MAX_AGENT_VERSION_CHARS: usize = 64;
-
-/// The version in a `User-Agent` of the form `cerbrix-agent/<version>`: 1 to 64 characters of
-/// `[0-9A-Za-z.+-]` and nothing after them. Any other header names no version.
+/// The version in a `User-Agent` of the form `cerbrix-agent/<version>`; a header of any other
+/// form, or with a version that is not valid (see `crate::enroll::valid_agent_version`), names
+/// no version.
 fn agent_version_from_user_agent(user_agent: &str) -> Option<&str> {
     let version = user_agent.strip_prefix("cerbrix-agent/")?;
-    let valid = (1..=MAX_AGENT_VERSION_CHARS).contains(&version.len())
-        && version
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'));
-    valid.then_some(version)
+    crate::enroll::valid_agent_version(version).then_some(version)
 }
 
 /// Evaluates the triggers of `host` against the stored values and records the arrival.
@@ -590,7 +584,8 @@ mod tests {
     async fn values_take_the_version_from_the_user_agent(pool: PgPool) {
         let (router, _, store) = app(pool.clone());
         let cred = enrolled(&router, &store, "web-01").await;
-        assert_eq!(stored_version(&pool).await, None);
+        // The version of the enrolment request is stored at enrolment.
+        assert_eq!(stored_version(&pool).await.as_deref(), Some("0.1.0"));
         let status = post_values_as(&router, &cred, Some("cerbrix-agent/1.2.3")).await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(stored_version(&pool).await.as_deref(), Some("1.2.3"));
@@ -614,7 +609,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn a_missing_or_malformed_user_agent_gives_null_on_a_fresh_host(pool: PgPool) {
+    async fn a_missing_or_malformed_user_agent_leaves_the_enrolment_version(pool: PgPool) {
         let (router, _, store) = app(pool.clone());
         let cred = enrolled(&router, &store, "web-01").await;
         for ua in [None, Some("cerbrix-agent/1.2 3"), Some("curl/8.0")] {
@@ -623,7 +618,7 @@ mod tests {
                 StatusCode::ACCEPTED
             );
         }
-        assert_eq!(stored_version(&pool).await, None);
+        assert_eq!(stored_version(&pool).await.as_deref(), Some("0.1.0"));
     }
 
     #[sqlx::test(migrations = "./migrations")]

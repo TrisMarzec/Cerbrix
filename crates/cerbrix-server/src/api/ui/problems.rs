@@ -385,7 +385,7 @@ mod tests {
 
     async fn add_dashboard(fx: &Fixture, id: &str, body: &str) {
         sqlx::query(
-            "INSERT INTO config_documents (kind, id, source_file, body)              VALUES ('dashboard', $1, $2, $3::jsonb)",
+            "INSERT INTO config_documents (kind, id, source_file, body) VALUES ('dashboard', $1, $2, $3::jsonb)",
         )
         .bind(id)
         .bind(format!("dashboards/{id}.json"))
@@ -483,13 +483,13 @@ mod tests {
     async fn problems_list_with_many_hosts(pool: PgPool) {
         let fx = Fixture::new(pool.clone()).await;
         sqlx::query(
-            "INSERT INTO hosts (id, name, groups)              SELECT gen_random_uuid(), 'h' || lpad(i::text, 3, '0'), ARRAY['g' || (i % 3)]              FROM generate_series(1, 300) AS i",
+            "INSERT INTO hosts (id, name, groups) SELECT gen_random_uuid(), 'h' || lpad(i::text, 3, '0'), ARRAY['g' || (i % 3)] FROM generate_series(1, 300) AS i",
         )
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO problems (id, host_id, trigger_name, instance, severity, summary,              started_at)              SELECT gen_random_uuid(), h.id, 'T', '', 'critical', 's',                     now() - (substr(h.name, 2)::int || ' minutes')::interval              FROM hosts h WHERE h.name LIKE 'h%'",
+            "INSERT INTO problems (id, host_id, trigger_name, instance, severity, summary, started_at) SELECT gen_random_uuid(), h.id, 'T', '', 'critical', 's', now() - (substr(h.name, 2)::int || ' minutes')::interval FROM hosts h WHERE h.name LIKE 'h%'",
         )
         .execute(&pool)
         .await

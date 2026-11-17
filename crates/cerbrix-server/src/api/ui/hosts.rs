@@ -824,7 +824,7 @@ mod tests {
 
     async fn add_dashboard(fx: &Fixture, id: &str, body: &str) {
         sqlx::query(
-            "INSERT INTO config_documents (kind, id, source_file, body)              VALUES ('dashboard', $1, $2, $3::jsonb)",
+            "INSERT INTO config_documents (kind, id, source_file, body) VALUES ('dashboard', $1, $2, $3::jsonb)",
         )
         .bind(id)
         .bind(format!("dashboards/{id}.json"))

@@ -65,34 +65,56 @@ impl StateStore {
     pub async fn bind_credential(&self, host_id: Uuid) -> Result<String, StateError> {
         let plain = tokens::generate(tokens::AGENT_CREDENTIAL_PREFIX);
         let done = sqlx::query(
-            "INSERT INTO agent_credentials (host_id, credential_hash) \n             SELECT id, $2 FROM hosts WHERE id = $1 AND active FOR SHARE",
+            "INSERT INTO agent_credentials (host_id, credential_hash) \
+             SELECT id, $2 FROM hosts WHERE id = $1 AND active FOR SHARE",
         )
-            .bind(host_id)
-            .bind(tokens::hash(&plain).as_slice())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| {
-                if is_unique_violation(&e) {
-                    StateError::Conflict("host is already bound to a credential".to_owned())
-                } else if e
-                    .as_database_error()
-                    .is_some_and(|d| d.is_foreign_key_violation())
-                {
-                    StateError::NotFound
-                } else {
-                    e.into()
-                }
-            })?;
+        .bind(host_id)
+        .bind(tokens::hash(&plain).as_slice())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                StateError::Conflict("host is already bound to a credential".to_owned())
+            } else if e
+                .as_database_error()
+                .is_some_and(|d| d.is_foreign_key_violation())
+            {
+                StateError::NotFound
+            } else {
+                e.into()
+            }
+        })?;
         if done.rows_affected() == 0 {
             return Err(StateError::NotFound);
         }
         Ok(plain)
     }
 
-    /// Removes the host's credential so it can enrol again; idempotent.
+    /// Removes the host's credential so it can enrol again, and forgets the agent version
+    /// (it belonged to the agent that is no longer bound); idempotent.
     pub async fn release_binding(&self, host_id: Uuid) -> Result<(), StateError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM agent_credentials WHERE host_id = $1")
             .bind(host_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE hosts SET agent_version = NULL WHERE id = $1")
+            .bind(host_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Sets the version the host's agent reported (`None` clears it).
+    pub async fn set_agent_version(
+        &self,
+        host_id: Uuid,
+        version: Option<&str>,
+    ) -> Result<(), StateError> {
+        sqlx::query("UPDATE hosts SET agent_version = $2 WHERE id = $1")
+            .bind(host_id)
+            .bind(version)
             .execute(&self.pool)
             .await?;
         Ok(())

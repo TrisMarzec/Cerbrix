@@ -288,9 +288,12 @@ All group names, sorted. Not paged.
 One host with its effective configuration (what the host and its templates give together) and
 its open problems. `origin` of an item or trigger is `host` or `template:<name>`; `firing` says
 whether the trigger has an open problem. A host created by hand has no configuration: `templates`,
-`items` and `triggers` are empty. `agent_version` is the version the agent reported in the
-`User-Agent` of its last request with values (`cerbrix-agent/<version>`), or `null` when no
-such request has arrived. `dashboards` lists the dashboards that show the host (`id` and
+`items` and `triggers` are empty. `agent_version` is the version the agent reported. It is known from enrolment on (the
+`agent_version` of the enrolment request, stored when it is a valid version) and follows the
+`User-Agent` of the agent's requests with values (`cerbrix-agent/<version>`). It is `null` after
+the host's agent binding was released (`POST /api/v1/hosts/{name}/release` or
+`admin host release`) until the agent enrols again, and `null` for a host whose agent has not
+enrolled yet. `dashboards` lists the dashboards that show the host (`id` and
 `name`), sorted by name; it is empty for a host in none. `404` for an unknown host.
 
 ```json
@@ -604,7 +607,7 @@ Revokes a key. Answer `204`, also for a key that is already revoked. `404` for a
 ### `POST /api/v1/hosts/{name}/release` (admin)
 
 Removes the agent binding of a host so that an agent can enrol again (the same as
-`admin host release`). Answer `204`. `404` for an unknown host. It is allowed with GitOps on: it
+`admin host release`). Answer `204`. The version the page shows as the agent's (`agent_version`) is cleared, too. `404` for an unknown host. It is allowed with GitOps on: it
 changes no configuration.
 
 ### Users
