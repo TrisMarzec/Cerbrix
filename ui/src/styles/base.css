@@ -75,7 +75,14 @@ small {
   text-align: right;
 }
 
-/* Tables */
+/* Tables. A table sits in a `.table-scroll` wrapper: an extreme case (a long unbroken host name)
+   scrolls inside its panel and never makes the page wider than the viewport. */
+.table-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -117,11 +124,12 @@ textarea {
   white-space: nowrap;
 }
 
-.btn:hover:not(:disabled) {
+.btn:hover:not(:disabled):not([aria-disabled='true']) {
   border-color: var(--git);
 }
 
-.btn:disabled {
+.btn:disabled,
+.btn[aria-disabled='true'] {
   color: var(--dim);
   cursor: default;
   opacity: 0.6;

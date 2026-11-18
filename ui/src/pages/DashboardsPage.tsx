@@ -104,40 +104,42 @@ function plural(n: number, one: string, many: string): string {
 
 function DashboardTable({ items }: { items: DashboardSummary[] }) {
   return (
-    <table aria-label="Dashboards">
-      <thead>
-        <tr>
-          <th scope="col">Dashboard</th>
-          <th scope="col">Hosts</th>
-          <th scope="col">Open problems</th>
-          <th scope="col" class="right">
-            Priority
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {items.map((d) => (
-          <tr key={d.id}>
-            <td>
-              <Link
-                class="dashboard-name"
-                href={`/problems?${new URLSearchParams({ dashboard: d.id }).toString()}`}
-              >
-                {d.name}
-              </Link>
-              <small class="dashboard-file">{d.file}</small>
-            </td>
-            <td>
-              <HostStrip dashboard={d} />
-            </td>
-            <td>
-              <ProblemsInWords dashboard={d} />
-            </td>
-            <td class="right num">{d.priority}</td>
+    <div class="table-scroll">
+      <table aria-label="Dashboards">
+        <thead>
+          <tr>
+            <th scope="col">Dashboard</th>
+            <th scope="col">Hosts</th>
+            <th scope="col">Open problems</th>
+            <th scope="col" class="right">
+              Priority
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {items.map((d) => (
+            <tr key={d.id}>
+              <td>
+                <Link
+                  class="dashboard-name"
+                  href={`/problems?${new URLSearchParams({ dashboard: d.id }).toString()}`}
+                >
+                  {d.name}
+                </Link>
+                <small class="dashboard-file">{d.file}</small>
+              </td>
+              <td>
+                <HostStrip dashboard={d} />
+              </td>
+              <td>
+                <ProblemsInWords dashboard={d} />
+              </td>
+              <td class="right num">{d.priority}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -174,27 +176,29 @@ function NowShowing({ display, nameOf }: { display: Display; nameOf: (id: string
 
 function DisplayTable({ items, nameOf }: { items: Display[]; nameOf: (id: string) => string }) {
   return (
-    <table aria-label="Wall displays">
-      <thead>
-        <tr>
-          <th scope="col">Display</th>
-          <th scope="col">What it shows now</th>
-        </tr>
-      </thead>
-      <tbody>
-        {items.map((d) => (
-          <tr key={d.id}>
-            <th scope="row">
-              <span class="dashboard-name">{d.name}</span>
-              <small>{settingSentence(d, nameOf)}</small>
-            </th>
-            <td>
-              <NowShowing display={d} nameOf={nameOf} />
-            </td>
+    <div class="table-scroll">
+      <table aria-label="Wall displays">
+        <thead>
+          <tr>
+            <th scope="col">Display</th>
+            <th scope="col">What it shows now</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {items.map((d) => (
+            <tr key={d.id}>
+              <th scope="row">
+                <span class="dashboard-name">{d.name}</span>
+                <small>{settingSentence(d, nameOf)}</small>
+              </th>
+              <td>
+                <NowShowing display={d} nameOf={nameOf} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

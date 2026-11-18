@@ -44,47 +44,49 @@ function rowClass(h: HostRow): string | undefined {
 
 function HostTable({ rows, now }: { rows: HostRow[]; now: Date }) {
   return (
-    <table class="hosts-table" aria-label="Hosts">
-      <thead>
-        <tr>
-          <th scope="col">
-            <span class="visually-hidden">Severity</span>
-          </th>
-          <th scope="col">Host</th>
-          <th scope="col">Groups</th>
-          <th scope="col">State</th>
-          <th scope="col" class="right">
-            CPU
-          </th>
-          <th scope="col" class="right">
-            Memory
-          </th>
-          <th scope="col" class="right">
-            Last value
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((h) => (
-          <tr key={h.name} class={rowClass(h)}>
-            <td class="cell-sev" aria-hidden="true" />
-            <td>
-              <Link class="host-name" href={`/hosts/${seg(h.name)}`}>
-                {h.name}
-              </Link>
-              {h.address !== null && <small class="host-address">{h.address}</small>}
-            </td>
-            <td class="host-groups">{h.groups.length === 0 ? DASH : h.groups.join(', ')}</td>
-            <td>
-              <StateText state={h.state} />
-            </td>
-            <td class="right num">{value('cpu.usage', h.cpu)}</td>
-            <td class="right num">{value('memory.used_percent', h.memory)}</td>
-            <td class="right num dim">{age(h.last_seen_at, now)}</td>
+    <div class="table-scroll">
+      <table class="hosts-table" aria-label="Hosts">
+        <thead>
+          <tr>
+            <th scope="col">
+              <span class="visually-hidden">Severity</span>
+            </th>
+            <th scope="col">Host</th>
+            <th scope="col">Groups</th>
+            <th scope="col">State</th>
+            <th scope="col" class="right">
+              CPU
+            </th>
+            <th scope="col" class="right">
+              Memory
+            </th>
+            <th scope="col" class="right">
+              Last value
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((h) => (
+            <tr key={h.name} class={rowClass(h)}>
+              <td class="cell-sev" aria-hidden="true" />
+              <td>
+                <Link class="host-name" href={`/hosts/${seg(h.name)}`}>
+                  {h.name}
+                </Link>
+                {h.address !== null && <small class="host-address">{h.address}</small>}
+              </td>
+              <td class="host-groups">{h.groups.length === 0 ? DASH : h.groups.join(', ')}</td>
+              <td>
+                <StateText state={h.state} />
+              </td>
+              <td class="right num">{value('cpu.usage', h.cpu)}</td>
+              <td class="right num">{value('memory.used_percent', h.memory)}</td>
+              <td class="right num dim">{age(h.last_seen_at, now)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

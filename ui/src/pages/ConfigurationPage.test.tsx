@@ -366,7 +366,7 @@ describe('sync history', () => {
     expect(screen.getByText('253a299')).toBeInTheDocument();
     // The pager stays on the page that is shown and waits for the answer.
     expect(screen.getByText('1–20 of 45')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Next' })).toHaveAttribute('aria-disabled', 'true');
     release();
     await advance(0);
     expect(document.querySelector('.config-result')).toHaveAttribute('aria-busy', 'false');
@@ -454,7 +454,7 @@ describe('enrolment keys', () => {
     expect(screen.getByDisplayValue('cbx_ek_SECRETVALUE')).toBeInTheDocument();
     expect(screen.getByText("Give this key to the agent's installer.")).toBeInTheDocument();
     expect(sent('GET', '/enrollment-keys')).toHaveLength(2);
-    expect(screen.getByRole('table', { name: 'Enrolment keys' })).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Enrolment keys' }).parentElement).toHaveClass('table-scroll');
 
     await u.click(screen.getByRole('button', { name: 'Close' }));
     await advance(0);

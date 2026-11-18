@@ -371,31 +371,33 @@ export function HostPage({ name }: { name: string }) {
             ) : values.data.items.length === 0 ? (
               <Empty>No current values.</Empty>
             ) : (
-              <table aria-label="Current values">
-                <thead>
-                  <tr>
-                    <th scope="col">Item</th>
-                    <th scope="col" class="right">
-                      Value
-                    </th>
-                    <th scope="col" class="right">
-                      Age
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {values.data.items.map((v) => {
-                    const title = seriesTitle(v.key, v.params);
-                    return (
-                      <tr key={seriesId(v.key, v.params)}>
-                        <td class="host-item">{title}</td>
-                        <td class="right num">{value(v.key, v.value)}</td>
-                        <td class="right num dim">{age(v.at, now)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              <div class="table-scroll">
+                <table aria-label="Current values">
+                  <thead>
+                    <tr>
+                      <th scope="col">Item</th>
+                      <th scope="col" class="right">
+                        Value
+                      </th>
+                      <th scope="col" class="right">
+                        Age
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {values.data.items.map((v) => {
+                      const title = seriesTitle(v.key, v.params);
+                      return (
+                        <tr key={seriesId(v.key, v.params)}>
+                          <td class="host-item">{title}</td>
+                          <td class="right num">{value(v.key, v.value)}</td>
+                          <td class="right num dim">{age(v.at, now)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             )}
           </section>
 
@@ -404,30 +406,32 @@ export function HostPage({ name }: { name: string }) {
             {host.triggers.length === 0 ? (
               <Empty>No triggers configured.</Empty>
             ) : (
-              <table aria-label="Triggers">
-                <thead>
-                  <tr>
-                    <th scope="col">Name</th>
-                    <th scope="col">Expression</th>
-                    <th scope="col">Severity</th>
-                    <th scope="col">Origin</th>
-                    <th scope="col">State</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {host.triggers.map((t, i) => (
-                    <tr key={i}>
-                      <td class="host-item">{t.name}</td>
-                      <td class="host-expression">{t.expression}</td>
-                      <td>{severityWord(t.severity)}</td>
-                      <td class="host-item">{originText(t.origin)}</td>
-                      <td>
-                        <TriggerState trigger={t} />
-                      </td>
+              <div class="table-scroll">
+                <table aria-label="Triggers">
+                  <thead>
+                    <tr>
+                      <th scope="col">Name</th>
+                      <th scope="col">Expression</th>
+                      <th scope="col">Severity</th>
+                      <th scope="col">Origin</th>
+                      <th scope="col">State</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {host.triggers.map((t, i) => (
+                      <tr key={i}>
+                        <td class="host-item">{t.name}</td>
+                        <td class="host-expression">{t.expression}</td>
+                        <td>{severityWord(t.severity)}</td>
+                        <td class="host-item">{originText(t.origin)}</td>
+                        <td>
+                          <TriggerState trigger={t} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </section>
         </div>

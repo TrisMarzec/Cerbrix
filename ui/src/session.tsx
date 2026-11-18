@@ -73,7 +73,7 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
   }, []);
 
   // A 401 may only mean that the cookie was replaced while a request was in flight (a password
-  // change); a 403 or a tab that becomes visible again may mean that another user has logged in in
+  // change); a 403 or a tab that becomes visible or a window that gets focus may mean that another user has logged in in
   // another tab. So the session asks once more who is logged in; concurrent triggers share it.
   const rechecking = useRef(false);
   const recheck = useCallback(() => {
@@ -109,11 +109,14 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
       if (!document.hidden) recheck();
     };
     document.addEventListener('visibilitychange', onVisibility);
+    // Two visible windows side by side get no visibility change; focus tells that the user came back.
+    window.addEventListener('focus', recheck);
     check();
     return () => {
       onUnauthorized(() => {});
       onSessionDoubt(() => {});
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', recheck);
     };
   }, [check, recheck]);
 

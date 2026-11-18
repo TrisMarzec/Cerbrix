@@ -457,67 +457,69 @@ export function AdministrationPage() {
             ) : beyond ? null : (
               <>
                 {answer.items.length > 0 ? (
-                  <table class="admin-table" aria-label="Users">
-                    <thead>
-                      <tr>
-                        <th scope="col">Name</th>
-                        <th scope="col">Role</th>
-                        <th scope="col">State</th>
-                        <th scope="col">Created</th>
-                        <th scope="col">Password changed</th>
-                        <th scope="col">
-                          <span class="visually-hidden">Actions</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {answer.items.map((u) => {
-                        const own = u.name === me.name;
-                        return (
-                          <tr key={u.id} class={u.disabled ? 'admin-dim-row' : undefined}>
-                            <th scope="row">
-                              <span class="admin-name">{u.name}</span>
-                              {own && <span class="admin-you">you</span>}
-                            </th>
-                            <td>{roleWord(u.role)}</td>
-                            <td>{u.disabled ? 'Disabled' : 'Active'}</td>
-                            <td>
-                              <TimeText iso={u.created_at} now={now} />
-                            </td>
-                            <td>
-                              <TimeText iso={u.password_changed_at} now={now} />
-                            </td>
-                            <td class="admin-actions">
-                              {rowButton(u, 'role', 'Change role', `Change role of ${u.name}`)}
-                              {u.disabled ? (
-                                <button
-                                  type="button"
-                                  class="btn"
-                                  aria-label={`Enable ${u.name}`}
-                                  disabled={enabling !== undefined}
-                                  onClick={() => {
-                                    enable(u);
-                                  }}
-                                >
-                                  Enable
-                                </button>
-                              ) : (
-                                rowButton(u, 'disable', 'Disable', `Disable ${u.name}`)
-                              )}
-                              {own ? (
-                                <span class="dim admin-hint">
-                                  Use Change password for your own account.
-                                </span>
-                              ) : (
-                                rowButton(u, 'reset', 'Reset password', `Reset password of ${u.name}`)
-                              )}
-                              {rowButton(u, 'remove', 'Remove', `Remove ${u.name}`)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                  <div class="table-scroll">
+                    <table class="admin-table" aria-label="Users">
+                      <thead>
+                        <tr>
+                          <th scope="col">Name</th>
+                          <th scope="col">Role</th>
+                          <th scope="col">State</th>
+                          <th scope="col">Created</th>
+                          <th scope="col">Password changed</th>
+                          <th scope="col">
+                            <span class="visually-hidden">Actions</span>
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {answer.items.map((u) => {
+                          const own = u.name === me.name;
+                          return (
+                            <tr key={u.id} class={u.disabled ? 'admin-dim-row' : undefined}>
+                              <th scope="row">
+                                <span class="admin-name">{u.name}</span>
+                                {own && <span class="admin-you">you</span>}
+                              </th>
+                              <td>{roleWord(u.role)}</td>
+                              <td>{u.disabled ? 'Disabled' : 'Active'}</td>
+                              <td>
+                                <TimeText iso={u.created_at} now={now} />
+                              </td>
+                              <td>
+                                <TimeText iso={u.password_changed_at} now={now} />
+                              </td>
+                              <td class="admin-actions">
+                                {rowButton(u, 'role', 'Change role', `Change role of ${u.name}`)}
+                                {u.disabled ? (
+                                  <button
+                                    type="button"
+                                    class="btn"
+                                    aria-label={`Enable ${u.name}`}
+                                    disabled={enabling !== undefined}
+                                    onClick={() => {
+                                      enable(u);
+                                    }}
+                                  >
+                                    Enable
+                                  </button>
+                                ) : (
+                                  rowButton(u, 'disable', 'Disable', `Disable ${u.name}`)
+                                )}
+                                {own ? (
+                                  <span class="dim admin-hint">
+                                    Use Change password for your own account.
+                                  </span>
+                                ) : (
+                                  rowButton(u, 'reset', 'Reset password', `Reset password of ${u.name}`)
+                                )}
+                                {rowButton(u, 'remove', 'Remove', `Remove ${u.name}`)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 ) : (
                   !users.pending && <Empty>Nothing on this page.</Empty>
                 )}

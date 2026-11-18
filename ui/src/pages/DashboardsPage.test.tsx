@@ -469,6 +469,8 @@ describe('dashboards that are not up to date', () => {
     expect(staleNotes()).toHaveLength(0);
     await advance(10_000);
     expect(staleNotes()).toHaveLength(1);
+    expect(screen.getByRole('table', { name: 'Dashboards' }).parentElement).toHaveClass('table-scroll');
+    expect(screen.getByRole('table', { name: 'Wall displays' }).parentElement).toHaveClass('table-scroll');
     expectStaleAbove(screen.getByRole('table', { name: 'Dashboards' }), '14:30');
     await advance(10_000);
     expect(staleNotes()).toHaveLength(2);

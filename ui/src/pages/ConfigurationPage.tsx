@@ -150,24 +150,26 @@ function position(issue: SyncIssue): string {
 function IssueTable({ issues }: { issues: SyncIssue[] }) {
   return (
     <div class="config-issues">
-      <table class="config-table" aria-label="Synchronisation issues">
-        <thead>
-          <tr>
-            <th scope="col">File</th>
-            <th scope="col">Position</th>
-            <th scope="col">Reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {issues.map((issue, i) => (
-            <tr key={i}>
-              <td>{issue.file ?? DASH}</td>
-              <td class="num">{position(issue)}</td>
-              <td>{issue.reason}</td>
+      <div class="table-scroll">
+        <table class="config-table" aria-label="Synchronisation issues">
+          <thead>
+            <tr>
+              <th scope="col">File</th>
+              <th scope="col">Position</th>
+              <th scope="col">Reason</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {issues.map((issue, i) => (
+              <tr key={i}>
+                <td>{issue.file ?? DASH}</td>
+                <td class="num">{position(issue)}</td>
+                <td>{issue.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -305,20 +307,22 @@ function HistorySection({ now }: { now: Date }) {
           ) : beyond ? null : (
             <>
               {answer.items.length > 0 ? (
-                <table class="config-table" aria-label="Sync history">
-                  <thead>
-                    <tr>
-                      <th scope="col">Commit</th>
-                      <th scope="col">Applied</th>
-                      <th scope="col">Changes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {answer.items.map((entry) => (
-                      <HistoryRow key={entry.commit + entry.applied_at} entry={entry} now={now} />
-                    ))}
-                  </tbody>
-                </table>
+                <div class="table-scroll">
+                  <table class="config-table" aria-label="Sync history">
+                    <thead>
+                      <tr>
+                        <th scope="col">Commit</th>
+                        <th scope="col">Applied</th>
+                        <th scope="col">Changes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {answer.items.map((entry) => (
+                        <HistoryRow key={entry.commit + entry.applied_at} entry={entry} now={now} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               ) : (
                 !history.pending && <Empty>Nothing on this page.</Empty>
               )}
@@ -358,32 +362,34 @@ function UnknownAgentsSection({ now }: { now: Date }) {
           {answer.items.length === 0 ? (
             <Empty>No unknown agents.</Empty>
           ) : (
-            <table class="config-table" aria-label="Unknown agents">
-              <thead>
-                <tr>
-                  <th scope="col">Host name</th>
-                  <th scope="col">First seen</th>
-                  <th scope="col">Last seen</th>
-                  <th scope="col" class="right">
-                    Attempts
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {answer.items.map((a) => (
-                  <tr key={a.host_name}>
-                    <td>{a.host_name}</td>
-                    <td>
-                      <TimeText iso={a.first_seen} now={now} />
-                    </td>
-                    <td>
-                      <TimeText iso={a.last_seen} now={now} />
-                    </td>
-                    <td class="right">{a.attempts}</td>
+            <div class="table-scroll">
+              <table class="config-table" aria-label="Unknown agents">
+                <thead>
+                  <tr>
+                    <th scope="col">Host name</th>
+                    <th scope="col">First seen</th>
+                    <th scope="col">Last seen</th>
+                    <th scope="col" class="right">
+                      Attempts
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {answer.items.map((a) => (
+                    <tr key={a.host_name}>
+                      <td>{a.host_name}</td>
+                      <td>
+                        <TimeText iso={a.first_seen} now={now} />
+                      </td>
+                      <td>
+                        <TimeText iso={a.last_seen} now={now} />
+                      </td>
+                      <td class="right">{a.attempts}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </>
       )}
@@ -542,47 +548,49 @@ function KeysSection({ now, onSecret, track, locked }: SecretSectionProps) {
         (answer.items.length === 0 ? (
           <Empty>No enrolment keys.</Empty>
         ) : (
-          <table class="config-table" aria-label="Enrolment keys">
-            <thead>
-              <tr>
-                <th scope="col">Description</th>
-                <th scope="col">Created</th>
-                <th scope="col">Expires</th>
-                <th scope="col">State</th>
-                <th scope="col">
-                  <span class="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {answer.items.map((k) => (
-                <tr key={k.id} class={k.state === 'active' ? undefined : 'config-dim-row'}>
-                  <td>{k.description}</td>
-                  <td>
-                    <TimeText iso={k.created_at} now={now} />
-                  </td>
-                  <td>
-                    <TimeText iso={k.expires_at} now={now} />
-                  </td>
-                  <td>{KEY_STATE_WORD[k.state]}</td>
-                  <td class="config-actions">
-                    {k.state === 'active' && (
-                      <button
-                        type="button"
-                        class="btn"
-                        aria-label={`Revoke key ${k.description}`}
-                        onClick={() => {
-                          setDialog({ kind: 'revoke', key: k });
-                        }}
-                      >
-                        Revoke
-                      </button>
-                    )}
-                  </td>
+          <div class="table-scroll">
+            <table class="config-table" aria-label="Enrolment keys">
+              <thead>
+                <tr>
+                  <th scope="col">Description</th>
+                  <th scope="col">Created</th>
+                  <th scope="col">Expires</th>
+                  <th scope="col">State</th>
+                  <th scope="col">
+                    <span class="visually-hidden">Actions</span>
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {answer.items.map((k) => (
+                  <tr key={k.id} class={k.state === 'active' ? undefined : 'config-dim-row'}>
+                    <td>{k.description}</td>
+                    <td>
+                      <TimeText iso={k.created_at} now={now} />
+                    </td>
+                    <td>
+                      <TimeText iso={k.expires_at} now={now} />
+                    </td>
+                    <td>{KEY_STATE_WORD[k.state]}</td>
+                    <td class="config-actions">
+                      {k.state === 'active' && (
+                        <button
+                          type="button"
+                          class="btn"
+                          aria-label={`Revoke key ${k.description}`}
+                          onClick={() => {
+                            setDialog({ kind: 'revoke', key: k });
+                          }}
+                        >
+                          Revoke
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ))}
       {dialog?.kind === 'create' && (
         <CreateKeyDialog
@@ -683,71 +691,73 @@ function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
         (answer.items.length === 0 ? (
           <Empty>No wall displays configured.</Empty>
         ) : (
-          <table class="config-table" aria-label="Display tokens">
-            <thead>
-              <tr>
-                <th scope="col">Display</th>
-                <th scope="col">Token</th>
-                <th scope="col">
-                  <span class="visually-hidden">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {answer.items.map((d) => {
-                const has = d.token_created_at !== null;
-                return (
-                  <tr key={d.id}>
-                    <td>
-                      <div>{d.name}</div>
-                      <small>{d.id}</small>
-                      {failure?.id === d.id && <Failure text={failure.text} />}
-                    </td>
-                    <td>
-                      {d.token_created_at === null ? (
-                        <span class="dim">No token</span>
-                      ) : (
-                        <>
-                          Created <TimeText iso={d.token_created_at} now={now} />
-                        </>
-                      )}
-                    </td>
-                    <td class="config-actions">
-                      <button
-                        type="button"
-                        class="btn"
-                        disabled={locked || busyId === d.id}
-                        aria-label={`${has ? 'Replace' : 'Create'} token of ${d.name}`}
-                        onClick={() => {
-                          if (has) {
-                            setFailure(undefined);
-                            setDialog({ kind: 'replace', display: d });
-                          } else {
-                            createDirectly(d);
-                          }
-                        }}
-                      >
-                        {has ? 'Replace token' : 'Create token'}
-                      </button>
-                      {has && (
+          <div class="table-scroll">
+            <table class="config-table" aria-label="Display tokens">
+              <thead>
+                <tr>
+                  <th scope="col">Display</th>
+                  <th scope="col">Token</th>
+                  <th scope="col">
+                    <span class="visually-hidden">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {answer.items.map((d) => {
+                  const has = d.token_created_at !== null;
+                  return (
+                    <tr key={d.id}>
+                      <td>
+                        <div>{d.name}</div>
+                        <small>{d.id}</small>
+                        {failure?.id === d.id && <Failure text={failure.text} />}
+                      </td>
+                      <td>
+                        {d.token_created_at === null ? (
+                          <span class="dim">No token</span>
+                        ) : (
+                          <>
+                            Created <TimeText iso={d.token_created_at} now={now} />
+                          </>
+                        )}
+                      </td>
+                      <td class="config-actions">
                         <button
                           type="button"
                           class="btn"
-                          aria-label={`Revoke token of ${d.name}`}
+                          disabled={locked || busyId === d.id}
+                          aria-label={`${has ? 'Replace' : 'Create'} token of ${d.name}`}
                           onClick={() => {
-                            setFailure(undefined);
-                            setDialog({ kind: 'revoke', display: d });
+                            if (has) {
+                              setFailure(undefined);
+                              setDialog({ kind: 'replace', display: d });
+                            } else {
+                              createDirectly(d);
+                            }
                           }}
                         >
-                          Revoke
+                          {has ? 'Replace token' : 'Create token'}
                         </button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                        {has && (
+                          <button
+                            type="button"
+                            class="btn"
+                            aria-label={`Revoke token of ${d.name}`}
+                            onClick={() => {
+                              setFailure(undefined);
+                              setDialog({ kind: 'revoke', display: d });
+                            }}
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         ))}
       {dialog?.kind === 'replace' && (
         <ActionDialog

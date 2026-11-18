@@ -109,12 +109,13 @@
   overflow-wrap: break-word;
 }
 
-.host-item,
-.host-expression {
+.host-item {
   overflow-wrap: break-word;
 }
 
+/* Expressions are long unbroken tokens: they may break anywhere. */
 .host-expression {
+  overflow-wrap: anywhere;
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
   font-size: 15px;
 }

@@ -224,7 +224,7 @@ describe('search, group and state', () => {
         .getAllByRole('option')
         .map((o) => o.textContent),
     ).toEqual(['All groups', 'db']);
-    expect(screen.getByRole('table', { name: 'Hosts' })).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Hosts' }).parentElement).toHaveClass('table-scroll');
   });
 });
 
@@ -353,7 +353,7 @@ describe('table', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     await advance(0);
     expect(screen.getByText('1–50 of 120')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Next' })).toHaveAttribute('aria-disabled', 'true');
     expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
     await act(async () => {
       next.release();

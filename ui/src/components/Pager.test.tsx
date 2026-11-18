@@ -58,10 +58,38 @@ describe('Pager', () => {
 });
 
 describe('Pager while the next page loads', () => {
-  it('disables both buttons', () => {
+  it('marks both buttons aria-disabled but keeps them focusable', () => {
     render(<Pager total={137} limit={50} offset={50} disabled onChange={() => {}} />);
-    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    for (const name of ['Previous', 'Next']) {
+      const button = screen.getByRole('button', { name });
+      expect(button).toHaveAttribute('aria-disabled', 'true');
+      expect(button).not.toBeDisabled();
+    }
     expect(screen.getByText('51–100 of 137')).toBeInTheDocument();
+  });
+
+  it('keeps focus on Next after it was activated and ignores a second activation', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { rerender } = render(<Pager total={137} limit={50} offset={0} onChange={onChange} />);
+    const next = screen.getByRole('button', { name: 'Next' });
+    next.focus();
+    await user.keyboard('{Enter}');
+    expect(onChange).toHaveBeenCalledTimes(1);
+    rerender(<Pager total={137} limit={50} offset={0} disabled onChange={onChange} />);
+    expect(next).toHaveFocus();
+    await user.keyboard('{Enter}');
+    await user.click(next);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    rerender(<Pager total={137} limit={50} offset={50} onChange={onChange} />);
+    expect(next).toHaveFocus();
+    expect(next).not.toHaveAttribute('aria-disabled');
+  });
+
+  it('keeps the real disabled at the first and the last page', () => {
+    const { rerender } = render(<Pager total={137} limit={50} offset={0} disabled onChange={() => {}} />);
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    rerender(<Pager total={137} limit={50} offset={100} disabled onChange={() => {}} />);
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
   });
 });

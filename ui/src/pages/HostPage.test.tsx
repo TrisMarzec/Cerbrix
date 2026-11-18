@@ -604,6 +604,7 @@ describe('current values and triggers', () => {
       ]),
     });
     const table = screen.getByRole('table', { name: 'Current values' });
+    expect(table.parentElement).toHaveClass('table-scroll');
     const rows = within(table).getAllByRole('row').slice(1);
     expect(rows).toHaveLength(3);
     expect(rows[0]).toHaveTextContent('cpu.usage29.4 %20 s ago');
@@ -638,6 +639,7 @@ describe('current values and triggers', () => {
         ],
       }),
     });
+    expect(screen.getByRole('table', { name: 'Triggers' }).parentElement).toHaveClass('table-scroll');
     const rows = within(screen.getByRole('table', { name: 'Triggers' })).getAllByRole('row').slice(1);
     expect(rows[0]).toHaveTextContent('Agent silentno data for 1mCriticalhostFiring');
     expect(within(rows[0] as HTMLElement).getByText('Firing')).toHaveClass('sev-critical');

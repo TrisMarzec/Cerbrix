@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
 
 import { api } from './api/client';
@@ -7,6 +7,13 @@ import { mockFetch, type Answer, type FetchMock } from './test/mockFetch';
 import { advance } from './test/timers';
 
 const UNAUTHORIZED: Answer = { status: 401, json: { error: 'unauthorized', message: 'no valid session' } };
+
+/** Lets the promises that are ready (a mocked answer and its handlers) finish; no timer involved. */
+async function flush(): Promise<void> {
+  await act(async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  });
+}
 
 let mock: FetchMock;
 afterEach(() => {
@@ -126,7 +133,7 @@ describe('SessionProvider and 401', () => {
     expect(await screen.findByText('user=bert/viewer')).toBeInTheDocument();
     finish(UNAUTHORIZED);
     // Let the answer arrive and be handled.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
     expect(screen.getByText('user=bert/viewer')).toBeInTheDocument();
     expect(mock.count('GET /session')).toBe(1);
   });
@@ -141,7 +148,7 @@ describe('SessionProvider first check', () => {
       </SessionProvider>,
     );
     expect(await screen.findByLabelText('User name')).toBeInTheDocument();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
     expect(mock.count('GET /session')).toBe(1);
     expect(screen.queryByText('Your session has ended. Log in again.')).not.toBeInTheDocument();
   });
@@ -160,7 +167,7 @@ describe('SessionProvider logout', () => {
     await vi.waitFor(() => {
       expect(mock.count('DELETE /session')).toBe(1);
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
   }
 
   it('stays in when the logout fails on the network', async () => {
@@ -224,6 +231,52 @@ describe('SessionProvider and another user behind the cookie', () => {
     });
   });
 
+  it('asks once who is logged in when the window gets focus', async () => {
+    mock = mockFetch({ 'GET /session': { json: { name: 'anna', role: 'operator' } } });
+    render(
+      <SessionProvider>
+        <Probe />
+      </SessionProvider>,
+    );
+    await screen.findByText('user=anna/operator');
+    expect(mock.count('GET /session')).toBe(1);
+    window.dispatchEvent(new Event('focus'));
+    await flush();
+    expect(mock.count('GET /session')).toBe(2);
+  });
+
+  it('asks once for a focus and a visibility change arriving together', async () => {
+    mock = mockFetch({
+      'GET /session': [{ json: { name: 'anna', role: 'operator' } }, () => new Promise<Answer>(() => {})],
+    });
+    render(
+      <SessionProvider>
+        <Probe />
+      </SessionProvider>,
+    );
+    await screen.findByText('user=anna/operator');
+    window.dispatchEvent(new Event('focus'));
+    setHidden(false);
+    await flush();
+    expect(mock.count('GET /session')).toBe(2);
+  });
+
+  it('stops listening for focus when it unmounts', async () => {
+    mock = mockFetch({ 'GET /session': { json: { name: 'anna', role: 'operator' } } });
+    const { unmount } = render(
+      <SessionProvider>
+        <Probe />
+      </SessionProvider>,
+    );
+    await screen.findByText('user=anna/operator');
+    await act(async () => {
+      unmount();
+    });
+    window.dispatchEvent(new Event('focus'));
+    await flush();
+    expect(mock.count('GET /session')).toBe(1);
+  });
+
   it('asks once for several 403 answers and a visibility change together', async () => {
     let finish: (a: Answer) => void = () => {};
     mock = mockFetch({
@@ -247,11 +300,11 @@ describe('SessionProvider and another user behind the cookie', () => {
       expect(mock.count('GET /session')).toBe(2);
     });
     setHidden(false);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
     expect(mock.count('GET /a')).toBe(5);
     expect(mock.count('GET /session')).toBe(2);
     finish({ json: { name: 'anna', role: 'operator' } });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
     expect(screen.getByText('user=anna/operator')).toBeInTheDocument();
   });
 
@@ -274,7 +327,7 @@ describe('SessionProvider and another user behind the cookie', () => {
     await vi.waitFor(() => {
       expect(mock.count('GET /session')).toBe(2);
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
     expect(screen.getByLabelText('Note of anna')).toHaveValue('kept');
     setHidden(false);
     expect(await screen.findByLabelText('Note of bert')).toHaveValue('');
@@ -299,7 +352,7 @@ describe('SessionProvider and another user behind the cookie', () => {
     setHidden(false);
     expect(await screen.findByText('user=bert/viewer')).toBeInTheDocument();
     finish(UNAUTHORIZED);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush();
     expect(mock.count('GET /session')).toBe(2);
     expect(screen.getByText('user=bert/viewer')).toBeInTheDocument();
   });

@@ -92,86 +92,88 @@ interface TableProps {
 function ProblemTable({ rows, dashboards, state, now, canAct, busy, onAck, onClose }: TableProps) {
   const open = state === 'open';
   return (
-    <table class="problems-table" aria-label="Problems">
-      <thead>
-        <tr>
-          <th scope="col">
-            <span class="visually-hidden">Severity</span>
-          </th>
-          <th scope="col">Host</th>
-          <th scope="col">Problem</th>
-          <th scope="col">Dashboards</th>
-          <th scope="col">Started</th>
-          <th scope="col">Duration</th>
-          {open && canAct && <th scope="col">Action</th>}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((p) => {
-          const acknowledged = p.acknowledged_at !== null;
-          const reason = resolveText(p);
-          const end = p.resolved_at === null ? now : new Date(p.resolved_at);
-          return (
-            <tr key={p.id} class={`sev-${p.severity}${acknowledged ? ' is-acknowledged' : ''}`}>
-              <td class="cell-sev" aria-hidden="true" />
-              <td>
-                <Link class="problem-host-link" href={`/hosts/${seg(p.host)}`}>
-                  {p.host}
-                </Link>
-              </td>
-              <td>
-                <ProblemTitle problem={p} />
-                <ProblemMeta problem={p} now={now} />
-              </td>
-              <td class="problem-dashboards">
-                <DashboardLinks
-                  list={Object.hasOwn(dashboards, p.host) ? (dashboards[p.host] ?? []) : []}
-                  state={state}
-                />
-              </td>
-              <td>
-                <TimeText iso={p.started_at} now={now} />
-              </td>
-              <td class="problem-end">
-                <span class="num">{duration(p.started_at, end)}</span>
-                {reason !== undefined && <small>{reason}</small>}
-                {p.resolve_reason === 'closed_by_operator' &&
-                  p.close_comment !== null &&
-                  p.close_comment !== '' && <small>{p.close_comment}</small>}
-              </td>
-              {open && canAct && (
+    <div class="table-scroll">
+      <table class="problems-table" aria-label="Problems">
+        <thead>
+          <tr>
+            <th scope="col">
+              <span class="visually-hidden">Severity</span>
+            </th>
+            <th scope="col">Host</th>
+            <th scope="col">Problem</th>
+            <th scope="col">Dashboards</th>
+            <th scope="col">Started</th>
+            <th scope="col">Duration</th>
+            {open && canAct && <th scope="col">Action</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => {
+            const acknowledged = p.acknowledged_at !== null;
+            const reason = resolveText(p);
+            const end = p.resolved_at === null ? now : new Date(p.resolved_at);
+            return (
+              <tr key={p.id} class={`sev-${p.severity}${acknowledged ? ' is-acknowledged' : ''}`}>
+                <td class="cell-sev" aria-hidden="true" />
                 <td>
-                  <div class="problem-actions">
-                    <button
-                      type="button"
-                      class="btn"
-                      disabled={busy}
-                      aria-label={`${acknowledged ? 'Acknowledge again' : 'Acknowledge'} ${problemName(p)} on ${p.host}`}
-                      onClick={() => {
-                        onAck(p);
-                      }}
-                    >
-                      {acknowledged ? 'Acknowledge again' : 'Acknowledge'}
-                    </button>
-                    <button
-                      type="button"
-                      class="btn"
-                      disabled={busy}
-                      aria-label={`Close problem ${problemName(p)} on ${p.host}`}
-                      onClick={() => {
-                        onClose(p);
-                      }}
-                    >
-                      Close…
-                    </button>
-                  </div>
+                  <Link class="problem-host-link" href={`/hosts/${seg(p.host)}`}>
+                    {p.host}
+                  </Link>
                 </td>
-              )}
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+                <td>
+                  <ProblemTitle problem={p} />
+                  <ProblemMeta problem={p} now={now} />
+                </td>
+                <td class="problem-dashboards">
+                  <DashboardLinks
+                    list={Object.hasOwn(dashboards, p.host) ? (dashboards[p.host] ?? []) : []}
+                    state={state}
+                  />
+                </td>
+                <td>
+                  <TimeText iso={p.started_at} now={now} />
+                </td>
+                <td class="problem-end">
+                  <span class="num">{duration(p.started_at, end)}</span>
+                  {reason !== undefined && <small>{reason}</small>}
+                  {p.resolve_reason === 'closed_by_operator' &&
+                    p.close_comment !== null &&
+                    p.close_comment !== '' && <small>{p.close_comment}</small>}
+                </td>
+                {open && canAct && (
+                  <td>
+                    <div class="problem-actions">
+                      <button
+                        type="button"
+                        class="btn"
+                        disabled={busy}
+                        aria-label={`${acknowledged ? 'Acknowledge again' : 'Acknowledge'} ${problemName(p)} on ${p.host}`}
+                        onClick={() => {
+                          onAck(p);
+                        }}
+                      >
+                        {acknowledged ? 'Acknowledge again' : 'Acknowledge'}
+                      </button>
+                      <button
+                        type="button"
+                        class="btn"
+                        disabled={busy}
+                        aria-label={`Close problem ${problemName(p)} on ${p.host}`}
+                        onClick={() => {
+                          onClose(p);
+                        }}
+                      >
+                        Close…
+                      </button>
+                    </div>
+                  </td>
+                )}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

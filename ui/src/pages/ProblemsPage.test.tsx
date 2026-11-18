@@ -479,6 +479,7 @@ describe("states", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await advance(0);
     expect(screen.getByRole("table", { name: "Problems" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Problems" }).parentElement).toHaveClass("table-scroll");
   });
 
   it("shows the message of a 400 with Clear filters instead of Try again", async () => {

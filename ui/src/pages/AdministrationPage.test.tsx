@@ -179,7 +179,7 @@ describe('AdministrationPage', () => {
     expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
     expect(screen.getByText('anna')).toBeTruthy();
     expect(screen.getByText('1–50 of 120')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Next' })).toHaveAttribute('aria-disabled', 'true');
     release?.();
     await advance(0);
     await advance(0);
@@ -661,6 +661,7 @@ describe('users that are not up to date', () => {
     await open({ routes: { 'GET /users': [{ json: { items: [ME, BOB], total: 2 } }, 'network'] } });
     expect(staleNotes()).toHaveLength(0);
     await advance(10_000);
+    expect(screen.getByRole('table', { name: 'Users' }).parentElement).toHaveClass('table-scroll');
     expectStaleAbove(screen.getByRole('table', { name: 'Users' }), '14:30');
   });
 });
