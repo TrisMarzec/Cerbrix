@@ -506,3 +506,25 @@
   right: auto;
   width: max-content;
 }
+
+/* Wall page */
+
+/* "There is no dashboard named ...": not a wall, but on its dark full-screen background, centred,
+   with the link back to the desk. */
+.wall .wall-missing {
+  flex: 1 1 auto;
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--u) * 38);
+  padding: calc(var(--u) * 42);
+  font-size: var(--wall-text);
+  text-align: center;
+}
+
+.wall .wall-missing-text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}

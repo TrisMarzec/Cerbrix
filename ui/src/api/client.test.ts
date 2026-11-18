@@ -1,4 +1,13 @@
-import { api, ApiError, newSessionGeneration, onSessionDoubt, onUnauthorized, seg } from './client';
+import {
+  api,
+  ApiError,
+  newSessionGeneration,
+  onSessionDoubt,
+  onUnauthorized,
+  recordServerDate,
+  seg,
+  serverSkewMs,
+} from './client';
 import { mockFetch, type FetchMock } from '../test/mockFetch';
 
 let mock: FetchMock;
@@ -231,5 +240,25 @@ describe('server date', () => {
     mock = mockFetch({ 'GET /status': [{ json: {} }, { json: {}, headers: { Date: 'soon' } }] });
     expect((await api.getDated('/status')).serverDate).toBeUndefined();
     expect((await api.getDated('/status')).serverDate).toBeUndefined();
+  });
+
+  it('records how far the server clock is ahead from the last answer with a date, of any request', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T13:30:00.000Z'));
+    mock = mockFetch({
+      'GET /dashboards/a': { json: {}, headers: { Date: 'Tue, 17 Nov 2026 13:30:07 GMT' } },
+      'GET /hosts': [{ json: {} }, { json: {}, headers: { Date: 'soon' } }],
+      'GET /status': { json: {}, headers: { Date: 'Tue, 17 Nov 2026 13:29:58 GMT' } },
+    });
+    await api.get('/dashboards/a');
+    expect(serverSkewMs()).toBe(7000);
+    // An answer without a usable date keeps the last difference.
+    await api.get('/hosts');
+    await api.get('/hosts');
+    expect(serverSkewMs()).toBe(7000);
+    await api.get('/status');
+    expect(serverSkewMs()).toBe(-2000);
+    recordServerDate(new Date());
+    expect(serverSkewMs()).toBe(0);
   });
 });

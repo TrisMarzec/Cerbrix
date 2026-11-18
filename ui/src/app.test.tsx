@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/preact';
 import userEvent from '@testing-library/user-event';
 
 import { App } from './app';
-import { statusFixture } from './test/fixtures';
+import { dashboardDetailFixture, dashboardFixture, statusFixture } from './test/fixtures';
 import { mockFetch, type FetchMock } from './test/mockFetch';
 import { advance } from './test/timers';
 
@@ -103,6 +103,81 @@ describe('App', () => {
     expect(await screen.findByLabelText('User name')).toBeInTheDocument();
     expect(window.location.pathname).toBe('/');
     expect(screen.queryByText('Your session has ended. Log in again.')).not.toBeInTheDocument();
+  });
+});
+
+describe('App paths', () => {
+  it('shows a dashboard in wall mode at /wall/<id>, without navigation and top bar', async () => {
+    window.history.replaceState(null, '', '/wall/kunde-a');
+    mock = mockFetch({
+      'GET /session': { json: { name: 'anna', role: 'viewer' } },
+      'GET /status': { json: statusFixture() },
+      'GET /dashboards/kunde-a': { json: dashboardDetailFixture({ id: 'kunde-a', name: 'Kunde A' }) },
+    });
+    render(<App />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Kunde A' })).toBeInTheDocument();
+    expect(mock.count('GET /dashboards/kunde-a')).toBe(1);
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Log out' })).not.toBeInTheDocument();
+  });
+
+  it('shows the login page for /wall/<id> without a session, and the wall after the login', async () => {
+    window.history.replaceState(null, '', '/wall/kunde-a');
+    mock = mockFetch({
+      'GET /session': UNAUTHORIZED,
+      'POST /session': { json: { name: 'anna', role: 'viewer' } },
+      'GET /status': { json: statusFixture() },
+      'GET /dashboards/kunde-a': { json: dashboardDetailFixture({ id: 'kunde-a', name: 'Kunde A' }) },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    expect(await screen.findByLabelText('User name')).toBeInTheDocument();
+    expect(mock.count('GET /dashboards/kunde-a')).toBe(0);
+    await logIn(user);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Kunde A' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/wall/kunde-a');
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+  });
+
+  it('shows the display placeholder at /display/<id> without asking for the session', async () => {
+    window.history.replaceState(null, '', '/display/x');
+    mock = mockFetch({ 'GET /session': { json: { name: 'anna', role: 'viewer' } } });
+    const { container } = render(<App />);
+    expect(container).toHaveTextContent('Wall display x');
+    await Promise.resolve();
+    expect(mock.requests).toHaveLength(0);
+  });
+
+  it('still shows the shell for the desk pages', async () => {
+    window.history.replaceState(null, '', '/hosts');
+    mock = mockFetch({
+      'GET /session': { json: { name: 'anna', role: 'viewer' } },
+      'GET /status': { json: statusFixture() },
+      'GET /hosts': { json: { items: [], total: 0 } },
+    });
+    render(<App />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Hosts' })).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument();
+  });
+
+  it('opens a dashboard on this screen from the dashboards page, and goes back to the desk', async () => {
+    mock = mockFetch({
+      'GET /session': { json: { name: 'anna', role: 'viewer' } },
+      'GET /status': { json: statusFixture() },
+      'GET /dashboards': { json: { items: [dashboardFixture({ id: 'kunde-a', name: 'Kunde A' })] } },
+      'GET /displays': { json: { items: [] } },
+      'GET /dashboards/kunde-a': { json: dashboardDetailFixture({ id: 'kunde-a', name: 'Kunde A' }) },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('link', { name: 'Open on this screen' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Kunde A' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/wall/kunde-a');
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+    expect(mock.count('GET /session')).toBe(1);
+    await user.click(screen.getByRole('link', { name: 'Back to the desk' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Dashboards' })).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument();
   });
 });
 

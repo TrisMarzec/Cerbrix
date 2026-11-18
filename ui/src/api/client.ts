@@ -102,6 +102,21 @@ function dateOf(response: Response): Date | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
+let skewMs = 0;
+
+/**
+ * Records the server's clock from the `Date` header of an answer: how far it is ahead of the
+ * browser's. Every answer through `api` records it; code that fetches by itself calls this.
+ */
+export function recordServerDate(date: Date | undefined): void {
+  if (date !== undefined) skewMs = date.getTime() - Date.now();
+}
+
+/** How far the server's clock is ahead of the browser's, in ms, from the last dated answer; 0 before one. */
+export function serverSkewMs(): number {
+  return skewMs;
+}
+
 interface Dated<T> {
   data: T;
   /** The `Date` header of the answer; undefined when it is missing or not a date. */
@@ -146,6 +161,7 @@ async function exchange<T>(
     throw await errorFrom(response);
   }
   const serverDate = dateOf(response);
+  recordServerDate(serverDate);
   if (response.status === 204) return { data: undefined as T, serverDate };
   try {
     return { data: (await response.json()) as T, serverDate };

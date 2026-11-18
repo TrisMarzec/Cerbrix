@@ -1,6 +1,6 @@
 import './DashboardsPage.css';
 
-import { api } from '../api/client';
+import { api, seg } from '../api/client';
 import type { DashboardSummary, Display, HostsByState, Severity } from '../api/types';
 import { Banner } from '../components/Banner';
 import { Empty } from '../components/Empty';
@@ -114,6 +114,7 @@ function DashboardTable({ items }: { items: DashboardSummary[] }) {
             <th scope="col" class="right">
               Priority
             </th>
+            <th scope="col">Wall</th>
           </tr>
         </thead>
         <tbody>
@@ -135,6 +136,9 @@ function DashboardTable({ items }: { items: DashboardSummary[] }) {
                 <ProblemsInWords dashboard={d} />
               </td>
               <td class="right num">{d.priority}</td>
+              <td>
+                <Link href={`/wall/${seg(d.id)}`}>Open on this screen</Link>
+              </td>
             </tr>
           ))}
         </tbody>
