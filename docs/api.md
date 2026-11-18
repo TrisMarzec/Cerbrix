@@ -173,6 +173,10 @@ creates for that one display.
   and the sync state of the configuration as `/api/v1/status` shows it. That includes the issues
   of a failed synchronisation, with the file names, positions and reasons, because the wall shows
   "out of sync" with them. Whoever holds the token of a display can read these.
+- What a token cannot read: who acknowledged or closed a problem, and their comments. In the
+  answer of the dashboard route for a token, `acknowledged_by`, `ack_comment`, `closed_by` and
+  `close_comment` of every problem are `null`; `acknowledged_at` is there, so the wall still
+  shows a problem as acknowledged. A logged-in user gets the full answer on the same route.
 - When a display leaves the configuration (its file is removed from the repository and the
   change is applied), its token is removed with it.
 - A token can only be created for a display that is in the active configuration. If an
@@ -516,6 +520,7 @@ this display in `Authorization: Bearer <token>`.
 | `id`, `name` | The display. |
 | `show`, `switch_on_alarm` | Its setting from the configuration. |
 | `allowed` | The dashboards the display may ever show: those in `show`, plus, with `switch_on_alarm`, those in `dashboards` (all dashboards if it has no list). |
+| `names` | The name of each dashboard in `allowed` that exists, by id: `{"<id>": "<name>"}`. A dashboard in `allowed` that is not in the configuration has no entry. |
 | `target` | The dashboard to show because of an alarm, or `null` to follow `show`. An alarm is an open problem nobody has acknowledged, at or above `min_severity`, on a host of the dashboard. The dashboard with the highest `priority` wins, then the most urgent alarm. |
 | `causes` | The ids of the alarms of `target`, most urgent first. |
 | `waiting` | The other dashboards that have an alarm, in the order the display would take them. |
@@ -526,7 +531,7 @@ curl -sS -H @display.header http://127.0.0.1:18443/api/v1/display/e2e-wall
 ```
 
 ```json
-{"id":"e2e-wall","name":"E2E wall","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"allowed":["e2e"],"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"sync":{"status":"in_sync","active_commit":"253a2994b13aca387e272ff08db9eb858b436b66","last_success_at":"2026-11-16T21:54:32.810398Z","last_attempt_at":"2026-11-16T21:54:50.503921Z","issues":[]}}
+{"id":"e2e-wall","name":"E2E wall","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"allowed":["e2e"],"names":{"e2e":"E2E"},"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"sync":{"status":"in_sync","active_commit":"253a2994b13aca387e272ff08db9eb858b436b66","last_success_at":"2026-11-16T21:54:32.810398Z","last_attempt_at":"2026-11-16T21:54:50.503921Z","issues":[]}}
 ```
 
 (`display.header` is a file with the one line `Authorization: Bearer <token>`.) Poll every 5 to
@@ -540,6 +545,10 @@ for a logged-in user (a token of a display that does not exist is `401`). Then i
 dashboard against `allowed`: any dashboard that is not in `allowed`, one that does not exist
 included, is `403 forbidden`. `404` comes only when `allowed` names a dashboard that no longer
 exists (for example a display that shows a dashboard whose file was removed).
+
+For a request with the display's token, every problem in the answer has `acknowledged_by`,
+`ack_comment`, `closed_by` and `close_comment` set to `null` (see [Display tokens](#display-tokens));
+everything else, `acknowledged_at` included, is as for a logged-in user.
 
 ```json
 {"error":"forbidden","message":"this display may not show that dashboard"}
