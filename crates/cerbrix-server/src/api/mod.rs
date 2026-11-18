@@ -80,6 +80,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/agent/v1/config", get(agent::config))
         .with_state(state.clone())
         .merge(ui::router(state))
+        // Last: a fallback that answers pages and never claims an API path.
+        .merge(crate::webui::router())
 }
 
 /// An error answer: a status plus an `ErrorBody` with a stable code.

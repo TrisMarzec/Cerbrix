@@ -28,3 +28,9 @@ rustc-ice-*.txt
 
 # Operator configuration with real credentials
 deploy/server.env
+
+# Web UI: installed packages and build output
+ui/node_modules
+ui/dist/*
+!ui/dist/.gitkeep
+ui/dist.tmp

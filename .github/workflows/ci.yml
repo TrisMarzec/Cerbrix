@@ -44,6 +44,29 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install
+        working-directory: ui
+        run: npm ci
+      - name: Type check and test
+        working-directory: ui
+        run: npm run check
+      - name: Build
+        working-directory: ui
+        run: npm run build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: The server embeds the real UI
+        run: cargo test -p cerbrix-server webui::tests::ui_is_embedded -- --ignored
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:
@@ -53,6 +76,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

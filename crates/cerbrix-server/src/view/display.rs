@@ -210,6 +210,22 @@ mod tests {
         assert_eq!(t.waiting, strings(&["a"]));
     }
 
+    /// The open problems list shows the newest problem first; the alarm target is the other
+    /// way round: of two equally severe alarms the older one wins.
+    #[test]
+    fn alarm_target_still_prefers_the_older_alarm() {
+        let i = inputs(
+            &[("new", 5, "gn"), ("old", 5, "go")],
+            vec![
+                host("h1", &["gn"], vec![problem(Severity::High, 10, false)]),
+                host("h2", &["go"], vec![problem(Severity::High, 500, false)]),
+            ],
+        );
+        let t = alarm_target(&switching("high"), &i);
+        assert_eq!(t.target.as_deref(), Some("old"));
+        assert_eq!(t.waiting, strings(&["new"]));
+    }
+
     #[test]
     fn tie_goes_to_more_severe_then_older() {
         let i = inputs(

@@ -1,0 +1,16 @@
+/* The twelve colours of the visual language (concept section 7). No other file holds a colour literal. */
+:root {
+  color-scheme: dark;
+  --bg: #10293b;
+  --panel: #173549;
+  --raised: #1d4059;
+  --line: #2a4d63;
+  --text: #eaf1f4;
+  --dim: #9db4c0;
+  --critical: #ff6352;
+  --high: #ff9447;
+  --warning: #f5b83d;
+  --healthy-square: #2f6f6a;
+  --healthy-text: #6fcbb8;
+  --git: #8ed4ea;
+}

@@ -23,8 +23,18 @@
 # and body are printed with tokens masked; the admin password and the display token are never
 # printed.
 #
+# Last, a smoke run in a real browser (Chromium, Playwright) walks through the web UI: login,
+# the pages, acknowledging the open problem, a display token, logout. It runs in the Playwright
+# Docker image (the version of @playwright/test in ui/package-lock.json) on the network of the
+# stack and talks to the server by its service name, so Docker is all it needs. The admin
+# password reaches it as a read-only file under this script's private work directory. The spec
+# never hands the password to Playwright's `fill` (whose error log echoes the value), and on a
+# failure the output is printed with tokens and the exact password masked. It leaves an
+# acknowledged problem behind and nothing else is checked afterwards.
+#
 # Environment variables (defaults in parentheses):
-#   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e)
+#   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e); lower-cased, because compose
+#                             lower-cases it for the network name the smoke run joins
 #   CERBRIX_SERVER_PORT       host port of the server (18443)
 #   CERBRIX_VM_PORT           host port of VictoriaMetrics (18428)
 #   CERBRIX_E2E_TIMEOUT       seconds to wait for both series (120)
@@ -33,12 +43,16 @@
 #   CERBRIX_E2E_ALERT_TIMEOUT seconds to wait for a problem or an e-mail (120)
 #   CERBRIX_E2E_NODATA_TIMEOUT seconds to wait for the no-data problem after the agent stopped (240)
 #   CERBRIX_E2E_KEEP_STACK    set to 1 to leave the stack running (for debugging)
+#   CERBRIX_E2E_SKIP_UI       set to 1 to skip the browser smoke run (it pulls a large image)
+#   CERBRIX_UI_SMOKE_FAIL     1 makes the smoke run fail on purpose in its first step, login
+#                             makes its login fail after the password was typed; to see how a
+#                             failure is reported and that the password is masked (passed on)
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 ROOT=$(pwd)
 
-PROJECT=${CERBRIX_E2E_PROJECT:-cerbrix-e2e}
+PROJECT=$(printf '%s' "${CERBRIX_E2E_PROJECT:-cerbrix-e2e}" | tr '[:upper:]' '[:lower:]')
 export CERBRIX_SERVER_PORT=${CERBRIX_SERVER_PORT:-18443}
 export CERBRIX_VM_PORT=${CERBRIX_VM_PORT:-18428}
 TIMEOUT=${CERBRIX_E2E_TIMEOUT:-120}
@@ -150,6 +164,18 @@ LAST_STATUS=""
 LAST_BODY=""
 # Masks session and display tokens in the text on standard input.
 mask_tokens() { sed -E 's/cbx_(se|dt|ek|ac)_[A-Za-z0-9_-]+/cbx_\1_<masked>/g'; }
+# Masks the exact admin password as well, in the text on standard input. The password is read
+# from its file into a variable with a shell builtin (never onto a command line) and replaced
+# with bash string replacement; the text is kept in a variable, so nothing is printed before.
+mask_secrets() {
+    local text secret=""
+    text=$(mask_tokens)
+    [ ! -f "$WORK/ui-password" ] || secret=$(<"$WORK/ui-password")
+    if [ -n "$secret" ]; then
+        text=${text//"$secret"/'<masked password>'}
+    fi
+    printf '%s\n' "$text"
+}
 
 cleanup() {
     status=$?
@@ -518,6 +544,8 @@ ADMIN_OUTPUT=$(compose exec -T server cerbrix-server admin user create e2e-admin
 ADMIN_PASSWORD=$(printf '%s\n' "$ADMIN_OUTPUT" | tr -d '\r' | sed -n 's/^password: //p')
 unset ADMIN_OUTPUT
 [ -n "$ADMIN_PASSWORD" ] || fail "no password found in the output of admin user create"
+# Kept in a file (private work directory) for the browser smoke run at the end.
+(umask 077 && printf '%s' "$ADMIN_PASSWORD" >"$WORK/ui-password")
 login "$ADMIN_JAR" e2e-admin "$ADMIN_PASSWORD"
 unset ADMIN_PASSWORD
 expect_status 200
@@ -645,4 +673,56 @@ expect_status 401
 rm -f "$ADMIN_JAR" "$VIEWER_JAR" "$WORK/admin.cookies.old" "$WORK/display.header" "$WORK/api.body"
 LAST_REQUEST=""
 
-echo "e2e: OK: configuration from Git, values kept arriving, problems opened and resolved with their e-mails, acknowledgement, no-data problem after the agent stopped, no duplicate message, API walk-through (login, status, hosts, series, problems, dashboard, display token, access rules)"
+# --- The web UI in a browser ------------------------------------------------------------
+# Runs ui/e2e/smoke.spec.ts in the Playwright image of the version that package-lock.json
+# pins. The container joins the compose network and addresses the server by its service
+# name. ui/ is mounted read-only; the few files that are needed are copied to /tmp/smoke in
+# the container, where @playwright/test is installed at the pinned version (nothing else of
+# the UI's dependencies is needed). Only the admin's name and the file with its password
+# are handed over. MSYS_NO_PATHCONV keeps Git Bash from rewriting the container paths.
+run_ui_smoke() {
+    local version image network
+    version=$(awk '/"node_modules\/@playwright\/test": \{/ { f = 1 } f && /"version"/ { gsub(/[",]/, "", $2); print $2; exit }' ui/package-lock.json)
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "no @playwright/test version found in ui/package-lock.json"
+    image="mcr.microsoft.com/playwright:v$version-noble"
+    network="${PROJECT}_default"
+    docker network inspect "$network" >/dev/null 2>&1 || fail "the compose network $network does not exist"
+
+    echo "e2e: UI: browser smoke run with Playwright $version ($image)"
+    docker pull -q "$image" >/dev/null || fail "cannot pull $image"
+    # shellcheck disable=SC2016 # the variable is expanded by the shell in the container
+    local inner='set -eu
+mkdir -p /tmp/smoke/e2e
+cp /ui/playwright.config.ts /tmp/smoke/
+cp /ui/e2e/smoke.spec.ts /tmp/smoke/e2e/
+cd /tmp/smoke
+printf "{\"private\":true}\n" > package.json
+npm install --no-save --ignore-scripts --no-audit --no-fund --cache /tmp/npm-cache "@playwright/test@$PLAYWRIGHT_VERSION"
+npx playwright test'
+    if MSYS_NO_PATHCONV=1 docker run --rm --init --ipc=host --network "$network" \
+        -v "$(native_path "$ROOT/ui"):/ui:ro" \
+        -v "$(native_path "$WORK/ui-password"):/run/ui-password:ro" \
+        -e PLAYWRIGHT_VERSION="$version" \
+        -e CERBRIX_UI_URL="http://server:8443" \
+        -e CERBRIX_UI_USER=e2e-admin \
+        -e CERBRIX_UI_PASSWORD_FILE=/run/ui-password \
+        -e CERBRIX_UI_SMOKE_FAIL="${CERBRIX_UI_SMOKE_FAIL:-0}" \
+        -e CI=1 \
+        "$image" sh -c "$inner" >"$WORK/ui-smoke.log" 2>&1; then
+        mask_secrets <"$WORK/ui-smoke.log" >&2
+    else
+        echo "e2e: UI: output of the browser smoke run:" >&2
+        mask_secrets <"$WORK/ui-smoke.log" >&2
+        fail "the browser smoke run failed"
+    fi
+}
+
+if [ "${CERBRIX_E2E_SKIP_UI:-0}" = 1 ]; then
+    UI_NOTE="browser smoke run skipped"
+else
+    echo "e2e: the web UI in a browser"
+    run_ui_smoke
+    UI_NOTE="web UI smoke run in a browser (login, pages, acknowledge, display token, logout)"
+fi
+
+echo "e2e: OK: configuration from Git, values kept arriving, problems opened and resolved with their e-mails, acknowledgement, no-data problem after the agent stopped, no duplicate message, API walk-through (login, status, hosts, series, problems, dashboard, display token, access rules), $UI_NOTE"

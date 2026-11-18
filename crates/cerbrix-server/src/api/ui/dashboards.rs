@@ -664,15 +664,15 @@ mod tests {
         let problems = panel["problems"].as_array().unwrap();
         assert_eq!(problems.len(), 100);
         assert_eq!(panel["more"], 30);
-        // 65 high ones come first (oldest first), then the info ones.
+        // 65 high ones come first (newest first), then the info ones.
         assert!(problems[..65].iter().all(|p| p["severity"] == "high"));
         assert!(problems[65..].iter().all(|p| p["severity"] == "info"));
         let started: Vec<_> = problems[..65]
             .iter()
             .map(|p| p["started_at"].as_str().unwrap())
             .collect();
-        assert!(started.windows(2).all(|w| w[0] <= w[1]), "oldest first");
-        assert_eq!(problems[0]["trigger"], "T130");
+        assert!(started.windows(2).all(|w| w[0] >= w[1]), "newest first");
+        assert_eq!(problems[0]["trigger"], "T2");
         // The same shape as everywhere: fifteen keys.
         assert_eq!(problems[0].as_object().unwrap().len(), 15);
         assert_eq!(body["panels"][1]["hosts"][0]["state"]["open_problems"], 130);

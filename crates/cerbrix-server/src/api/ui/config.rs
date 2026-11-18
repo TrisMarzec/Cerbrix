@@ -740,6 +740,16 @@ mod tests {
             .call("POST", "/api/agent/v1/enroll", None, &[], Some(&enrol))
             .await;
         assert_eq!(first.status, StatusCode::OK);
+        let version = || async {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT agent_version FROM hosts WHERE name = $1",
+            )
+            .bind(fx.host)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(version().await.as_deref(), Some("0.1.0"));
         let again = fx
             .call("POST", "/api/agent/v1/enroll", None, &[], Some(&enrol))
             .await;
@@ -749,6 +759,8 @@ mod tests {
         let uri = format!("/api/v1/hosts/{}/release", fx.host);
         let reply = fx.call("POST", &uri, Some(&token), &[], Some("{}")).await;
         assert_eq!(reply.status, StatusCode::NO_CONTENT);
+        // The page must not show the previous agent's version.
+        assert_eq!(version().await, None);
         let again = fx
             .call("POST", "/api/agent/v1/enroll", None, &[], Some(&enrol))
             .await;

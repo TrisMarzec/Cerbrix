@@ -1,0 +1,98 @@
+.config-section {
+  margin-top: 28px;
+}
+
+.config-section h2 {
+  margin-bottom: 10px;
+}
+
+.config-note {
+  color: var(--dim);
+  margin-bottom: 10px;
+}
+
+.config-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 20px;
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.config-facts dt {
+  color: var(--dim);
+}
+
+.config-facts dd {
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.config-state-in-sync {
+  color: var(--git);
+}
+
+.config-state-out-of-sync {
+  color: var(--warning);
+}
+
+.config-commit {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-commit code,
+.config-code {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  overflow-wrap: break-word;
+}
+
+.config-issues {
+  margin-top: 12px;
+}
+
+.config-table td,
+.config-table th {
+  overflow-wrap: break-word;
+}
+
+.config-table .right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.config-table .config-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.config-table .config-actions .btn + .btn {
+  margin-left: 8px;
+}
+
+.config-names {
+  margin-top: 10px;
+  color: var(--dim);
+}
+
+.config-names summary {
+  cursor: pointer;
+}
+
+.config-names ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.config-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.config-dim-row {
+  color: var(--dim);
+}

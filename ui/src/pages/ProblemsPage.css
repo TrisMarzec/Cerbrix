@@ -1,0 +1,72 @@
+.problems-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.problems-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+  margin-bottom: 14px;
+}
+
+.problems-tools label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--dim);
+  font-size: 14px;
+}
+
+.problems-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  overflow-wrap: break-word;
+}
+
+.problems-table .cell-sev {
+  padding: 0;
+  width: 6px;
+  background: var(--sev);
+}
+
+.problems-table tr.is-acknowledged .problem-main {
+  color: var(--dim);
+}
+
+/* The host name in the severity colour (concept section 7); still a link. */
+.problems-table .problem-host-link {
+  color: var(--sev);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.problems-table .problem-host-link:hover,
+.problems-table .problem-host-link:focus-visible {
+  text-decoration: underline;
+}
+
+.problems-table .problem-host-link,
+.problems-table .problem-dashboards,
+.problems-table .problem-end small {
+  overflow-wrap: break-word;
+}
+
+.problems-table .problem-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.problems-total {
+  margin-top: 10px;
+  color: var(--dim);
+}

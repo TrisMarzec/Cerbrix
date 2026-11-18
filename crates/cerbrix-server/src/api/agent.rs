@@ -109,6 +109,7 @@ fn bearer_token(header_value: &str) -> Option<&str> {
 pub(super) async fn values(
     State(app): State<AppState>,
     AuthedHost(host): AuthedHost,
+    headers: HeaderMap,
     body: Body,
 ) -> Result<(StatusCode, Json<IngestResponse>), ApiError> {
     let batch: ValueBatch = read_json(body, app.config.ingest.max_body_bytes).await?;
@@ -156,9 +157,21 @@ pub(super) async fn values(
                 return Err(ApiError::internal());
             }
         }
-        evaluate_arrival(&app, &host, &accepted, now_ms).await?;
+        let user_agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok());
+        let version = user_agent.and_then(agent_version_from_user_agent);
+        evaluate_arrival(&app, &host, &accepted, now_ms, version).await?;
     }
     Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+/// The version in a `User-Agent` of the form `cerbrix-agent/<version>`; a header of any other
+/// form, or with a version that is not valid (see `crate::enroll::valid_agent_version`), names
+/// no version.
+fn agent_version_from_user_agent(user_agent: &str) -> Option<&str> {
+    let version = user_agent.strip_prefix("cerbrix-agent/")?;
+    crate::enroll::valid_agent_version(version).then_some(version)
 }
 
 /// Evaluates the triggers of `host` against the stored values and records the arrival.
@@ -169,6 +182,7 @@ async fn evaluate_arrival(
     host: &Host,
     accepted: &[MetricValue],
     now_ms: i64,
+    agent_version: Option<&str>,
 ) -> Result<(), ApiError> {
     let max_age_ms = i64::try_from(app.config.alerting.max_value_age_secs.saturating_mul(1000))
         .unwrap_or(i64::MAX);
@@ -187,7 +201,11 @@ async fn evaluate_arrival(
         .await;
     let arrived = OffsetDateTime::now_utc();
     let recorded = match evaluated {
-        Ok(_) => app.store.touch_seen(host.id, arrived, &series).await,
+        Ok(_) => {
+            app.store
+                .touch_seen_versioned(host.id, arrived, &series, agent_version)
+                .await
+        }
         Err(e) => Err(e),
     };
     if let Err(e) = recorded {
@@ -499,6 +517,108 @@ mod tests {
         assert_eq!(bearer_token("Basic abc"), None);
         assert_eq!(bearer_token("Bearer "), None);
         assert_eq!(bearer_token("abc"), None);
+    }
+
+    #[test]
+    fn agent_version_is_read_from_the_user_agent() {
+        assert_eq!(
+            agent_version_from_user_agent("cerbrix-agent/1.2.3"),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            agent_version_from_user_agent("cerbrix-agent/0.1.0-rc.1+b5"),
+            Some("0.1.0-rc.1+b5")
+        );
+        let longest = format!("cerbrix-agent/{}", "1".repeat(64));
+        assert_eq!(
+            agent_version_from_user_agent(&longest),
+            Some(&longest[14..])
+        );
+        for bad in [
+            "",
+            "cerbrix-agent/",
+            "curl/8.0",
+            "Cerbrix-Agent/1.2.3",
+            "cerbrix-agent/1.2.3 extra",
+            "cerbrix-agent/1 2",
+            "cerbrix-agent/1.2.3
+",
+            "cerbrix-agent/ä",
+            "prefix cerbrix-agent/1.2.3",
+        ] {
+            assert_eq!(agent_version_from_user_agent(bad), None, "{bad:?}");
+        }
+        let too_long = format!("cerbrix-agent/{}", "1".repeat(65));
+        assert_eq!(agent_version_from_user_agent(&too_long), None);
+    }
+
+    async fn post_values_as(
+        router: &Router,
+        credential: &str,
+        user_agent: Option<&str>,
+    ) -> StatusCode {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/agent/v1/values")
+            .header(header::AUTHORIZATION, format!("Bearer {credential}"));
+        if let Some(ua) = user_agent {
+            req = req.header(header::USER_AGENT, ua);
+        }
+        let body = serde_json::to_vec(&batch(vec![value("cpu.usage", now_ms())])).unwrap();
+        router
+            .clone()
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn stored_version(pool: &PgPool) -> Option<String> {
+        sqlx::query_scalar("SELECT agent_version FROM hosts WHERE name = 'web-01'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn values_take_the_version_from_the_user_agent(pool: PgPool) {
+        let (router, _, store) = app(pool.clone());
+        let cred = enrolled(&router, &store, "web-01").await;
+        // The version of the enrolment request is stored at enrolment.
+        assert_eq!(stored_version(&pool).await.as_deref(), Some("0.1.0"));
+        let status = post_values_as(&router, &cred, Some("cerbrix-agent/1.2.3")).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(stored_version(&pool).await.as_deref(), Some("1.2.3"));
+        // A header that names no version is accepted and leaves the stored one alone.
+        let too_long = format!("cerbrix-agent/{}", "9".repeat(65));
+        for ua in [
+            None,
+            Some("curl/8.0"),
+            Some("cerbrix-agent/"),
+            Some(&*too_long),
+        ] {
+            assert_eq!(
+                post_values_as(&router, &cred, ua).await,
+                StatusCode::ACCEPTED
+            );
+            assert_eq!(stored_version(&pool).await.as_deref(), Some("1.2.3"));
+        }
+        let status = post_values_as(&router, &cred, Some("cerbrix-agent/1.3.0")).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(stored_version(&pool).await.as_deref(), Some("1.3.0"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_missing_or_malformed_user_agent_leaves_the_enrolment_version(pool: PgPool) {
+        let (router, _, store) = app(pool.clone());
+        let cred = enrolled(&router, &store, "web-01").await;
+        for ua in [None, Some("cerbrix-agent/1.2 3"), Some("curl/8.0")] {
+            assert_eq!(
+                post_values_as(&router, &cred, ua).await,
+                StatusCode::ACCEPTED
+            );
+        }
+        assert_eq!(stored_version(&pool).await.as_deref(), Some("0.1.0"));
     }
 
     #[sqlx::test(migrations = "./migrations")]

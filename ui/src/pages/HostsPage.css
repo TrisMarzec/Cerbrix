@@ -1,0 +1,35 @@
+.hosts-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 16px;
+  margin-bottom: 14px;
+}
+
+.hosts-tools label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--dim);
+  font-size: 14px;
+}
+
+.hosts-table .cell-sev {
+  padding: 0;
+  width: 6px;
+}
+
+.hosts-table tr.is-problem .cell-sev {
+  background: var(--sev);
+}
+
+.hosts-table .host-name,
+.hosts-table .host-address,
+.hosts-table .host-groups {
+  overflow-wrap: break-word;
+}
+
+.hosts-total {
+  margin-top: 10px;
+  color: var(--dim);
+}

@@ -20,6 +20,7 @@ use crate::auth::Viewer;
 use crate::gitops::{EffectiveHost, EffectiveItem, EffectiveTrigger};
 use crate::metrics::{LatestQuery, MetricsError, MetricsStore};
 use crate::state::{HostDetail, HostQuery, HostStateFilter, Problem, StateError};
+use crate::view::dashboard::{DashboardRef, dashboards_of_hosts};
 use crate::view::series::{
     CURRENT_VALUE_MAX_AGE_SECS, Threshold, bounded, log_metrics_failure, ms_to_rfc3339,
     range_query, thresholds,
@@ -229,6 +230,10 @@ struct DetailOut {
     enrolled_at: Option<OffsetDateTime>,
     #[serde(serialize_with = "serialize_time_opt")]
     last_seen_at: Option<OffsetDateTime>,
+    /// The version the agent reported in its last request that carried one.
+    agent_version: Option<String>,
+    /// The dashboards that select this host, sorted by name.
+    dashboards: Vec<DashboardRef>,
     state: Option<HostState>,
     items: Vec<EffectiveItem>,
     triggers: Vec<TriggerOut>,
@@ -249,6 +254,7 @@ async fn detail(
         row,
         config,
         enrolled_at,
+        agent_version,
         firing,
     } = app
         .store
@@ -256,6 +262,15 @@ async fn detail(
         .await
         .map_err(|e| store_failed("reading a host failed", &e))?
         .ok_or_else(not_found)?;
+    // Membership is decided by `selected_hosts` alone, on this one host.
+    let dashboards = app
+        .store
+        .dashboards()
+        .await
+        .map_err(|e| store_failed("reading dashboards failed", &e))?;
+    let dashboards = dashboards_of_hosts(&dashboards, std::slice::from_ref(&row))
+        .remove(&row.name)
+        .unwrap_or_default();
     // A host created by hand has no stored configuration: nothing is configured.
     let config = config.unwrap_or(EffectiveHost {
         templates: Vec::new(),
@@ -272,6 +287,8 @@ async fn detail(
         managed_by_git: app.config.gitops.enabled,
         enrolled_at,
         last_seen_at: row.last_seen_at,
+        agent_version,
+        dashboards,
         items: config.items,
         triggers: config
             .triggers
@@ -713,6 +730,8 @@ mod tests {
             keys(&body),
             [
                 "address",
+                "agent_version",
+                "dashboards",
                 "enrolled_at",
                 "groups",
                 "items",
@@ -803,13 +822,78 @@ mod tests {
         );
     }
 
+    async fn add_dashboard(fx: &Fixture, id: &str, body: &str) {
+        sqlx::query(
+            "INSERT INTO config_documents (kind, id, source_file, body) VALUES ('dashboard', $1, $2, $3::jsonb)",
+        )
+        .bind(id)
+        .bind(format!("dashboards/{id}.json"))
+        .bind(body)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn host_detail_has_agent_version_and_dashboards(pool: PgPool) {
+        let fx = Fixture::new(pool.clone()).await;
+        fx.store.create_host("lonely").await.unwrap();
+        sqlx::query(
+            "UPDATE hosts SET groups = ARRAY['prod'], agent_version = '1.2.3' WHERE name = $1",
+        )
+        .bind(fx.host)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Sorted by name, not by id; one selects by group, one by name, one not at all.
+        add_dashboard(
+            &fx,
+            "a-last",
+            r#"{"name":"Zulu","hosts":{"groups":["prod"]}}"#,
+        )
+        .await;
+        add_dashboard(
+            &fx,
+            "z-first",
+            r#"{"name":"Alpha","hosts":{"names":["fixture-host"]}}"#,
+        )
+        .await;
+        add_dashboard(
+            &fx,
+            "other",
+            r#"{"name":"Other","hosts":{"groups":["dev"]}}"#,
+        )
+        .await;
+
+        let body = get(&fx, "/api/v1/hosts/fixture-host").await.json();
+        assert_eq!(body["agent_version"], "1.2.3");
+        assert_eq!(
+            body["dashboards"],
+            json!([
+                {"id": "z-first", "name": "Alpha"},
+                {"id": "a-last", "name": "Zulu"}
+            ])
+        );
+
+        let body = get(&fx, "/api/v1/hosts/lonely").await.json();
+        assert!(body["agent_version"].is_null());
+        assert_eq!(body["dashboards"], json!([]));
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn host_without_configuration_has_empty_lists(pool: PgPool) {
         let fx = Fixture::new(pool).await;
         let reply = get(&fx, "/api/v1/hosts/fixture-host").await;
         assert_eq!(reply.status, StatusCode::OK);
         let body = reply.json();
-        for key in ["templates", "items", "triggers", "open_problems", "groups"] {
+        for key in [
+            "templates",
+            "items",
+            "triggers",
+            "open_problems",
+            "groups",
+            "dashboards",
+        ] {
             assert_eq!(body[key], json!([]), "{key}");
         }
         for key in [
@@ -817,6 +901,7 @@ mod tests {
             "source_file",
             "enrolled_at",
             "last_seen_at",
+            "agent_version",
             "state",
         ] {
             assert!(body[key].is_null(), "{key}");

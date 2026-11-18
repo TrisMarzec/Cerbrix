@@ -3,7 +3,7 @@
 //! same rule as in the hosts list.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use cerbrix_common::DashboardFile;
 use cerbrix_common::config::Severity;
@@ -205,14 +205,47 @@ pub fn host_entries<'a>(hosts: &[&'a HostRow]) -> Vec<HostEntry<'a>> {
         .collect()
 }
 
-/// The open problems of `hosts`: unacknowledged first, most severe first, oldest first.
+/// A dashboard as a host's detail and the problems list name it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DashboardRef {
+    pub id: String,
+    pub name: String,
+}
+
+/// The dashboards each of `hosts` belongs to, sorted by name then id; every host is a key,
+/// with an empty list when it is in no dashboard. Membership is [`selected_hosts`].
+pub fn dashboards_of_hosts(
+    dashboards: &[(String, String, DashboardFile)],
+    hosts: &[HostRow],
+) -> BTreeMap<String, Vec<DashboardRef>> {
+    let mut of: BTreeMap<String, Vec<DashboardRef>> =
+        hosts.iter().map(|h| (h.name.clone(), Vec::new())).collect();
+    for (id, _, dashboard) in dashboards {
+        for host in selected_hosts(dashboard, hosts) {
+            if let Some(list) = of.get_mut(&host.name) {
+                list.push(DashboardRef {
+                    id: id.clone(),
+                    name: dashboard.name.clone(),
+                });
+            }
+        }
+    }
+    for list in of.values_mut() {
+        list.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+    }
+    of
+}
+
+/// The open problems of `hosts`: unacknowledged first, most severe first, newest first, then
+/// id. The same order as the open problems list (`problems_page`). It is not [`urgency`],
+/// where the older alarm wins.
 pub fn open_problems<'a>(hosts: &[&'a HostRow]) -> Vec<&'a Problem> {
     let mut problems: Vec<&Problem> = hosts.iter().flat_map(|h| h.open.iter()).collect();
     problems.sort_by_key(|p| {
         (
             p.acknowledged_at.is_some(),
             Reverse(p.severity),
-            p.started_at,
+            Reverse(p.started_at),
             p.id,
         )
     });
@@ -552,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_problems_are_unacknowledged_first_then_severe_then_old() {
+    fn open_problems_are_newest_first_within_a_severity() {
         let hosts = [
             host(
                 "a",
@@ -579,7 +612,7 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            ["crit", "old-high", "new-high", "acked-crit", "acked-info"]
+            ["crit", "new-high", "old-high", "acked-crit", "acked-info"]
         );
     }
 

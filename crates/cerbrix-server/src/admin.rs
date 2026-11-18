@@ -781,11 +781,27 @@ mod tests {
         assert!(format!("{err:#}").contains("web-01"), "{err:#}");
     }
 
+    async fn agent_version_of(pool: &PgPool, host: Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT agent_version FROM hosts WHERE id = $1")
+            .bind(host)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn host_release_unbinds_and_unknown_host_errors(pool: PgPool) {
-        let store = StateStore::from_pool(pool);
+        let store = StateStore::from_pool(pool.clone());
         let host = store.create_host("web-01").await.unwrap();
         let cred = store.bind_credential(host.id).await.unwrap();
+        store
+            .set_agent_version(host.id, Some("1.2.3"))
+            .await
+            .unwrap();
+        assert_eq!(
+            agent_version_of(&pool, host.id).await.as_deref(),
+            Some("1.2.3")
+        );
         let release = |name: &str| {
             AdminCommand::Host(HostCommand::Release {
                 name: name.to_owned(),
@@ -794,6 +810,7 @@ mod tests {
         run(&store, release("web-01"), now(), &cfg(false))
             .await
             .unwrap();
+        assert_eq!(agent_version_of(&pool, host.id).await, None);
         assert!(store.host_for_credential(&cred).await.unwrap().is_none());
         let err = run(&store, release("nope"), now(), &cfg(false))
             .await

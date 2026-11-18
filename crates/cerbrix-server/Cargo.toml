@@ -3,6 +3,7 @@ name = "cerbrix-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [lints]
 workspace = true
@@ -46,3 +47,6 @@ wiremock.workspace = true
 
 [features]
 test-util = []
+
+[build-dependencies]
+sha2 = "0.11.1"

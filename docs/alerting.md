@@ -7,9 +7,8 @@ the server does with it, and what you see.
 
 What is not there yet, so that you do not look for it:
 
-- There is **no web interface and no HTTP API for problems**. You list, acknowledge and close
-  problems with `cerbrix-server admin problem ...` commands. The interface comes with the
-  next milestone (M4).
+- Problems are listed, acknowledged and closed in the [web UI](web-ui.md), through the
+  [API](api.md) and with `cerbrix-server admin problem ...` commands.
 - **E-mail is the only channel.** No chat, SMS or webhook.
 - E-mails are **plain text in English**, with times in **UTC**.
 - A host whose clock is badly wrong is not alarmed about; the server only writes a warning to

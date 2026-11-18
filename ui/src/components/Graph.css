@@ -1,0 +1,45 @@
+.graph-canvas {
+  width: 100%;
+  overflow: hidden;
+}
+
+.graph-canvas .uplot {
+  width: 100%;
+}
+
+/* uPlot's own stylesheet draws the crosshair in a fixed colour: take ours. */
+.graph-canvas .u-hz .u-cursor-x,
+.graph-canvas .u-vt .u-cursor-y {
+  border-color: var(--dim);
+}
+
+.graph-canvas .u-hz .u-cursor-y,
+.graph-canvas .u-vt .u-cursor-x {
+  border-color: var(--dim);
+}
+
+.graph-readout {
+  min-height: 1.45em;
+  color: var(--dim);
+  font-size: 14px;
+}
+
+.graph-empty {
+  color: var(--dim);
+  padding: 18px 4px;
+}
+
+.graph-limits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 16px;
+  list-style: none;
+  padding: 0;
+  font-size: 14px;
+  color: var(--dim);
+}
+
+.graph-limit-severity {
+  color: var(--sev);
+  font-weight: 600;
+}

@@ -3,3 +3,6 @@ target/
 .superpowers/
 docs/
 deploy/server.env
+ui/node_modules
+ui/dist
+ui/dist.tmp
