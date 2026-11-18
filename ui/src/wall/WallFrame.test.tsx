@@ -88,9 +88,17 @@ describe('WallFrame header', () => {
     expect(bands(container)).toHaveLength(0);
   });
 
-  it('is a status region', () => {
+  it('is a plain header whose only live region is the sync or connection state', () => {
     const { container } = show({ sync: sync() });
-    expect(container.querySelector('.wall-header')).toHaveAttribute('role', 'status');
+    const header = container.querySelector('header.wall-header');
+    expect(header).not.toBeNull();
+    expect(header).not.toHaveAttribute('role');
+    const live = header?.querySelectorAll('[role="status"]') ?? [];
+    expect(live).toHaveLength(1);
+    expect(live[0]).toHaveTextContent(/^In sync$/);
+    // Neither the clock nor the title is inside a live region.
+    expect(container.querySelector('time.wall-clock')?.closest('[role="status"]')).toBeNull();
+    expect(screen.getByRole('heading', { level: 1 }).closest('[role="status"]')).toBeNull();
   });
 });
 
@@ -190,12 +198,24 @@ describe('WallFrame without connection', () => {
     expect(lost).toHaveTextContent('No connection to the server since 14:29');
     expect(lost).toHaveClass('is-lost');
     expect(screen.queryByText('In sync')).toBeNull();
-    expect(container.querySelector('.wall-content')).toHaveClass('is-lost');
+    expect(lost.closest('[role="status"]')).not.toBeNull();
+    expect(container.querySelector('.wall-body')).toHaveClass('is-lost');
   });
 
-  it('does not dim the content while connected', () => {
-    const { container } = show({ sync: sync() });
-    expect(container.querySelector('.wall-content')).not.toHaveClass('is-lost');
+  it('dims the bands together with the content', () => {
+    const { container } = show({ sync: outOfSync, alarm: { showing: 'B', waiting: 0 }, lostSince: LOST });
+    const body = container.querySelector('.wall-body');
+    expect(body).toHaveClass('is-lost');
+    expect(body?.querySelector('.wall-band.is-alarm')).not.toBeNull();
+    expect(body?.querySelector('.wall-band.is-out-of-sync')).not.toBeNull();
+    expect(body?.querySelector('.wall-content')).toHaveTextContent('content');
+    // The header is outside: it says what is wrong and must not dim.
+    expect(container.querySelector('header')?.closest('.is-lost')).toBeNull();
+  });
+
+  it('does not dim anything while connected', () => {
+    const { container } = show({ sync: outOfSync });
+    expect(container.querySelector('.is-lost')).toBeNull();
     expect(container.querySelector('.wall-content')).toHaveTextContent('content');
   });
 });
@@ -233,25 +253,74 @@ describe('WallFrame cursor and focus', () => {
     expect(el).not.toHaveClass('is-idle');
     await advance(1);
     expect(el).toHaveClass('is-idle');
-    fireEvent.mouseMove(el);
+    fireEvent.mouseMove(el, { screenX: 10, screenY: 10 });
     await advance(0);
     expect(el).not.toHaveClass('is-idle');
     await advance(2_000);
-    fireEvent.mouseMove(el);
+    fireEvent.mouseMove(el, { screenX: 11, screenY: 10 });
     await advance(2_000);
     expect(el).not.toHaveClass('is-idle');
     await advance(1_000);
     expect(el).toHaveClass('is-idle');
   });
 
-  it('removes its listener and timer on unmount', async () => {
+  it('ignores a move to the position of the last one', async () => {
+    const { container } = show();
+    const el = frame(container);
+    fireEvent.mouseMove(el, { screenX: 400, screenY: 300 });
+    await advance(3_000);
+    expect(el).toHaveClass('is-idle');
+    fireEvent.mouseMove(el, { screenX: 400, screenY: 300 });
+    fireEvent.pointerMove(el, { screenX: 400, screenY: 300 });
+    await advance(0);
+    expect(el).toHaveClass('is-idle');
+    fireEvent.pointerMove(el, { screenX: 401, screenY: 300 });
+    await advance(0);
+    expect(el).not.toHaveClass('is-idle');
+  });
+
+  it.each([
+    ['a key press', (el: HTMLElement) => fireEvent.keyDown(el, { key: 'Tab' })],
+    ['a pointer press (touch)', (el: HTMLElement) => fireEvent.pointerDown(el)],
+    ['a pointer move', (el: HTMLElement) => fireEvent.pointerMove(el, { screenX: 5, screenY: 5 })],
+  ])('wakes on %s', async (_, wake) => {
+    const { container } = show({ back: '/dashboards' });
+    const el = frame(container);
+    await advance(3_000);
+    expect(el).toHaveClass('is-idle');
+    wake(el);
+    await advance(0);
+    expect(el).not.toHaveClass('is-idle');
+    await advance(3_000);
+    expect(el).toHaveClass('is-idle');
+  });
+
+  it('lets the back link take focus while idle', async () => {
+    const { container } = show({ back: '/dashboards' });
+    await advance(3_000);
+    expect(frame(container)).toHaveClass('is-idle');
+    const link = screen.getByRole('link', { name: 'Back to the desk' });
+    link.focus();
+    expect(link).toHaveFocus();
+    // That it is then visible is the rule `.wall.is-idle .wall-back:focus-visible` (wall.test.ts).
+    expect(link).toHaveClass('wall-back');
+  });
+
+  it('removes the same listeners it added, and its timer, on unmount', async () => {
+    const added = vi.spyOn(window, 'addEventListener');
     const removed = vi.spyOn(window, 'removeEventListener');
     const { unmount } = show();
+    const wakes = added.mock.calls.filter(([type]) =>
+      ['mousemove', 'pointermove', 'pointerdown', 'keydown'].includes(type),
+    );
+    expect(wakes.map(([type]) => type).sort()).toEqual(['keydown', 'mousemove', 'pointerdown', 'pointermove']);
     unmount();
-    expect(removed).toHaveBeenCalledWith('mousemove', expect.any(Function));
-    // Let Preact's own frame timers fire; the idle timer (3 s) would still be pending.
+    // Preact runs the cleanup after its next frame (a 35 ms timer); let it fire. The idle timer
+    // (3 s) would still be pending if the cleanup did not clear it.
     await advance(100);
+    for (const [type, listener] of wakes) expect(removed).toHaveBeenCalledWith(type, listener);
     expect(vi.getTimerCount()).toBe(0);
+    added.mockRestore();
     removed.mockRestore();
   });
 

@@ -19,8 +19,20 @@
   flex-direction: column;
   background: var(--bg);
   color: var(--text);
+  font-size: var(--wall-small);
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
+}
+
+/* The desk's element rules (base.css) would set smaller sizes; inside the wall they take the
+   size of their wall parent. */
+.wall small,
+.wall h1,
+.wall h2,
+.wall h3,
+.wall th,
+.wall td {
+  font-size: inherit;
 }
 
 .wall.is-idle {
@@ -76,8 +88,13 @@
   color: var(--text);
 }
 
+/* While idle the link is transparent, not hidden: it stays in the tab order and shows with focus. */
 .wall.is-idle .wall-back {
-  visibility: hidden;
+  opacity: 0;
+}
+
+.wall.is-idle .wall-back:focus-visible {
+  opacity: 1;
 }
 
 /* Bands under the header: the switch band first, then the Out Of Sync band. */
@@ -118,7 +135,9 @@
   flex: 0 0 auto;
 }
 
-/* The content fills what is left of the screen. Without connection it stays, dimmed. */
+/* The bands and the content fill what is left of the screen. Without connection they stay, dimmed:
+   the bands are as old as the content. */
+.wall .wall-body,
 .wall .wall-content {
   flex: 1 1 auto;
   min-height: 0;
@@ -126,7 +145,7 @@
   flex-direction: column;
 }
 
-.wall .wall-content.is-lost {
+.wall .wall-body.is-lost {
   opacity: 0.45;
 }
 

@@ -15,12 +15,27 @@ function clamp(n: number, min: number, max: number): number {
  * The CSS grid lines of a panel. The configuration compiler rejects panels that leave the grid,
  * so this only keeps a bad value from breaking the layout.
  */
-function placement(panel: Panel): { gridColumn: string; gridRow: string } {
+function placement(panel: Panel): { x: number; y: number; gridColumn: string; gridRow: string } {
   const x = clamp(panel.x, 0, COLUMNS - 1);
   const y = clamp(panel.y, 0, ROWS - 1);
   const w = clamp(panel.w, 1, COLUMNS - x);
   const h = clamp(panel.h, 1, ROWS - y);
-  return { gridColumn: `${x + 1} / span ${w}`, gridRow: `${y + 1} / span ${h}` };
+  return { x, y, gridColumn: `${x + 1} / span ${w}`, gridRow: `${y + 1} / span ${h}` };
+}
+
+/**
+ * Keys by type and cell, so a changed layout mounts a new panel instead of handing a graph the
+ * props of another panel. Two panels can only share a cell through the clamp; they get a suffix.
+ */
+function keyed(panels: Panel[]) {
+  const seen = new Map<string, number>();
+  return panels.map((panel, index) => {
+    const { x, y, gridColumn, gridRow } = placement(panel);
+    const base = `${panel.type}:${x}:${y}`;
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return { panel, index, key: n === 0 ? base : `${base}#${n}`, style: { gridColumn, gridRow } };
+  });
 }
 
 interface Props {
@@ -32,9 +47,8 @@ interface Props {
 export function PanelGrid({ panels, render }: Props) {
   return (
     <div class="wall-grid">
-      {panels.map((panel, index) => (
-        // Panels have no identity of their own; their order is fixed by the dashboard file.
-        <div key={index} class="wall-panel" style={placement(panel)}>
+      {keyed(panels).map(({ panel, index, key, style }) => (
+        <div key={key} class="wall-panel" style={style}>
           {render(panel, index)}
         </div>
       ))}

@@ -96,19 +96,32 @@ function OutOfSyncBand({ sync, now }: { sync: SyncState; now: Date }) {
   );
 }
 
-/** Whether the mouse has not moved for `IDLE_MS`; the timer runs from mount. */
+/** Events that wake the frame: the mouse, a pointer (touch included) and the keyboard. */
+const WAKE_EVENTS = ['mousemove', 'pointermove', 'pointerdown', 'keydown'] as const;
+
+/**
+ * Whether nobody has used the mouse, a pointer or the keyboard for `IDLE_MS`; the timer runs from
+ * mount. A move to the position of the last one is no movement (remote desktops and KVM switches
+ * send such moves) and does not wake the frame.
+ */
 function useIdle(): boolean {
   const [idle, setIdle] = useState(false);
   useEffect(() => {
     let timer = window.setTimeout(() => setIdle(true), IDLE_MS);
-    const moved = () => {
+    let last: { x: number; y: number } | undefined;
+    const wake = (event: Event) => {
+      if (event.type === 'mousemove' || event.type === 'pointermove') {
+        const { screenX: x, screenY: y } = event as MouseEvent;
+        if (last !== undefined && last.x === x && last.y === y) return;
+        last = { x, y };
+      }
       setIdle(false);
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setIdle(true), IDLE_MS);
     };
-    window.addEventListener('mousemove', moved);
+    for (const type of WAKE_EVENTS) window.addEventListener(type, wake);
     return () => {
-      window.removeEventListener('mousemove', moved);
+      for (const type of WAKE_EVENTS) window.removeEventListener(type, wake);
       window.clearTimeout(timer);
     };
   }, []);
@@ -125,18 +138,22 @@ export function WallFrame({ title, sync, now, alarm, lostSince, back, children }
   const nowIso = now.toISOString();
   return (
     <div class={idle ? 'wall is-idle' : 'wall'}>
-      <div class="wall-header" role="status">
+      <header class="wall-header">
         <h1 class="wall-title" title={title}>
           {title}
         </h1>
         <div class="wall-meta">
-          {lostSince !== undefined ? (
-            <span class="wall-sync is-lost">
-              No connection to the server since <TimeText iso={lostSince.toISOString()} now={now} />
-            </span>
-          ) : (
-            <SyncText sync={sync} />
-          )}
+          {/* The only live region of the header: the title and the clock are outside it, so the
+              clock does not make a screen reader read the header every minute. */}
+          <span class="wall-state" role="status">
+            {lostSince !== undefined ? (
+              <span class="wall-sync is-lost">
+                No connection to the server since <TimeText iso={lostSince.toISOString()} now={now} />
+              </span>
+            ) : (
+              <SyncText sync={sync} />
+            )}
+          </span>
           <time class="wall-clock num" dateTime={nowIso}>
             {clock(nowIso, now)}
           </time>
@@ -146,16 +163,19 @@ export function WallFrame({ title, sync, now, alarm, lostSince, back, children }
             </Link>
           )}
         </div>
+      </header>
+      {/* Without connection the bands dim with the content: they are as old as it is. */}
+      <div class={lostSince !== undefined ? 'wall-body is-lost' : 'wall-body'}>
+        {alarm !== undefined && (
+          <div class="wall-band is-alarm" role="status">
+            <p class="wall-band-line">
+              <span class="wall-band-text">{alarmText(alarm)}</span>
+            </p>
+          </div>
+        )}
+        {sync?.status === 'out_of_sync' && <OutOfSyncBand sync={sync} now={now} />}
+        <div class="wall-content">{children}</div>
       </div>
-      {alarm !== undefined && (
-        <div class="wall-band is-alarm" role="status">
-          <p class="wall-band-line">
-            <span class="wall-band-text">{alarmText(alarm)}</span>
-          </p>
-        </div>
-      )}
-      {sync?.status === 'out_of_sync' && <OutOfSyncBand sync={sync} now={now} />}
-      <div class={lostSince !== undefined ? 'wall-content is-lost' : 'wall-content'}>{children}</div>
     </div>
   );
 }

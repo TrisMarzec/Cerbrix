@@ -1,7 +1,8 @@
 import { render } from '@testing-library/preact';
+import { useState } from 'preact/hooks';
 
 import type { Panel } from '../api/types';
-import { problemsPanelFixture, valuePanelFixture } from '../test/fixtures';
+import { graphPanelFixture, problemsPanelFixture, valuePanelFixture } from '../test/fixtures';
 import { PanelGrid } from './PanelGrid';
 
 function cells(container: Element): HTMLElement[] {
@@ -41,6 +42,39 @@ describe('PanelGrid', () => {
     expect(rendered[13]).toHaveTextContent('13');
     expect(seen.map(([, i]) => i)).toEqual(panels.map((_, i) => i));
     expect(seen.every(([panel, i]) => panel === panels[i])).toBe(true);
+  });
+
+  it('mounts a new panel when the layout puts a panel of another type at an index, and keeps it otherwise', () => {
+    let mounts = 0;
+    function Probe({ label }: { label: string }) {
+      useState(() => {
+        mounts += 1;
+        return 0;
+      });
+      return <span>{label}</span>;
+    }
+    const draw = (panel: Panel) => <Probe label={panel.type} />;
+    const before = [graphPanelFixture({ x: 8, y: 3 }), valuePanelFixture({ x: 8, y: 5 })];
+    const { container, rerender } = render(<PanelGrid panels={before} render={draw} />);
+    expect(mounts).toBe(2);
+
+    rerender(<PanelGrid panels={[...before]} render={draw} />);
+    expect(mounts).toBe(2);
+
+    const swapped = [valuePanelFixture({ x: 8, y: 3 }), graphPanelFixture({ x: 8, y: 5 })];
+    rerender(<PanelGrid panels={swapped} render={draw} />);
+    expect(mounts).toBe(4);
+    expect(cells(container).map((c) => c.textContent)).toEqual(['value', 'graph']);
+  });
+
+  it('keeps panels apart that the clamp puts into the same cell', () => {
+    const { container } = render(
+      <PanelGrid
+        panels={[valuePanelFixture({ x: 11, y: 5 }), valuePanelFixture({ x: 14, y: 9 })]}
+        render={(_, index) => <span>{index}</span>}
+      />,
+    );
+    expect(cells(container).map((c) => c.textContent)).toEqual(['0', '1']);
   });
 
   it('keeps a panel that leaves the grid inside it', () => {
