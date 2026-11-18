@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/preact';
 
+import { NowContext } from '../shell/context';
 import { dashboardFixture, displayFixture } from '../test/fixtures';
 import { mockFetch, type FetchMock } from '../test/mockFetch';
 import { advance } from '../test/timers';
@@ -20,7 +21,12 @@ afterEach(() => {
 
 async function open(routes: Parameters<typeof mockFetch>[0]) {
   mock = mockFetch(routes);
-  const view = render(<DashboardsPage />);
+  // The clock of the shell: without it the page would compare with the moment the module loaded.
+  const view = render(
+    <NowContext.Provider value={new Date()}>
+      <DashboardsPage />
+    </NowContext.Provider>,
+  );
   await advance(0);
   return view;
 }
