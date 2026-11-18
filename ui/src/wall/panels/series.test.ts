@@ -1,4 +1,4 @@
-import { rangeWords, seriesLabel } from './series';
+import { rangeSecs, rangeWords, seriesLabel } from './series';
 
 describe('seriesLabel', () => {
   it('is the host and the item without parameters', () => {
@@ -27,5 +27,22 @@ describe('rangeWords', () => {
 
   it.each([['2w'], ['1h30m'], [''], ['h']])('leaves %j as it is', (range) => {
     expect(rangeWords(range)).toBe(range);
+  });
+});
+
+describe('rangeSecs', () => {
+  it.each([
+    ['30m', 1800],
+    ['1h', 3600],
+    ['6h', 21_600],
+    ['24h', 86_400],
+    ['7d', 604_800],
+    ['90s', 90],
+  ])('reads %s as %d seconds', (range, secs) => {
+    expect(rangeSecs(range)).toBe(secs);
+  });
+
+  it.each([['2w'], ['1h30m'], [''], ['0h']])('has no length for %j', (range) => {
+    expect(rangeSecs(range)).toBeUndefined();
   });
 });

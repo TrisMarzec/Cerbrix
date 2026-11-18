@@ -36,12 +36,20 @@ function measureLayout(body: HTMLDivElement): Layout {
   };
 }
 
-/** The largest step whose block fits the body; undefined when none does. */
-function largest(layout: Layout): Step | undefined {
-  return STEPS.find((step) => {
-    const { width, height } = layout.steps[step];
-    return height > 0 && height <= layout.height && width <= layout.width;
+/**
+ * The largest step whose block fits the body. When the value is too wide even at the smallest
+ * step that fits the height, that step with `cut`: the value is replaced by "…", never clipped.
+ * Undefined when no step fits the height.
+ */
+function largest(layout: Layout): { step: Step; cut: boolean } | undefined {
+  const high = STEPS.filter((step) => {
+    const { height } = layout.steps[step];
+    return height > 0 && height <= layout.height;
   });
+  const wide = high.find((step) => layout.steps[step].width <= layout.width);
+  if (wide !== undefined) return { step: wide, cut: false };
+  const smallest = high.at(-1);
+  return smallest === undefined ? undefined : { step: smallest, cut: true };
 }
 
 interface Age {
@@ -54,14 +62,21 @@ interface BlockProps {
   text: string;
   age: Age | null;
   sample?: boolean;
+  /** The value does not fit: "…" in its place, the whole value in the block's accessible name. */
+  cut?: string;
 }
 
-function Block({ step, text, age: ago, sample = false }: BlockProps) {
+function Block({ step, text, age: ago, sample = false, cut }: BlockProps) {
   return (
-    <div class={`wall-value is-${step}${sample ? ' wall-sample' : ''}`} aria-hidden={sample ? 'true' : undefined}>
-      <span class="wall-value-number wall-ellipsis">{text}</span>
+    <div
+      class={`wall-value is-${step}${sample ? ' wall-sample' : ''}`}
+      aria-hidden={sample ? 'true' : undefined}
+      role={cut === undefined ? undefined : 'img'}
+      aria-label={cut}
+    >
+      <span class="wall-value-number">{cut === undefined ? text : '…'}</span>
       {ago !== null && (
-        <span class={`wall-value-age wall-ellipsis${ago.old ? ' is-old' : ''}`}>
+        <span class={`wall-value-age${ago.old ? ' is-old' : ''}`}>
           {ago.old ? `${ago.text} · old` : ago.text}
         </span>
       )}
@@ -87,18 +102,22 @@ export function ValuePanel({ panel, now }: Props) {
   // The samples show the value and a fixed age: measured again when the value or the mark changes.
   const { body, fit } = useFitOn(measureLayout, `${text ?? ''}|${sampleAge === null ? '' : String(sampleAge.old)}`);
   const step = fit === null || text === null ? undefined : largest(fit);
+  const label = seriesLabel(panel.host, panel.item, panel.params);
+  const whole = `${label}: ${text ?? ''}${ago === null ? '' : `, ${ago.old ? `${ago.text}, old` : ago.text}`}`;
   const noData = fit !== null && text === null && fit.noData > 0 && fit.height >= fit.noData;
 
   return (
     <>
-      <div class="wall-panel-label">{seriesLabel(panel.host, panel.item, panel.params)}</div>
+      <div class="wall-panel-label">{label}</div>
       <div class="wall-panel-body wall-value-body" ref={body}>
         <div class="wall-nodata wall-sample" aria-hidden="true">
           No data
         </div>
         {text !== null && STEPS.map((s) => <Block key={s} step={s} text={text} age={sampleAge} sample />)}
         {noData && <div class="wall-nodata">No data</div>}
-        {step !== undefined && text !== null && <Block step={step} text={text} age={ago} />}
+        {step !== undefined && text !== null && (
+          <Block step={step.step} text={text} age={ago} cut={step.cut ? whole : undefined} />
+        )}
       </div>
     </>
   );

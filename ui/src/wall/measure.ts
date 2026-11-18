@@ -23,27 +23,12 @@ export function box(el: Element | null): { width: number; height: number } {
 export function useFit<E extends HTMLElement, T>(
   measure: (body: E) => T,
 ): { body: RefObject<E | null>; fit: T | null } {
-  const body = useRef<E>(null);
-  const [fit, setFit] = useState<T | null>(null);
-  useLayoutEffect(() => {
-    const el = body.current;
-    if (el === null) return undefined;
-    const update = () => setFit(measure(el));
-    update();
-    if (typeof ResizeObserver === 'function') {
-      const observer = new ResizeObserver(update);
-      observer.observe(el);
-      return () => observer.disconnect();
-    }
-    window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
-  }, [measure]);
-  return { body, fit };
+  return useFitOn(measure, '');
 }
 
 /**
  * As `useFit`, and measures again whenever `content` changes: for samples whose text changes
- * while the body keeps its size, such as a value shown in several sizes.
+ * while the element keeps its size, such as a value shown in several sizes.
  */
 export function useFitOn<E extends HTMLElement, T>(
   measure: (body: E) => T,

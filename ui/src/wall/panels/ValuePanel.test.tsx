@@ -123,6 +123,34 @@ describe('ValuePanel', () => {
     expect(step(container)).toBe('is-s');
   });
 
+  it('writes "…" for a value too wide at every size, with the whole value for a screen reader', () => {
+    body(100, 300);
+    const { container, getByRole } = show({ item: 'disk.used', value: 1_294_967_296 });
+    expect(step(container)).toBe('is-inline');
+    expect(shown(container)?.querySelector('.wall-value-number')).toHaveTextContent(/^…$/);
+    expect(getByRole('img', { name: 'db-01 · disk.used: 1.2 GiB, 30 s ago' })).toBeInTheDocument();
+  });
+
+  it('names a cut old value as old for a screen reader', () => {
+    body(100, 300);
+    const { getByRole } = show({ at: ago(12) });
+    expect(getByRole('img', { name: 'db-01 · load.1m: 0.42, 12 min ago, old' })).toBeInTheDocument();
+  });
+
+  it('gives an uncut value no image role', () => {
+    body(600, 300);
+    const { container } = show();
+    expect(shown(container)).not.toHaveAttribute('role');
+  });
+
+  it('shows a value measured in the future as 0 s ago, not old', () => {
+    body(600, 300);
+    const { container } = show({ at: new Date(NOW.getTime() + 90_000).toISOString() });
+    const age = shown(container)?.querySelector('.wall-value-age');
+    expect(age).toHaveTextContent(/^0 s ago$/);
+    expect(age).not.toHaveClass('is-old');
+  });
+
   it('shows only the label when not even one line fits', () => {
     body(600, 40);
     const { container } = show();

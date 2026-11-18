@@ -408,19 +408,27 @@
 
 /* Graph and value panels */
 
-/* The graph panel's label line: the series left, cut when long, and the latest value right, at
-   the 38 size, which never is. */
+/* The graph panel's label line: the series left, cut first when long; then the worst threshold
+   in words when the plot could not label every line; the latest value right, at the 38 size. The
+   panel measures the samples and leaves out what does not fit whole, so nothing here is cut. */
 .wall .wall-panel-label.has-latest {
+  position: relative;
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
   gap: calc(var(--u) * 20);
 }
 
 .wall .wall-panel-label-text {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.wall .wall-panel-worst {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--sev);
 }
 
 .wall .wall-panel-latest {
@@ -428,6 +436,21 @@
   font-size: var(--wall-text);
   font-weight: 600;
   color: var(--text);
+}
+
+/* Older than the larger of ten minutes and three steps: "old" and the warning colour. */
+.wall .wall-panel-latest.is-old {
+  color: var(--warning);
+}
+
+/* The label line's samples: measured, never seen, out of the flow, as wide as their content. */
+.wall .wall-panel-label > .wall-sample {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: max-content;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 /* The graph covers the body; the plot takes the size of its canvas box. */

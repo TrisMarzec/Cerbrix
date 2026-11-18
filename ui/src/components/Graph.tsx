@@ -49,7 +49,61 @@ interface Props {
   fontPx?: number;
   /** False: no cursor and no readout line. */
   interactive?: boolean;
+  /**
+   * The end of the x scale in seconds since 1970 (the wall's clock), so data that stopped arriving
+   * ends before the right edge. Without it the x scale spans the data.
+   */
+  until?: number;
+  /** With `until`: the length of the x scale in seconds; without it the scale starts at the data. */
+  spanSecs?: number;
+  /** The whole description for a screen reader, in place of the one built from `label`. */
+  description?: string;
+  /**
+   * With `fill`, after each draw: whether every threshold line got its label. Labels that would
+   * overlap one another or leave the plot are left out, the least severe first.
+   */
+  onLabels?: (all: boolean) => void;
 }
+
+/** Where a threshold label goes: its text's y with the baseline at the bottom (above the line) or top. */
+export interface LabelSpot {
+  y: number;
+  baseline: 'bottom' | 'top';
+}
+
+/**
+ * Places the threshold labels without overlap, from the most severe (lowest `rank`) to the least:
+ * each above its line if that box is free and inside `top`..`bottom`, else below it, else none.
+ * `lines` are the lines' y positions; `size` is a label's height and `gap` its distance from the
+ * line. The result is in the order of `lines`, null for a label that has no room.
+ */
+export function placeLabels(
+  lines: { y: number; rank: number }[],
+  size: number,
+  gap: number,
+  top: number,
+  bottom: number,
+): (LabelSpot | null)[] {
+  const order = lines.map((_, i) => i).sort((a, b) => (lines[a]?.rank ?? 0) - (lines[b]?.rank ?? 0) || a - b);
+  const taken: [number, number][] = [];
+  const free = (lo: number, hi: number) =>
+    lo >= top && hi <= bottom && taken.every(([a, b]) => hi <= a || lo >= b);
+  const spots: (LabelSpot | null)[] = lines.map(() => null);
+  for (const i of order) {
+    const y = lines[i]?.y ?? 0;
+    if (free(y - gap - size, y - gap)) {
+      taken.push([y - gap - size, y - gap]);
+      spots[i] = { y: y - gap, baseline: 'bottom' };
+    } else if (free(y + gap, y + gap + size)) {
+      taken.push([y + gap, y + gap + size]);
+      spots[i] = { y: y + gap, baseline: 'top' };
+    }
+  }
+  return spots;
+}
+
+/** Severities from the most to the least severe: the rank of a threshold label. */
+const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, warning: 2, info: 3 };
 
 /** The font size of the desk graph: uPlot's default axis font and the threshold labels. */
 const DESK_FONT_PX = 12;
@@ -71,21 +125,37 @@ function sameSize(a: Size | null, b: Size | null): boolean {
   return a === b || (a !== null && b !== null && a.width === b.width && a.height === b.height);
 }
 
-/** The axis look for a font size: the font, room for the labels and the space between ticks. */
+/**
+ * The axis look for a font size: the font, room for the labels and the space between ticks. The
+ * x axis is one line high; the y axis is as wide as its widest value, measured with its font.
+ */
 function axisSizes(
   fontPx: number,
   font: string,
   axis: 'x' | 'y',
 ): Pick<uPlot.Axis, 'font' | 'size' | 'gap' | 'space'> & { ticks: { size: number } } {
   const k = fontPx / DESK_FONT_PX;
+  // uPlot's defaults at 12 px are a size of 50, a gap of 5, ticks of 10 and a space of 50 (x)
+  // or 30 (y).
+  const gap = Math.round(5 * k);
+  const ticks = Math.round(10 * k);
+  const ySize = (self: uPlot, values: string[] | null): number => {
+    // uPlot asks before the first values exist; room for a value such as "100.0 %".
+    if (values === null || values.length === 0) return Math.round(fontPx * 4.5);
+    const ratio = window.devicePixelRatio || 1;
+    const { ctx } = self;
+    ctx.save();
+    ctx.font = `${Math.round(fontPx * ratio)}px ${font}`;
+    const widest = Math.max(...values.map((v) => ctx.measureText(v).width)) / ratio;
+    ctx.restore();
+    return Math.ceil(widest + ticks + gap * 2);
+  };
   return {
     font: `${fontPx}px ${font}`,
-    // uPlot's defaults at 12 px are a size of 50, a gap of 5, ticks of 10 and a space of 50 (x)
-    // or 30 (y); x needs height for one line, y width for a value such as "100.0 %".
-    size: axis === 'x' ? Math.round(fontPx * 2.25) : Math.round(fontPx * 4.5),
-    gap: Math.round(5 * k),
+    size: axis === 'x' ? Math.round(fontPx * 2.25) : ySize,
+    gap,
     space: Math.round((axis === 'x' ? 50 : 30) * k),
-    ticks: { size: Math.round(10 * k) },
+    ticks: { size: ticks },
   };
 }
 
@@ -190,6 +260,10 @@ export function Graph({
   fill = false,
   fontPx,
   interactive = true,
+  until,
+  spanSecs,
+  description: givenDescription,
+  onLabels,
 }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | undefined>(undefined);
@@ -211,6 +285,26 @@ export function Graph({
   dataRef.current = data;
   const thresholdKey = JSON.stringify(thresholds);
   const sized = !fill || filled !== null;
+  // With `until`: the x scale is a window ending there. The plot reads these through refs, so a
+  // new clock or callback never creates a new plot; `applied` is the `until` the plot shows.
+  const windowed = until !== undefined;
+  const untilRef = useRef(until);
+  untilRef.current = until;
+  const spanRef = useRef(spanSecs);
+  spanRef.current = spanSecs;
+  const applied = useRef<number | undefined>(undefined);
+  const onLabelsRef = useRef(onLabels);
+  onLabelsRef.current = onLabels;
+
+  /** The x window: `spanSecs` up to `until`, or from the first point to `until`. */
+  const xWindow = (): [number, number] => {
+    const end = untilRef.current ?? 0;
+    const first = shown.current?.[0][0] ?? end;
+    const length = spanRef.current;
+    const start = length !== undefined ? end - length : first < end ? first : end - 1;
+    span.current = end - start;
+    return [start, end];
+  };
 
   useLayoutEffect(() => {
     const target = container.current;
@@ -243,10 +337,12 @@ export function Graph({
       // Without the list below the plot, the line itself says the severity.
       text: fill ? `${t.trigger} · ${severityWord(t.severity)}` : t.trigger,
       value: t.value,
+      rank: SEVERITY_RANK[t.severity],
       stroke: colour(styles, SEVERITY_PROPERTY[t.severity]),
     }));
     span.current = (initial[0].at(-1) ?? 0) - (initial[0][0] ?? 0);
     shown.current = initial;
+    applied.current = untilRef.current;
     // Lengths of the desk graph are for a 12 px font; a larger font scales them.
     const scale = fontPx === undefined ? 1 : fontPx / DESK_FONT_PX;
 
@@ -270,21 +366,42 @@ export function Graph({
           // Labels sit inside the plot at its right edge, clear of the y axis and its values.
           ctx.textAlign = 'right';
           const right = bbox.left + bbox.width - LABEL_EDGE_PX * scale * ratio;
-          for (const limit of limits) {
-            const y = u.valToPos(limit.value, 'y', true);
-            if (y < bbox.top || y > bbox.top + bbox.height) continue;
+          const lines = limits
+            .map((limit) => ({ limit, y: u.valToPos(limit.value, 'y', true) }))
+            .filter(({ y }) => y >= bbox.top && y <= bbox.top + bbox.height);
+          // On the wall the labels are large and there is no list: they must not overprint.
+          const spots = fill
+            ? placeLabels(
+                lines.map(({ limit, y }) => ({ y, rank: limit.rank })),
+                labelPx,
+                gap,
+                bbox.top,
+                bbox.top + bbox.height,
+              )
+            : undefined;
+          lines.forEach(({ limit, y }, i) => {
             ctx.strokeStyle = limit.stroke;
             ctx.fillStyle = limit.stroke;
             ctx.beginPath();
             ctx.moveTo(bbox.left, y);
             ctx.lineTo(bbox.left + bbox.width, y);
             ctx.stroke();
+            if (spots !== undefined) {
+              const spot = spots[i];
+              if (spot === null || spot === undefined) return;
+              ctx.textBaseline = spot.baseline;
+              ctx.fillText(limit.text, right, spot.y);
+              return;
+            }
             // Just above the line; below it when there is no room above (a line at the top).
             const above = y - gap - labelPx >= bbox.top;
             ctx.textBaseline = above ? 'bottom' : 'top';
             ctx.fillText(limit.text, right, above ? y - gap : y + gap);
-          }
+          });
           ctx.restore();
+          if (spots !== undefined) {
+            onLabelsRef.current?.(lines.length === limits.length && spots.every((s) => s !== null));
+          }
         },
       ],
     };
@@ -303,13 +420,13 @@ export function Graph({
       legend: { show: false },
       cursor: interactive ? { drag: { x: false, y: false } } : { show: false },
       scales: {
-        x: { time: true },
+        x: windowed ? { time: true, range: () => xWindow() } : { time: true },
         y: { range: (_u, min, max) => yRange(thresholds, min, max) },
       },
       axes: [
         {
           ...look('x'),
-          // The visible span is the span of the data: the plot cannot be zoomed.
+          // The visible span is that of the data, or the window up to `until`: no zoom.
           values: (_u, splits) => tickLabels(splits, span.current),
         },
         { ...look('y'), values: (_u, splits) => splits.map((v) => value(unitKey, v)) },
@@ -346,7 +463,7 @@ export function Graph({
       shown.current = undefined;
       drawn.current = null;
     };
-  }, [hasData, thresholdKey, unitKey, height, fill, sized, fontPx, interactive]);
+  }, [hasData, thresholdKey, unitKey, height, fill, sized, fontPx, interactive, windowed]);
 
   useEffect(() => {
     if (!fill || filled === null || plot.current === undefined || sameSize(drawn.current, filled)) return;
@@ -354,19 +471,33 @@ export function Graph({
     plot.current.setSize(filled);
   }, [fill, filled]);
 
+  // A new `until` moves the window; less than a step is not worth a redraw.
+  useEffect(() => {
+    const at = applied.current;
+    if (until === undefined || plot.current === undefined || at === undefined) return;
+    if (Math.abs(until - at) <= (stepSecs ?? 0)) return;
+    applied.current = until;
+    const [min, max] = xWindow();
+    plot.current.setScale('x', { min, max });
+  }, [until, stepSecs]);
+
   useEffect(() => {
     if (data === undefined || plot.current === undefined || shown.current === data) return;
     shown.current = data;
     span.current = (data[0].at(-1) ?? 0) - (data[0][0] ?? 0);
+    // With `until` the new data resets the x scale through its range: the window of now.
+    applied.current = untilRef.current;
     plot.current.setData(data);
   }, [data]);
 
   if (data === undefined) return <p class="graph-empty">No data in this range</p>;
 
   const latestValue = latest(data);
-  const description = `${label ?? unitKey}, latest ${value(unitKey, latestValue)}, ${
-    thresholds.length === 1 ? '1 threshold' : `${thresholds.length} thresholds`
-  }`;
+  const description =
+    givenDescription ??
+    `${label ?? unitKey}, latest ${value(unitKey, latestValue)}, ${
+      thresholds.length === 1 ? '1 threshold' : `${thresholds.length} thresholds`
+    }`;
 
   return (
     <div class={fill ? 'graph is-fill' : 'graph'}>

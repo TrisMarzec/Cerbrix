@@ -13,11 +13,26 @@ const UNIT_WORDS: Record<string, [string, string]> = {
   d: ['day', 'days'],
 };
 
+const UNIT_SECS: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86_400 };
+
+/** A range of the API as a number and a unit letter; undefined for any other form. */
+function parse(range: string): { n: number; unit: string } | undefined {
+  const m = /^(\d+)([smhd])$/.exec(range);
+  return m === null ? undefined : { n: Number(m[1]), unit: m[2] ?? '' };
+}
+
 /** A range of the API in words: "1h" is "1 hour", "7d" "7 days"; anything else stays as it is. */
 export function rangeWords(range: string): string {
-  const m = /^(\d+)([smhd])$/.exec(range);
-  const words = m === null ? undefined : UNIT_WORDS[m[2] ?? ''];
-  if (m === null || words === undefined) return range;
-  const n = Number(m[1]);
-  return `${n} ${n === 1 ? words[0] : words[1]}`;
+  const parsed = parse(range);
+  const words = parsed === undefined ? undefined : UNIT_WORDS[parsed.unit];
+  if (parsed === undefined || words === undefined) return range;
+  return `${parsed.n} ${parsed.n === 1 ? words[0] : words[1]}`;
+}
+
+/** A range of the API in seconds: "6h" is 21600; undefined for a range of another form or 0. */
+export function rangeSecs(range: string): number | undefined {
+  const parsed = parse(range);
+  const unit = parsed === undefined ? undefined : UNIT_SECS[parsed.unit];
+  if (parsed === undefined || unit === undefined || parsed.n === 0) return undefined;
+  return parsed.n * unit;
 }
