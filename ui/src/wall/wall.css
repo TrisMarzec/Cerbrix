@@ -161,3 +161,189 @@
     animation: none !important;
   }
 }
+
+/* Problems and host-states panels */
+
+/* Every panel: a label, then a body that takes the rest of the height and never scrolls. The
+   panels measure the body and hidden samples, so the samples use the real classes. */
+.wall .wall-panel-label {
+  flex: 0 0 auto;
+  margin-bottom: calc(var(--u) * 12);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--wall-label);
+  font-weight: 500;
+  color: var(--dim);
+}
+
+.wall .wall-panel-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.wall .wall-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Problem row (mockup A): bar, host in the severity colour and the problem on the first line, the
+   severity word on the second, the duration right. A fixed height, so every row is one sample. */
+.wall .wall-problem,
+.wall .wall-problems-more {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 25);
+  height: calc(var(--u) * 108);
+  padding: 0 calc(var(--u) * 25) 0 calc(var(--u) * 38);
+  border-top: calc(var(--u) * 1) solid var(--line);
+}
+
+.wall .wall-problem::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(var(--u) * 13);
+  background: var(--sev);
+}
+
+.wall .wall-problem-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wall .wall-problem-line {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--u) * 20);
+  min-width: 0;
+}
+
+/* The host keeps its full width up to half the row; the problem text takes the rest. */
+.wall .wall-problem-host {
+  flex: 0 0 auto;
+  max-width: 50%;
+  font-size: var(--wall-host);
+  font-weight: 600;
+  color: var(--sev);
+}
+
+.wall .wall-problem-text {
+  flex: 1 1 0;
+  font-size: var(--wall-text);
+}
+
+.wall .wall-problem.is-acknowledged .wall-problem-text {
+  color: var(--dim);
+}
+
+.wall .wall-problem-meta {
+  font-size: var(--wall-label);
+  color: var(--dim);
+}
+
+.wall .wall-problem-duration {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: var(--wall-text);
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+/* A row that caused the switch: its background fades in once and stays while it is a cause. The
+   fade is a transition from the starting style, so it also runs when a shown row becomes a cause. */
+.wall .wall-problem.is-cause {
+  background-color: color-mix(in srgb, var(--sev-full) 16%, transparent);
+  transition: background-color 1.5s ease-out;
+}
+
+@starting-style {
+  .wall .wall-problem.is-cause {
+    background-color: transparent;
+  }
+}
+
+.wall .wall-problems-more {
+  white-space: nowrap;
+  font-size: var(--wall-text);
+  color: var(--dim);
+}
+
+.wall .wall-problems-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: var(--wall-host);
+  font-weight: 600;
+  color: var(--healthy-text);
+}
+
+/* Host states: the sentence, then a wrapping grid of squares. The panel reads the square size and
+   the gap from the sample square (its width and right margin). */
+.wall .wall-hosts {
+  --square-size: calc(var(--u) * 40);
+  --square-gap: calc(var(--u) * 8);
+}
+
+.wall .wall-hosts-sentence {
+  font-size: var(--wall-text);
+  font-weight: 600;
+}
+
+.wall .wall-hosts-sentence.is-ok {
+  color: var(--healthy-text);
+}
+
+.wall .wall-squares {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, var(--square-size));
+  grid-auto-rows: var(--square-size);
+  gap: var(--square-gap);
+  margin-top: var(--square-gap);
+}
+
+.wall .wall-square {
+  width: var(--square-size);
+  height: var(--square-size);
+  border-radius: calc(var(--u) * 4);
+  background: var(--sev);
+}
+
+.wall .wall-square.is-ok {
+  background: var(--healthy-square);
+}
+
+/* "+N" in the last cell; it may run into the panel padding rather than lose a digit. */
+.wall .wall-squares-more {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  font-size: var(--wall-label);
+  font-weight: 600;
+  color: var(--dim);
+}
+
+/* The samples: measured, never seen, out of the flow. */
+.wall .wall-panel-body > .wall-sample {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.wall .wall-panel-body > .wall-square.wall-sample {
+  right: auto;
+  margin-right: var(--square-gap);
+}
