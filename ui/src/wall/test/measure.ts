@@ -3,19 +3,39 @@ import { vi } from 'vitest';
 
 /** The sizes in pixels a wall panel reads from the layout, which jsdom does not compute. */
 export interface Sizes {
-  /** The panel body (`.wall-panel-body`): `clientWidth` and `clientHeight`. */
+  /** The panel body (`.wall-panel-body`): the size of its box. */
   bodyWidth: number;
   bodyHeight: number;
-  /** The hidden sample problem row: the height of its box. */
+  /** The hidden sample problem row: the size of its box (its width is its content's). */
   rowHeight: number;
+  rowWidth: number;
+  /** The hidden sample summary line of the problems panel: the height of its box. */
+  summaryHeight: number;
+  /** The hidden sample "No open problems": the size of its box. */
+  emptyWidth: number;
+  emptyHeight: number;
   /** The hidden sample sentence of the host-states panel: the height of its box. */
   lineHeight: number;
   /** The hidden sample square: its computed width and right margin (the gap between squares). */
   square: number;
   gap: number;
+  /** The hidden sample "+N": this many pixels per character of its text. */
+  charWidth: number;
 }
 
-const NONE: Sizes = { bodyWidth: 0, bodyHeight: 0, rowHeight: 0, lineHeight: 0, square: 0, gap: 0 };
+const NONE: Sizes = {
+  bodyWidth: 0,
+  bodyHeight: 0,
+  rowHeight: 0,
+  rowWidth: 0,
+  summaryHeight: 0,
+  emptyWidth: 0,
+  emptyHeight: 0,
+  lineHeight: 0,
+  square: 0,
+  gap: 0,
+  charWidth: 0,
+};
 
 class FakeResizeObserver {
   static all: FakeResizeObserver[] = [];
@@ -63,9 +83,21 @@ function override<T extends object>(target: T, name: string, descriptor: Propert
   });
 }
 
+/** The box of a measured element, or undefined for any other. */
+function boxOf(el: Element): [number, number] | undefined {
+  if (is(el, 'wall-panel-body')) return [sizes.bodyWidth, sizes.bodyHeight];
+  if (!is(el, 'wall-sample')) return undefined;
+  if (is(el, 'wall-problem')) return [sizes.rowWidth, sizes.rowHeight];
+  if (is(el, 'wall-problems-more')) return [0, sizes.summaryHeight];
+  if (is(el, 'wall-problems-empty')) return [sizes.emptyWidth, sizes.emptyHeight];
+  if (is(el, 'wall-hosts-sentence')) return [0, sizes.lineHeight];
+  if (is(el, 'wall-squares-more')) return [(el.textContent ?? '').length * sizes.charWidth, 0];
+  return undefined;
+}
+
 /**
- * Makes the layout of the wall panels measurable in jsdom: the body's client size, the sample row
- * and sentence boxes and the sample square's computed width and margin come from `initial`.
+ * Makes the layout of the wall panels measurable in jsdom: the boxes of the body and of the
+ * samples, and the sample square's computed width and margin, come from `initial`.
  * With `resizeObserver: false` the global `ResizeObserver` is absent, as in an old browser.
  * Call `releaseMeasure()` after each test.
  */
@@ -74,25 +106,11 @@ export function installMeasure(initial: Partial<Sizes>, { resizeObserver = true 
   FakeResizeObserver.all = [];
   vi.stubGlobal('ResizeObserver', resizeObserver ? FakeResizeObserver : undefined);
 
-  override(HTMLElement.prototype, 'clientWidth', {
-    get(this: HTMLElement) {
-      return is(this, 'wall-panel-body') ? sizes.bodyWidth : 0;
-    },
-  });
-  override(HTMLElement.prototype, 'clientHeight', {
-    get(this: HTMLElement) {
-      return is(this, 'wall-panel-body') ? sizes.bodyHeight : 0;
-    },
-  });
-
   const rect = Element.prototype.getBoundingClientRect;
   override(Element.prototype, 'getBoundingClientRect', {
     value(this: Element): DOMRect {
-      let height = 0;
-      if (is(this, 'wall-problem', 'wall-sample')) height = sizes.rowHeight;
-      else if (is(this, 'wall-hosts-sentence', 'wall-sample')) height = sizes.lineHeight;
-      else return rect.call(this);
-      return new DOMRect(0, 0, 0, height);
+      const found = boxOf(this);
+      return found === undefined ? rect.call(this) : new DOMRect(0, 0, found[0], found[1]);
     },
   });
 

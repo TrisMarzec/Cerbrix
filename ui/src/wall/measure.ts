@@ -7,17 +7,24 @@ export function px(value: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** The size of an element's box in pixels, unrounded; zeros when there is no element. */
+export function box(el: Element | null): { width: number; height: number } {
+  if (el === null) return { width: 0, height: 0 };
+  const r = el.getBoundingClientRect();
+  return { width: r.width, height: r.height };
+}
+
 /**
  * Measures a panel body: `measure(body)` runs after mount and whenever the body changes size (a
  * `ResizeObserver`, or the window `resize` event where there is none), and its last result is
  * `fit`; null before the first measurement. `measure` must depend on the layout only, so define it
  * outside the component. The observer or listener is released on unmount.
  */
-export function useFit<T extends HTMLElement>(
-  measure: (body: T) => number | null,
-): { body: RefObject<T | null>; fit: number | null } {
-  const body = useRef<T>(null);
-  const [fit, setFit] = useState<number | null>(null);
+export function useFit<E extends HTMLElement, T>(
+  measure: (body: E) => T,
+): { body: RefObject<E | null>; fit: T | null } {
+  const body = useRef<E>(null);
+  const [fit, setFit] = useState<T | null>(null);
   useLayoutEffect(() => {
     const el = body.current;
     if (el === null) return undefined;

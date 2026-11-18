@@ -196,6 +196,13 @@
   color: var(--dim);
 }
 
+/* A problems panel too small for any line: the label carries the count in the colour of the most
+   urgent problem, so open problems are never hidden by the layout. */
+.wall .wall-panel-label.is-count {
+  font-weight: 600;
+  color: var(--sev);
+}
+
 .wall .wall-panel-body {
   position: relative;
   flex: 1 1 auto;
@@ -212,8 +219,7 @@
 
 /* Problem row (mockup A): bar, host in the severity colour and the problem on the first line, the
    severity word on the second, the duration right. A fixed height, so every row is one sample. */
-.wall .wall-problem,
-.wall .wall-problems-more {
+.wall .wall-problem {
   position: relative;
   display: flex;
   align-items: center;
@@ -254,6 +260,13 @@
   color: var(--sev);
 }
 
+/* Too narrow for host and duration side by side: the duration is left out and the host may take
+   the whole line, so the host and the severity word are the last things to go. */
+.wall .wall-problems.is-narrow .wall-problem-host {
+  flex-shrink: 1;
+  max-width: none;
+}
+
 .wall .wall-problem-text {
   flex: 1 1 0;
   font-size: var(--wall-text);
@@ -277,7 +290,8 @@
 }
 
 /* A row that caused the switch: its background fades in once and stays while it is a cause. The
-   fade is a transition from the starting style, so it also runs when a shown row becomes a cause. */
+   fade is a transition from the starting style, so it also runs when a shown row becomes a cause.
+   A reordering that moves an existing cause row can run the fade again; the highlight stays. */
 .wall .wall-problem.is-cause {
   background-color: color-mix(in srgb, var(--sev-full) 16%, transparent);
   transition: background-color 1.5s ease-out;
@@ -289,22 +303,35 @@
   }
 }
 
+/* One line at the 38 size: "and N more" under the rows (dim), or the count alone, which carries
+   the severity of the most urgent problem. Lower than a row, so it fits where a row does not. */
 .wall .wall-problems-more {
-  white-space: nowrap;
+  padding: calc(var(--u) * 12) calc(var(--u) * 25) calc(var(--u) * 12) calc(var(--u) * 38);
+  border-top: calc(var(--u) * 1) solid var(--line);
   font-size: var(--wall-text);
   color: var(--dim);
 }
 
+.wall .wall-problems-more.is-alone {
+  font-weight: 600;
+  color: var(--sev);
+}
+
+/* One line, centred; the 38 size when the 48 one is wider than the panel. */
 .wall .wall-problems-empty {
   position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  top: 50%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
   text-align: center;
   font-size: var(--wall-host);
   font-weight: 600;
   color: var(--healthy-text);
+}
+
+.wall .wall-problems-empty.is-small {
+  font-size: var(--wall-text);
 }
 
 /* Host states: the sentence, then a wrapping grid of squares. The panel reads the square size and
@@ -342,7 +369,7 @@
   background: var(--healthy-square);
 }
 
-/* "+N" in the last cell; it may run into the panel padding rather than lose a digit. */
+/* "+N" at the end of the grid, spanning as many cells as its measured width needs. */
 .wall .wall-squares-more {
   display: flex;
   align-items: center;
@@ -360,6 +387,15 @@
   right: 0;
   visibility: hidden;
   pointer-events: none;
+}
+
+/* Samples whose width is measured are as wide as their content. */
+.wall .wall-panel-body > .wall-problem.wall-sample,
+.wall .wall-panel-body > .wall-problems-empty.wall-sample,
+.wall .wall-panel-body > .wall-squares-more.wall-sample {
+  right: auto;
+  width: max-content;
+  transform: none;
 }
 
 .wall .wall-panel-body > .wall-square.wall-sample {
