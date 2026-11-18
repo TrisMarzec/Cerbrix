@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { render } from '@testing-library/preact';
 import { vi } from 'vitest';
 
@@ -145,22 +147,22 @@ describe('ProblemsPanel', () => {
     installMeasure(room(0, { bodyHeight: ROW - 1 }));
     const { container } = show({ problems: problems(10), more: 2 });
     expect(rows(container)).toHaveLength(0);
-    expect(summary(container)).toHaveTextContent('12 open problems · Critical');
+    expect(summary(container)).toHaveTextContent(/^Critical · 12 open problems$/);
     expect(summary(container)).toHaveClass('is-alone', 'sev-critical');
     expect(summary(container)).not.toHaveClass('is-acknowledged');
     expect(label(container)).toHaveTextContent(/^Problems$/);
   });
 
-  it('says "1 open problem · Critical" for a single problem that does not fit as a row', () => {
+  it('says "Critical · 1 open problem" for a single problem that does not fit as a row', () => {
     installMeasure(room(0, { bodyHeight: LINE }));
     const { container } = show({ problems: problems(1) });
-    expect(summary(container)).toHaveTextContent('1 open problem · Critical');
+    expect(summary(container)).toHaveTextContent(/^Critical · 1 open problem$/);
   });
 
   it('shows an acknowledged-only summary at half strength with the severity word', () => {
     installMeasure(room(0, { bodyHeight: ROW - 1 }));
     const { container } = show({ problems: problems(2, acknowledgedProblem) });
-    expect(summary(container)).toHaveTextContent('2 open problems · Warning');
+    expect(summary(container)).toHaveTextContent(/^Warning \(acknowledged\) · 2 open problems$/);
     expect(summary(container)).toHaveClass('sev-warning', 'is-acknowledged');
   });
 
@@ -169,15 +171,44 @@ describe('ProblemsPanel', () => {
     const { container } = show({ problems: problems(10), more: 2 });
     expect(rows(container)).toHaveLength(0);
     expect(summary(container)).toBeNull();
-    expect(label(container)).toHaveTextContent('Problems · 12 open · Critical');
+    expect(label(container)).toHaveTextContent(/^Critical · 12 open$/);
     expect(label(container)).toHaveClass('is-count', 'sev-critical');
   });
 
   it('puts an acknowledged-only count into the label at half strength with the severity word', () => {
     installMeasure(room(0, { bodyHeight: LINE - 1 }));
     const { container } = show({ problems: problems(3, acknowledgedProblem) });
-    expect(label(container)).toHaveTextContent('Problems · 3 open · Warning');
+    expect(label(container)).toHaveTextContent(/^Warning \(acknowledged\) · 3 open$/);
     expect(label(container)).toHaveClass('is-count', 'sev-warning', 'is-acknowledged');
+  });
+
+  it('says in words that an acknowledged critical problem is acknowledged', () => {
+    installMeasure(room(0, { bodyHeight: LINE - 1 }));
+    const acknowledgedCritical = { ...acknowledgedProblem, severity: 'critical' as const };
+    const { container } = show({ problems: problems(3, acknowledgedCritical) });
+    expect(label(container)).toHaveTextContent(/^Critical \(acknowledged\) · 3 open$/);
+    expect(label(container)).toHaveClass('sev-critical', 'is-acknowledged');
+  });
+
+  it.each([
+    ['the label', LINE - 1, label],
+    ['the lone summary', ROW - 1, summary],
+  ] as const)('starts %s with the severity word in a one-column panel', (_, bodyHeight, find) => {
+    installMeasure(room(0, { bodyWidth: 120, bodyHeight }));
+    const { container } = show({ problems: problems(10), more: 2 });
+    expect(find(container)?.textContent?.startsWith('Critical · ')).toBe(true);
+  });
+
+  it('measures the summary line from a one-line sample, even in a narrow panel', () => {
+    installMeasure(room(0, { bodyWidth: 120, bodyHeight: ROW - 1 }));
+    const { container } = show({ problems: problems(10) });
+    const sample = container.querySelector('.wall-problems-more.wall-sample');
+    expect(sample).toHaveClass('wall-ellipsis');
+    // jsdom does not wrap; the CSS rule behind the class keeps the line to one.
+    const css = readFileSync(`${import.meta.dirname}/../wall.css`, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const ellipsis = /\n\.wall \.wall-ellipsis\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(ellipsis).toContain('white-space: nowrap');
+    expect(ellipsis).toContain('text-overflow: ellipsis');
   });
 
   it('keeps the plain label without problems when nothing fits', () => {

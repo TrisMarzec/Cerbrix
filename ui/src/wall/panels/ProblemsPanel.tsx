@@ -92,7 +92,7 @@ function Samples() {
         </div>
         <span class="wall-problem-duration">23 h 59 min</span>
       </div>
-      <div class="wall-problems-more wall-sample" aria-hidden="true">
+      <div class="wall-problems-more wall-ellipsis wall-sample" aria-hidden="true">
         and 0 more
       </div>
       <div class="wall-problems-empty wall-sample" aria-hidden="true">
@@ -100,6 +100,12 @@ function Samples() {
       </div>
     </>
   );
+}
+
+/** The severity of the most urgent problem in words: "Critical", or "Critical (acknowledged)". */
+function urgency(p: Problem): string {
+  const word = severityWord(p.severity);
+  return p.acknowledged_at === null ? word : `${word} (acknowledged)`;
 }
 
 function openProblems(n: number): string {
@@ -149,14 +155,15 @@ export function ProblemsPanel({ panel, now, causes }: Props) {
   const first = panel.problems[0];
   const shows = view(panel, fit);
   const narrow = fit !== null && fit.width < fit.rowWidth;
-  const word = first === undefined ? '' : ` · ${severityWord(first.severity)}`;
+  // The severity word comes first, so an ellipsis on a narrow line cuts the count, never the word.
+  const word = first === undefined ? '' : `${urgency(first)} · `;
   const urgent = first === undefined ? '' : ` ${sevClasses(first)}`;
   const counted = shows.kind === 'label' && total > 0;
 
   return (
     <>
       <div class={`wall-panel-label${counted ? ` is-count${urgent}` : ''}`}>
-        {counted ? `Problems · ${total} open${word}` : 'Problems'}
+        {counted ? `${word}${total} open` : 'Problems'}
       </div>
       <div class={`wall-panel-body wall-problems${narrow ? ' is-narrow' : ''}`} ref={body}>
         <Samples />
@@ -171,7 +178,7 @@ export function ProblemsPanel({ panel, now, causes }: Props) {
           <div class="wall-problems-more wall-ellipsis">{`and ${shows.more} more`}</div>
         )}
         {shows.kind === 'summary' && (
-          <div class={`wall-problems-more wall-ellipsis is-alone${urgent}`}>{`${openProblems(total)}${word}`}</div>
+          <div class={`wall-problems-more wall-ellipsis is-alone${urgent}`}>{`${word}${openProblems(total)}`}</div>
         )}
       </div>
     </>
