@@ -67,13 +67,11 @@ pub async fn enroll(
             return Err(EnrollError::UnknownHost);
         }
     };
-    match store.bind_credential(host.id).await {
-        Ok(credential) => {
-            let version =
-                valid_agent_version(&req.agent_version).then_some(req.agent_version.as_str());
-            store.set_agent_version(host.id, version).await?;
-            Ok(EnrollResponse { credential })
-        }
+    // The version is informational: it is written in the same statement as the binding, so a
+    // failure there cannot leave a bound credential that was never returned to the agent.
+    let version = valid_agent_version(&req.agent_version).then_some(req.agent_version.as_str());
+    match store.bind_credential_with_version(host.id, version).await {
+        Ok(credential) => Ok(EnrollResponse { credential }),
         Err(StateError::Conflict(_)) => Err(EnrollError::AlreadyBound),
         Err(StateError::NotFound) => {
             store.record_unknown_agent(&req.host, now).await?;
@@ -224,6 +222,36 @@ mod tests {
         let resp = enroll(&store, &bad, now()).await.unwrap();
         assert!(resp.credential.starts_with("cbx_ac_"));
         assert_eq!(stored_version(&pool, "web-01").await, None);
+    }
+
+    // A failing version write cannot be provoked without invasive changes, so this proves the
+    // version is written atomically with the binding: a refused binding leaves the stored
+    // version untouched, and a successful one stores it in the same statement.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_version_is_written_atomically_with_the_binding(pool: PgPool) {
+        let (store, key) = setup(pool.clone()).await;
+        let host = store.create_host("web-01").await.unwrap();
+        enroll(&store, &req("web-01", &key), now()).await.unwrap();
+        let mut second = req("web-01", &key);
+        second.agent_version = "2.0.0".to_owned();
+        assert!(matches!(
+            enroll(&store, &second, now()).await,
+            Err(EnrollError::AlreadyBound)
+        ));
+        assert_eq!(
+            stored_version(&pool, "web-01").await.as_deref(),
+            Some("0.1.0")
+        );
+        assert!(matches!(
+            store
+                .bind_credential_with_version(host.id, Some("3.0.0"))
+                .await,
+            Err(crate::state::StateError::Conflict(_))
+        ));
+        assert_eq!(
+            stored_version(&pool, "web-01").await.as_deref(),
+            Some("0.1.0")
+        );
     }
 
     #[test]
