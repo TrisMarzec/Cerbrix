@@ -346,6 +346,147 @@ describe('Graph labels', () => {
   });
 });
 
+describe('Graph on the wall', () => {
+  let rect = { width: 0, height: 0 };
+
+  beforeEach(() => {
+    rect = { width: 0, height: 0 };
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('graph-canvas')
+        ? new DOMRect(0, 0, rect.width, rect.height)
+        : new DOMRect(0, 0, 0, 0);
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function draw(instance: Instance) {
+    const hooks = instance.opts.hooks?.draw;
+    const hook = Array.isArray(hooks) ? hooks[0] : hooks;
+    const canvas = fakeCanvas();
+    hook?.(canvas.u as unknown as uPlot);
+    return canvas;
+  }
+
+  it('with fill takes the width and height of its container and follows a resize', () => {
+    rect = { width: 500.6, height: 300.2 };
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" height={140} fill />);
+    expect(instances).toHaveLength(1);
+    expect(last().opts.width).toBe(500);
+    expect(last().opts.height).toBe(300);
+    rect = { width: 700, height: 350 };
+    act(() => {
+      for (const o of FakeResizeObserver.all) o.fire(0);
+    });
+    expect(instances).toHaveLength(1);
+    expect(last().setSize).toHaveBeenCalledWith({ width: 700, height: 350 });
+  });
+
+  it('with fill draws nothing until its container has a height', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fill />);
+    expect(instances).toHaveLength(0);
+    rect = { width: 400, height: 200 };
+    act(() => {
+      for (const o of FakeResizeObserver.all) o.fire(0);
+    });
+    expect(instances).toHaveLength(1);
+    expect(last().opts).toMatchObject({ width: 400, height: 200 });
+  });
+
+  it('with fill follows the window where ResizeObserver does not exist, and stops on unmount', () => {
+    vi.stubGlobal('ResizeObserver', undefined);
+    rect = { width: 400, height: 200 };
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fill />);
+    rect = { width: 420, height: 210 };
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(last().setSize).toHaveBeenCalledWith({ width: 420, height: 210 });
+    act(() => {
+      view.unmount();
+    });
+    last().setSize.mockClear();
+    window.dispatchEvent(new Event('resize'));
+    expect(last().setSize).not.toHaveBeenCalled();
+  });
+
+  it('with fill stops observing and destroys the plot on unmount', () => {
+    rect = { width: 400, height: 200 };
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fill />);
+    act(() => {
+      view.unmount();
+    });
+    expect(last().destroy).toHaveBeenCalledTimes(1);
+    for (const o of FakeResizeObserver.all) expect(o.disconnect).toHaveBeenCalled();
+  });
+
+  it('with fill writes the severity word on the line instead of a list below', () => {
+    rect = { width: 400, height: 200 };
+    const { container } = render(
+      <Graph now={NOW} points={points([50, 60])} thresholds={THRESHOLDS} unitKey="disk.used_percent" fill />,
+    );
+    expect(container.querySelector('.graph-limits')).toBeNull();
+    expect(draw(last()).texts.map((t) => t.text)).toEqual([
+      'Disk almost full · Critical',
+      'Disk filling up · Warning',
+    ]);
+  });
+
+  it('without interaction has no cursor, no hover and no readout line, but keeps its description', () => {
+    render(
+      <Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" interactive={false} />,
+    );
+    expect(last().opts.cursor?.show).toBe(false);
+    expect(last().opts.hooks?.setCursor).toBeUndefined();
+    expect(screen.queryByTestId('graph-readout')).toBeNull();
+    expect(screen.getByRole('img', { name: 'cpu.usage, latest 2.0 %, 0 thresholds' })).toBeInTheDocument();
+  });
+
+  it('sets the axis font, the axis sizes, the label font and the line width from fontPx', () => {
+    render(<Graph now={NOW} points={points([50, 60])} thresholds={THRESHOLDS} unitKey="x" fontPx={36} />);
+    const [x, y] = last().opts.axes ?? [];
+    expect(x?.font).toMatch(/^36px /);
+    expect(y?.font).toMatch(/^36px /);
+    expect(x?.size).toBeGreaterThan(36);
+    expect(y?.size).toBeGreaterThan(x?.size as number);
+    expect(last().opts.series[1]?.width).toBe(3);
+    const { u } = draw(last());
+    expect(u.ctx.font).toMatch(/^36px /);
+  });
+
+  it('keeps a line width of at least 1.5 for a small font', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fontPx={12} />);
+    expect(last().opts.series[1]?.width).toBe(1.5);
+  });
+
+  it('creates a new plot when fontPx changes', () => {
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fontPx={24} />);
+    const first = last();
+    view.rerender(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fontPx={30} />);
+    expect(first.destroy).toHaveBeenCalledTimes(1);
+    expect(instances).toHaveLength(2);
+    expect(last().opts.axes?.[0]?.font).toMatch(/^30px /);
+  });
+
+  it('keeps the desk look without the wall props', () => {
+    const { container } = render(
+      <Graph now={NOW} points={points([50, 60])} thresholds={THRESHOLDS} unitKey="disk.used_percent" />,
+    );
+    const { opts } = last();
+    expect(opts.axes?.[0]?.font).toBeUndefined();
+    expect(opts.axes?.[0]?.size).toBeUndefined();
+    expect(opts.series[1]?.width).toBe(2);
+    expect(opts.cursor?.show).toBeUndefined();
+    expect(opts.hooks?.setCursor).toHaveLength(1);
+    expect(container.querySelector('.graph-limits')).not.toBeNull();
+    const { u, texts } = draw(last());
+    expect(u.ctx.font).toMatch(/^12px /);
+    expect(texts.map((t) => t.text)).toEqual(['Disk almost full', 'Disk filling up']);
+  });
+});
+
 describe('tickLabels', () => {
   const at = (h: number, m: number, s = 0) => new Date(2026, 10, 17, h, m, s).getTime() / 1000;
 

@@ -7,6 +7,19 @@
   width: 100%;
 }
 
+/* A graph that fills its parent: the canvas box takes all of its height, and its size never
+   depends on the plot inside it (a flex basis of 0), so the plot follows the box, not the reverse. */
+.graph.is-fill {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.graph.is-fill .graph-canvas {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
 /* uPlot's own stylesheet draws the crosshair in a fixed colour: take ours. */
 .graph-canvas .u-hz .u-cursor-x,
 .graph-canvas .u-vt .u-cursor-y {

@@ -13,6 +13,9 @@
   --wall-meta: calc(var(--u) * 28);
   --wall-label: calc(var(--u) * 26);
   --wall-small: calc(var(--u) * 24);
+  --wall-value-s: calc(var(--u) * 60);
+  --wall-value-m: calc(var(--u) * 90);
+  --wall-value-l: calc(var(--u) * 120);
   height: 100vh;
   overflow: hidden;
   display: flex;
@@ -401,4 +404,105 @@
 .wall .wall-panel-body > .wall-square.wall-sample {
   right: auto;
   margin-right: var(--square-gap);
+}
+
+/* Graph and value panels */
+
+/* The graph panel's label line: the series left, cut when long, and the latest value right, at
+   the 38 size, which never is. */
+.wall .wall-panel-label.has-latest {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(var(--u) * 20);
+}
+
+.wall .wall-panel-label-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wall .wall-panel-latest {
+  flex: 0 0 auto;
+  font-size: var(--wall-text);
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* The graph covers the body; the plot takes the size of its canvas box. */
+.wall .wall-graph > .graph {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+/* "No data": one dim line at the 38 size. */
+.wall .wall-nodata {
+  white-space: nowrap;
+  font-size: var(--wall-text);
+  color: var(--dim);
+}
+
+/* The value panel: the value block centred in the height, the value over its age, or beside it
+   in a one-row panel. The panel measures the samples, one per size, and shows the largest that
+   fits. */
+.wall .wall-value-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.wall .wall-value {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.wall .wall-value.is-inline {
+  flex-direction: row;
+  align-items: baseline;
+  gap: calc(var(--u) * 20);
+}
+
+.wall .wall-value-number {
+  font-size: var(--wall-text);
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.wall .wall-value.is-s .wall-value-number {
+  font-size: var(--wall-value-s);
+}
+
+.wall .wall-value.is-m .wall-value-number {
+  font-size: var(--wall-value-m);
+}
+
+.wall .wall-value.is-l .wall-value-number {
+  font-size: var(--wall-value-l);
+}
+
+.wall .wall-value-age {
+  font-size: var(--wall-label);
+  color: var(--dim);
+}
+
+.wall .wall-value.is-inline .wall-value-age {
+  flex: 0 1 auto;
+}
+
+/* Older than ten minutes: the word "old" and the warning colour. */
+.wall .wall-value-age.is-old {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+/* The value samples are as wide as their content, so the panel can compare them with the body. */
+.wall .wall-panel-body > .wall-value.wall-sample {
+  right: auto;
+  width: max-content;
 }
