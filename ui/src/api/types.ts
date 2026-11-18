@@ -220,6 +220,75 @@ export interface Series {
   thresholds: Threshold[];
 }
 
+/** Where a panel sits on the 12 by 6 grid of a dashboard, in cells. */
+export interface Placement {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** A host of a dashboard with its state; `state` is `null` without open problems. */
+export interface DashboardHost {
+  name: string;
+  state: HostState | null;
+}
+
+/** The open problems of the dashboard's hosts (at most 100) and how many are not in the list. */
+export interface ProblemsPanelData extends Placement {
+  type: 'problems';
+  problems: Problem[];
+  more: number;
+}
+
+/** How many hosts the dashboard shows, how many have no problems, and the hosts, problem hosts first. */
+export interface HostStatesPanelData extends Placement {
+  type: 'host-states';
+  total: number;
+  without_problems: number;
+  hosts: DashboardHost[];
+}
+
+/** The history of one series; `points` is `null` when it could not be read or is not one series. */
+export interface GraphPanelData extends Placement {
+  type: 'graph';
+  host: string;
+  item: string;
+  /** Always an object, `{}` without parameters. */
+  params: Record<string, string>;
+  /** The configured range, such as `6h`. */
+  range: string;
+  step_secs: number;
+  /** `[timestamp_ms, value]` in time order. */
+  points: [number, number][] | null;
+  thresholds: Threshold[];
+}
+
+/** The newest value of one series; `value` and `at` are `null` when there is none to show. */
+export interface ValuePanelData extends Placement {
+  type: 'value';
+  host: string;
+  item: string;
+  params: Record<string, string>;
+  value: number | null;
+  /** When the value was measured. */
+  at: string | null;
+}
+
+export type Panel = ProblemsPanelData | HostStatesPanelData | GraphPanelData | ValuePanelData;
+
+/** `GET /dashboards/{id}`: everything one dashboard shows. */
+export interface DashboardDetail {
+  id: string;
+  name: string;
+  file: string;
+  priority: number;
+  hosts: DashboardHost[];
+  panels: Panel[];
+  /** False when the data of a panel could not be read from the metrics store. */
+  metrics_available: boolean;
+}
+
 /** `GET /problems`: a page of problems, the number of all matching problems, and the dashboards of each host on the page. */
 export interface ProblemsAnswer extends Listed<Problem> {
   /** For every host in `items`: the dashboards that show it (sorted by name); empty for a host in none. */

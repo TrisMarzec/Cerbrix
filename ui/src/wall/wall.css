@@ -1,0 +1,163 @@
+/* The wall (concept sections 7 and 8.1, mockup direction A). Every length is a multiple of --u, a
+   1920th of the viewport width, so a 4K monitor shows the same layout as a Full HD one, sharper.
+   Every font size is one of the type sizes below; none is smaller than 24 at 1920. All rules are
+   scoped under the frame, so nothing here reaches the desk pages. */
+
+.wall {
+  --u: calc(100vw / 1920);
+  --wall-title: calc(var(--u) * 60);
+  --wall-host: calc(var(--u) * 48);
+  --wall-clock: calc(var(--u) * 42);
+  --wall-text: calc(var(--u) * 38);
+  --wall-band: calc(var(--u) * 30);
+  --wall-meta: calc(var(--u) * 28);
+  --wall-label: calc(var(--u) * 26);
+  --wall-small: calc(var(--u) * 24);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.wall.is-idle {
+  cursor: none;
+}
+
+/* Header: the name left, the sync state and the clock right. */
+.wall .wall-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(var(--u) * 42);
+  padding: calc(var(--u) * 31) calc(var(--u) * 42) calc(var(--u) * 21);
+}
+
+.wall .wall-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--wall-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.wall .wall-meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--u) * 46);
+  white-space: nowrap;
+  font-size: var(--wall-meta);
+  color: var(--dim);
+}
+
+.wall .wall-sync.is-in-sync {
+  color: var(--git);
+}
+
+.wall .wall-sync.is-out-of-sync,
+.wall .wall-sync.is-lost {
+  color: var(--warning);
+}
+
+.wall .wall-sync.is-never {
+  color: var(--dim);
+}
+
+.wall .wall-clock {
+  font-size: var(--wall-clock);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.wall.is-idle .wall-back {
+  visibility: hidden;
+}
+
+/* Bands under the header: the switch band first, then the Out Of Sync band. */
+.wall .wall-band {
+  padding: calc(var(--u) * 12) calc(var(--u) * 42);
+  color: var(--bg);
+  font-size: var(--wall-band);
+  font-weight: 600;
+}
+
+.wall .wall-band.is-alarm {
+  background: var(--critical);
+}
+
+.wall .wall-band.is-out-of-sync {
+  background: var(--warning);
+}
+
+.wall .wall-band-line {
+  display: flex;
+  gap: calc(var(--u) * 16);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.wall .wall-band-detail {
+  font-size: var(--wall-label);
+  font-weight: 500;
+}
+
+.wall .wall-band-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wall .wall-band-more {
+  flex: 0 0 auto;
+}
+
+/* The content fills what is left of the screen. Without connection it stays, dimmed. */
+.wall .wall-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wall .wall-content.is-lost {
+  opacity: 0.45;
+}
+
+/* The 12 by 6 grid of a dashboard. */
+.wall .wall-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-rows: repeat(6, minmax(0, 1fr));
+  gap: calc(var(--u) * 21);
+  padding: calc(var(--u) * 25) calc(var(--u) * 42) calc(var(--u) * 38);
+}
+
+.wall .wall-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: calc(var(--u) * 21) calc(var(--u) * 25);
+  border-radius: calc(var(--u) * 10);
+  background: var(--panel);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wall,
+  .wall *,
+  .wall *::before,
+  .wall *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
