@@ -47,10 +47,11 @@ beforeEach(() => {
     gap: 6,
     charWidth: 10,
   });
-  // The plot's container and the value samples, which the helper does not measure.
+  // The plot's container, the value samples and the "No data" line, which the helper does not measure.
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     if (this.classList.contains('graph-canvas')) return new DOMRect(0, 0, 1000, 600);
     if (this.classList.contains('wall-value')) return new DOMRect(0, 0, 300, 200);
+    if (this.classList.contains('wall-nodata')) return new DOMRect(0, 0, 300, 46);
     return Element.prototype.getBoundingClientRect.call(this);
   });
 });
@@ -128,6 +129,24 @@ describe('DashboardView', () => {
     expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
     expect(screen.getByText(/^Out of sync since/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Back to the desk' })).toHaveAttribute('href', '/dashboards');
+  });
+
+  it('tells the graph and value panels without data that the metrics are not available', () => {
+    const panels = dashboardDetailFixture().panels.map((p) =>
+      p.type === 'graph' ? { ...p, points: null } : p.type === 'value' ? { ...p, value: null, at: null } : p,
+    );
+    const { container } = show({ dashboard: dashboardDetailFixture({ panels, metrics_available: false }) });
+    const notes = [...container.querySelectorAll('.wall-nodata:not(.wall-sample)')].map((n) => n.textContent);
+    expect(notes).toEqual(['Metrics are not available right now', 'Metrics are not available right now']);
+    expect(screen.queryByText('No data')).not.toBeInTheDocument();
+    // The problems and host states come from the database and are still shown.
+    expect(container.querySelector('.wall-problem:not(.wall-sample)')).toHaveTextContent('Disk almost full');
+  });
+
+  it('says "No data" for a panel without data while the metrics are available', () => {
+    const panels = dashboardDetailFixture().panels.map((p) => (p.type === 'graph' ? { ...p, points: null } : p));
+    const { container } = show({ dashboard: dashboardDetailFixture({ panels }) });
+    expect(container.querySelector('.wall-nodata:not(.wall-sample)')).toHaveTextContent(/^No data$/);
   });
 
   it('says that a dashboard without panels has none, in place of the grid', () => {

@@ -5,7 +5,7 @@ import { Graph } from '../../components/Graph';
 import { age, severityWord, value } from '../../lib/format';
 import { box, px, useFit, useFitOn } from '../measure';
 import { useWallUnit } from '../unit';
-import { rangeSecs, rangeWords, seriesLabel } from './series';
+import { noDataText, rangeSecs, rangeWords, seriesLabel } from './series';
 
 /** The axis font at 1920, in --u: the smallest wall size. */
 const AXIS_FONT_U = 24;
@@ -75,6 +75,8 @@ function thresholdCount(n: number): string {
 interface Props {
   panel: GraphPanelData;
   now: Date;
+  /** False when the dashboard answer says the metrics store could not be read. */
+  metricsAvailable?: boolean;
 }
 
 /**
@@ -84,7 +86,8 @@ interface Props {
  * room on the plot, the label line names the worst threshold in words. A body too low for a plot
  * leaves the label alone.
  */
-export function GraphPanel({ panel, now }: Props) {
+export function GraphPanel({ panel, now, metricsAvailable = true }: Props) {
+  const emptyText = noDataText(metricsAvailable);
   const u = useWallUnit();
   const fontPx = Math.round(AXIS_FONT_U * u);
   const { body, fit } = useFit(measureLayout);
@@ -144,9 +147,9 @@ export function GraphPanel({ panel, now }: Props) {
       </div>
       <div class="wall-panel-body wall-graph" ref={body}>
         <div class="wall-nodata wall-sample" aria-hidden="true">
-          No data
+          {emptyText}
         </div>
-        {shows === 'no-data' && <div class="wall-nodata">No data</div>}
+        {shows === 'no-data' && <div class="wall-nodata">{emptyText}</div>}
         {shows === 'graph' && (
           <Graph
             key={series}

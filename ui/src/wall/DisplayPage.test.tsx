@@ -556,11 +556,75 @@ describe('DisplayPage: what it shows', () => {
     expect(layers()).toHaveLength(1);
     await walk(3000);
     expect(frontShows()).toBe('alpha');
+    // Standing in, the old grid is dimmed as lost content is.
+    expect(document.querySelector('.wall-layer:not(.is-leaving)')).toHaveClass('is-lost');
     expect(screen.queryByText('This dashboard could not be loaded.')).not.toBeInTheDocument();
     await walk(1000);
     expect(title()).toBe('Beta');
     expect(frontShows()).toBe('beta');
     expect(dimmed()).toBe(false);
+    expect(document.querySelector('.wall-layer:not(.is-leaving)')).not.toHaveClass('is-lost');
+  });
+
+  it('never lets a sentence stand in for the next dashboard: the area is blank until it answers', async () => {
+    const slowBeta: Responder = () =>
+      new Promise<Answer>((resolve) => setTimeout(() => resolve({ json: beta }), 3000));
+    await open({
+      [STATE]: { json: ROTATING },
+      [dash('a')]: { status: 403, json: { error: 'forbidden', message: 'this display may not show that dashboard' } },
+      [dash('b')]: slowBeta,
+    });
+    expect(screen.getByText('This display may not show a.')).toBeInTheDocument();
+    await advance(30_000);
+    await settle();
+    await advance(400);
+    expect(title()).toBe('Beta');
+    expect(screen.queryByText('This display may not show a.')).not.toBeInTheDocument();
+    expect(document.querySelector('.wall-layer:not(.is-leaving)')?.textContent).toBe('');
+    await walk(3000);
+    expect(frontShows()).toBe('beta');
+  });
+
+  it('never lets "could not be loaded" stand in either', async () => {
+    const slowBeta: Responder = () =>
+      new Promise<Answer>((resolve) => setTimeout(() => resolve({ json: beta }), 3000));
+    await open({
+      [STATE]: { json: ROTATING },
+      [dash('a')]: { status: 500, json: { error: 'internal', message: 'boom' } },
+      [dash('b')]: slowBeta,
+    });
+    expect(screen.getByText('This dashboard could not be loaded.')).toBeInTheDocument();
+    await advance(30_000);
+    await settle();
+    await advance(400);
+    expect(screen.queryByText('This dashboard could not be loaded.')).not.toBeInTheDocument();
+    expect(document.querySelector('.wall-layer:not(.is-leaving)')?.textContent).toBe('');
+    await walk(3000);
+    expect(frontShows()).toBe('beta');
+  });
+
+  it('measures the stand-in time from when the old grid left the front, not from each new request', async () => {
+    const fast = { ...ROTATING, show: { rotate: ['a', 'b', 'c'], every: '5s' } };
+    const slow =
+      (answer: Answer): Responder =>
+      () =>
+        new Promise<Answer>((resolve) => setTimeout(() => resolve(answer), 8000));
+    await open({
+      [STATE]: { json: fast },
+      [dash('a')]: { json: alpha },
+      [dash('b')]: slow({ json: beta }),
+      [dash('c')]: slow({ json: gamma }),
+    });
+    expect(frontShows()).toBe('alpha');
+    await walk(5000);
+    expect(title()).toBe('Beta');
+    expect(frontShows()).toBe('alpha');
+    // 5 s later the rotation is at Gamma: Alpha's picture does not stand in under a third title.
+    await walk(5000);
+    await advance(400);
+    expect(title()).toBe('Gamma');
+    expect(frontShows()).toBeUndefined();
+    expect(document.querySelectorAll('.wall-panel')).toHaveLength(0);
   });
 
   it('stops standing in after 5 s without an answer and says the dashboard could not be loaded', async () => {

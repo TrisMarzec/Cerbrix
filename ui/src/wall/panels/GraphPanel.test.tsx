@@ -188,6 +188,15 @@ describe('GraphPanel', () => {
     expect(instances).toHaveLength(0);
   });
 
+  it('says that the metrics are not available instead of "No data" when the store is down', () => {
+    layout(200);
+    const { container } = render(
+      <GraphPanel panel={graphPanelFixture({ points: null })} now={NOW} metricsAvailable={false} />,
+    );
+    expect(noData(container)).toHaveTextContent(/^Metrics are not available right now$/);
+    expect(instances).toHaveLength(0);
+  });
+
   it('shows only the label, with the latest value, when the body is too low for a plot', () => {
     layout(80);
     const { container } = show();

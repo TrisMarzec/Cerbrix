@@ -1,7 +1,7 @@
 import type { ValuePanelData } from '../../api/types';
 import { age, value } from '../../lib/format';
 import { box, useFitOn } from '../measure';
-import { seriesLabel } from './series';
+import { noDataText, seriesLabel } from './series';
 
 /** A value older than this is marked as old, so a stuck value is not read as current. */
 const OLD_MS = 10 * 60_000;
@@ -87,13 +87,16 @@ function Block({ step, text, age: ago, sample = false, cut }: BlockProps) {
 interface Props {
   panel: ValuePanelData;
   now: Date;
+  /** False when the dashboard answer says the metrics store could not be read. */
+  metricsAvailable?: boolean;
 }
 
 /**
  * The latest value of one item, as large as the panel allows, with its age; a value older than
  * ten minutes says so in the warning colour. A body too low for one line leaves the label alone.
  */
-export function ValuePanel({ panel, now }: Props) {
+export function ValuePanel({ panel, now, metricsAvailable = true }: Props) {
+  const emptyText = noDataText(metricsAvailable);
   const text = panel.value === null ? null : value(panel.item, panel.value);
   const at = panel.at;
   const ago: Age | null =
@@ -111,10 +114,10 @@ export function ValuePanel({ panel, now }: Props) {
       <div class="wall-panel-label">{label}</div>
       <div class="wall-panel-body wall-value-body" ref={body}>
         <div class="wall-nodata wall-sample" aria-hidden="true">
-          No data
+          {emptyText}
         </div>
         {text !== null && STEPS.map((s) => <Block key={s} step={s} text={text} age={sampleAge} sample />)}
-        {noData && <div class="wall-nodata">No data</div>}
+        {noData && <div class="wall-nodata">{emptyText}</div>}
         {step !== undefined && text !== null && (
           <Block step={step.step} text={text} age={ago} cut={step.cut ? whole : undefined} />
         )}

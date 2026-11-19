@@ -61,7 +61,7 @@ function bandOf(state: DisplayState, shown: Shown): WallAlarm | undefined {
 
 /** What one layer of the grid area shows: a dashboard's panels, a sentence, or nothing yet. */
 type Layer =
-  | { key: string; kind: 'grid'; data: DashboardDetail; causes: string[] }
+  | { key: string; kind: 'grid'; data: DashboardDetail; causes: string[]; standIn?: boolean }
   | { key: string; kind: 'text'; text: string }
   | { key: 'blank'; kind: 'blank' };
 
@@ -69,6 +69,14 @@ const BLANK: Layer = { key: 'blank', kind: 'blank' };
 
 function text(key: string, sentence: string): Layer {
   return { key, kind: 'text', text: sentence };
+}
+
+/** The classes of a layer's element: a grid standing in is dimmed as lost content is. */
+function layerClass(layer: Layer, state: string | undefined): string {
+  const classes = ['wall-layer'];
+  if (state !== undefined) classes.push(state);
+  if (layer.kind === 'grid' && layer.standIn === true) classes.push('is-lost');
+  return classes.join(' ');
 }
 
 interface RunningProps {
@@ -87,9 +95,9 @@ interface RunningProps {
 /**
  * A display that knows its state, in one frame for the life of the page (ruling R11): which
  * dashboard it shows (`whatToShow`), the poll of that dashboard, and the cross-fade of the grid
- * area when it changes. The title and the band follow the state at once; the previous picture
- * stands in for a new dashboard only briefly, and the header measures "lost" from the last answer
- * of the picture in front (ruling R12).
+ * area when it changes. The title and the band follow the state at once; the previous grid (never
+ * a sentence) stands in for a new dashboard only briefly and dimmed, and the header measures
+ * "lost" from the last answer of the picture in front (ruling R12).
  */
 function RunningDisplay({ id, state, answers, now, stateLost, stateError, onLogin }: RunningProps) {
   const [wake, setWake] = useState(0);
@@ -136,12 +144,29 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError, onLogi
     }
   }
 
+  // The last grid that was the current picture, and when it stopped being that (monotonic ms). Only
+  // a grid stands in for the next dashboard, never a sentence; and only for `HANDOVER_MS` after it
+  // left the front, however often the dashboard to show changes meanwhile.
+  const lastGrid = useRef<{ layer: Layer; leftAt: number | undefined } | undefined>(undefined);
+  if (current?.kind === 'grid') {
+    lastGrid.current = { layer: current, leftAt: undefined };
+  } else if (current !== undefined) {
+    lastGrid.current = undefined;
+  } else if (lastGrid.current !== undefined && lastGrid.current.leftAt === undefined) {
+    lastGrid.current = { layer: lastGrid.current.layer, leftAt: nowMs };
+  }
+  const grid = lastGrid.current;
+  const standInUntil = grid?.leftAt === undefined ? undefined : grid.leftAt + HANDOVER_MS;
+  // Standing in, the old grid is dimmed and marks no causes: they belong to the dashboard named.
+  const standIn: Layer | undefined =
+    current === undefined && grid?.layer.kind === 'grid' && standInUntil !== undefined && nowMs < standInUntil
+      ? { ...grid.layer, causes: NO_CAUSES, standIn: true }
+      : undefined;
+
   // The picture in front and the one fading out under it; at most these two.
   const last = useRef<Layer | undefined>(undefined);
   const leaving = useRef<Layer | undefined>(undefined);
   const previous = last.current;
-  // Standing in, the previous picture marks no causes: they belong to the dashboard shown.
-  const standIn = previous?.kind === 'grid' ? { ...previous, causes: NO_CAUSES } : previous;
   const front = current ?? standIn ?? BLANK;
   if (previous !== undefined && previous.key !== front.key) {
     // Once per change: the new picture fades in over the old one, which a newer change replaces.
@@ -184,6 +209,7 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError, onLogi
     rotationDueAt(state.show, shown.rotation),
     missingDueAt(missing, state, nowMs, answers),
     handingOver ? poll.since.mono + HANDOVER_MS : undefined,
+    standIn !== undefined ? standInUntil : undefined,
   ].filter((at): at is number => at !== undefined);
   const next = due.length === 0 ? undefined : Math.min(...due);
   useEffect(() => {
@@ -211,11 +237,11 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError, onLogi
     >
       <div class="wall-layers">
         {old !== undefined && (
-          <div key={old.key} class="wall-layer is-leaving" aria-hidden="true">
+          <div key={old.key} class={layerClass(old, 'is-leaving')} aria-hidden="true">
             {draw(old)}
           </div>
         )}
-        <div key={front.key} class={old !== undefined ? 'wall-layer is-entering' : 'wall-layer'}>
+        <div key={front.key} class={layerClass(front, old !== undefined ? 'is-entering' : undefined)}>
           {draw(front)}
         </div>
       </div>

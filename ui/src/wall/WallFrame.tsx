@@ -45,11 +45,10 @@ function waitingSentence(waiting: number): string | null {
   return null;
 }
 
+/** The names of the band: what is shown and where the display came from. */
 function alarmText(alarm: WallAlarm): string {
   const sentences = [`Alarm: showing ${alarm.showing}.`];
   if (alarm.switchedFrom !== undefined) sentences.push(`Switched from ${alarm.switchedFrom}.`);
-  const waiting = waitingSentence(alarm.waiting);
-  if (waiting !== null) sentences.push(waiting);
   return sentences.join(' ');
 }
 
@@ -70,6 +69,24 @@ function SyncText({ sync }: { sync: SyncState | undefined }) {
     default:
       return null;
   }
+}
+
+/** The switch band (D10). The names take the ellipsis; the count after them never shrinks. */
+function AlarmBand({ alarm }: { alarm: WallAlarm }) {
+  const waiting = waitingSentence(alarm.waiting);
+  return (
+    <div class="wall-band is-alarm" role="status">
+      <p class="wall-band-line">
+        <span class="wall-band-text">{alarmText(alarm)}</span>
+        {waiting !== null && (
+          <>
+            {' '}
+            <span class="wall-band-more">{waiting}</span>
+          </>
+        )}
+      </p>
+    </div>
+  );
 }
 
 function OutOfSyncBand({ sync, now }: { sync: SyncState; now: Date }) {
@@ -182,13 +199,7 @@ export function WallFrame({
       </header>
       {/* Without connection the bands dim with the content: they are as old as it is. */}
       <div class={lostSince !== undefined ? 'wall-body is-lost' : 'wall-body'}>
-        {alarm !== undefined && (
-          <div class="wall-band is-alarm" role="status">
-            <p class="wall-band-line">
-              <span class="wall-band-text">{alarmText(alarm)}</span>
-            </p>
-          </div>
-        )}
+        {alarm !== undefined && <AlarmBand alarm={alarm} />}
         {sync?.status === 'out_of_sync' && <OutOfSyncBand sync={sync} now={now} />}
         <div class="wall-content">{children}</div>
       </div>

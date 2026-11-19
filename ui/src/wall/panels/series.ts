@@ -36,3 +36,12 @@ export function rangeSecs(range: string): number | undefined {
   if (parsed === undefined || unit === undefined || parsed.n === 0) return undefined;
   return parsed.n * unit;
 }
+
+/**
+ * What a graph or value panel without data says: "No data", or, when the dashboard answer says the
+ * metrics store could not be read, that the metrics are not available, so an outage of the store
+ * does not read as hosts that stopped sending.
+ */
+export function noDataText(metricsAvailable: boolean): string {
+  return metricsAvailable ? 'No data' : 'Metrics are not available right now';
+}

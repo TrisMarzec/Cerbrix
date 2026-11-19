@@ -23,16 +23,24 @@ interface Props {
 }
 
 /** The content of one panel by its type; a type this page does not know yet keeps its cell. */
-function PanelContent({ panel, now, causes }: { panel: Panel; now: Date; causes: string[] }) {
+interface ContentProps {
+  panel: Panel;
+  now: Date;
+  causes: string[];
+  /** False when the metrics store could not be read: the graph and value panels say so. */
+  metricsAvailable: boolean;
+}
+
+function PanelContent({ panel, now, causes, metricsAvailable }: ContentProps) {
   switch (panel.type) {
     case 'problems':
       return <ProblemsPanel panel={panel} now={now} causes={causes} />;
     case 'host-states':
       return <HostStatesPanel panel={panel} />;
     case 'graph':
-      return <GraphPanel panel={panel} now={now} />;
+      return <GraphPanel panel={panel} now={now} metricsAvailable={metricsAvailable} />;
     case 'value':
-      return <ValuePanel panel={panel} now={now} />;
+      return <ValuePanel panel={panel} now={now} metricsAvailable={metricsAvailable} />;
     default:
       // A newer server may have panel types this page does not know: they must not break it.
       return (
@@ -48,7 +56,12 @@ function PanelContent({ panel, now, causes }: { panel: Panel; now: Date; causes:
 export function DashboardGrid({ dashboard, now, causes }: { dashboard: DashboardDetail; now: Date; causes: string[] }) {
   if (dashboard.panels.length === 0) return <p class="wall-no-panels">This dashboard has no panels.</p>;
   return (
-    <PanelGrid panels={dashboard.panels} render={(panel) => <PanelContent panel={panel} now={now} causes={causes} />} />
+    <PanelGrid
+      panels={dashboard.panels}
+      render={(panel) => (
+        <PanelContent panel={panel} now={now} causes={causes} metricsAvailable={dashboard.metrics_available} />
+      )}
+    />
   );
 }
 

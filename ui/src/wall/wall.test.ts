@@ -112,6 +112,12 @@ describe('wall.css', () => {
     expect(block).toMatch(/animation:\s*none/);
   });
 
+  it('cuts the names of a band line, never the count at its end', () => {
+    expect(rule('.wall .wall-band-text')).toMatch(/overflow:\s*hidden;[\s\S]*text-overflow:\s*ellipsis;/);
+    expect(rule('.wall .wall-band-text')).toMatch(/min-width:\s*0;/);
+    expect(rule('.wall .wall-band-more')).toMatch(/flex:\s*0 0 auto;/);
+  });
+
   it('hides the cursor while idle', () => {
     expect(rule('.wall.is-idle')).toContain('cursor: none');
   });

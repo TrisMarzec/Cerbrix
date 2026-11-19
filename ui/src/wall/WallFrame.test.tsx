@@ -182,6 +182,21 @@ describe('WallFrame switch band', () => {
     expect(band[0]).toHaveTextContent(new RegExp(`^${text.replace(/[.]/g, '\\.')}$`));
   });
 
+  it('keeps the waiting count whole in its own element, so two long names take the ellipsis', () => {
+    const showing = 'Customer A – Frankfurt data centre north';
+    const switchedFrom = 'Customer B – Hamburg data centre (south)';
+    expect([showing.length, switchedFrom.length]).toEqual([40, 40]);
+    const { container } = show({ alarm: { showing, switchedFrom, waiting: 3 } });
+    const line = container.querySelector('.wall-band.is-alarm .wall-band-line');
+    const text = line?.querySelector('.wall-band-text');
+    const more = line?.querySelector('.wall-band-more');
+    expect(text).toHaveTextContent(`Alarm: showing ${showing}. Switched from ${switchedFrom}.`);
+    expect(more).toHaveTextContent(/^3 more dashboards waiting\.$/);
+    // The count comes after the names, outside the element that is cut.
+    expect(text?.contains(more ?? null)).toBe(false);
+    expect(line?.lastElementChild).toBe(more);
+  });
+
   it('comes before the Out Of Sync band', () => {
     const { container } = show({ sync: outOfSync, alarm: { showing: 'Kunde B', waiting: 0 } });
     const band = bands(container);

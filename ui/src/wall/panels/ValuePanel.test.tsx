@@ -158,6 +158,17 @@ describe('ValuePanel', () => {
     expect(container.querySelector('.wall-panel-label')).toHaveTextContent('db-01 · load.1m');
   });
 
+  it('says that the metrics are not available instead of "No data" when the store is down', () => {
+    body(600, 300);
+    const { container } = render(
+      <ValuePanel panel={valuePanelFixture({ value: null, at: null })} now={NOW} metricsAvailable={false} />,
+    );
+    expect(container.querySelector('.wall-nodata:not(.wall-sample)')).toHaveTextContent(
+      /^Metrics are not available right now$/,
+    );
+    expect(shown(container)).toBeNull();
+  });
+
   it('shows only the label when "No data" does not fit', () => {
     body(600, 40);
     const { container } = show({ value: null, at: null });
