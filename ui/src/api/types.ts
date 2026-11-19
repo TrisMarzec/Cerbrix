@@ -148,6 +148,25 @@ export interface Display {
   waiting: string[];
 }
 
+/** `GET /display/{id}`: what a wall monitor needs on each poll. */
+export interface DisplayState {
+  id: string;
+  name: string;
+  show: DisplayShow;
+  switch_on_alarm: { min_severity: Severity } | null;
+  /** The dashboards the display may ever show. */
+  allowed: string[];
+  /** The name of each dashboard in `allowed` that exists, by id. */
+  names: Record<string, string>;
+  /** The dashboard to show because of an alarm, or `null` to follow `show`. */
+  target: string | null;
+  /** The ids of the alarms of `target`, most urgent first. */
+  causes: string[];
+  /** The other dashboards with an alarm, in the order the display would take them. */
+  waiting: string[];
+  sync: SyncState;
+}
+
 /** One item of the effective configuration of a host (`GET /hosts/{name}`). */
 export interface HostItem {
   key: string;

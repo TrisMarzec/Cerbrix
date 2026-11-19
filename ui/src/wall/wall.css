@@ -589,3 +589,130 @@
   outline: calc(var(--u) * 3) solid var(--git);
   outline-offset: calc(var(--u) * 3);
 }
+
+/* Display page */
+
+/* The layers of a display: the shown dashboard, and during a change (D13) the one before it, which
+   fades out while the new one fades in over it. Both are full frames, stacked. */
+.wall.wall-layers {
+  position: relative;
+}
+
+.wall .wall-layer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  opacity: 1;
+  transition: opacity 400ms ease-in-out;
+}
+
+@starting-style {
+  .wall .wall-layer.is-entering {
+    opacity: 0;
+  }
+}
+
+.wall .wall-layer.is-leaving {
+  opacity: 0;
+}
+
+/* "This display may not show ...": one dim line at the 38 size in the grid's place. */
+.wall .wall-display-text {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--u) * 42);
+  overflow-wrap: anywhere;
+  font-size: var(--wall-text);
+  color: var(--dim);
+  text-align: center;
+}
+
+/* Before a display can be shown: one sentence at the 38 size on the dark root, centred; dim, or in
+   the warning colour without a connection. */
+.wall .wall-notice {
+  flex: 1 1 auto;
+  max-width: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--u) * 42);
+  font-size: var(--wall-text);
+  color: var(--dim);
+  text-align: center;
+}
+
+.wall .wall-notice.is-warning {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.wall .wall-notice-text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* The token form, read from a normal distance: the heading at 38, the rest at 26. */
+.wall .wall-token {
+  flex: 1 1 auto;
+  max-width: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--u) * 42);
+}
+
+.wall .wall-token-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(var(--u) * 21);
+  width: calc(var(--u) * 760);
+  max-width: 100%;
+  font-size: var(--wall-label);
+}
+
+.wall .wall-token-title {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  margin-bottom: calc(var(--u) * 12);
+  font-size: var(--wall-text);
+  font-weight: 600;
+}
+
+.wall .wall-token-label {
+  color: var(--dim);
+}
+
+.wall .wall-token-input {
+  width: 100%;
+  padding: calc(var(--u) * 12) calc(var(--u) * 16);
+  border-radius: calc(var(--u) * 8);
+  font-size: var(--wall-label);
+  background: var(--panel);
+}
+
+.wall .wall-token-button {
+  padding: calc(var(--u) * 10) calc(var(--u) * 32);
+  border-radius: calc(var(--u) * 8);
+  font-size: var(--wall-label);
+  font-weight: 600;
+}
+
+.wall .wall-token-input:focus-visible,
+.wall .wall-token-button:focus-visible {
+  outline: calc(var(--u) * 3) solid var(--git);
+  outline-offset: calc(var(--u) * 3);
+}
+
+.wall .wall-token-message {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.wall .wall-token-notice {
+  color: var(--dim);
+}

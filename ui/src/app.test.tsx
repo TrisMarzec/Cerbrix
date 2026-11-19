@@ -139,14 +139,16 @@ describe('App paths', () => {
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
   });
 
-  it('shows the display placeholder at /display/<id> without asking for the session', async () => {
+  it('shows the wall display at /display/<id> without asking for the session', async () => {
     window.history.replaceState(null, '', '/display/x');
-    mock = mockFetch({ 'GET /session': { json: { name: 'anna', role: 'viewer' } } });
+    mock = mockFetch({ 'GET /session': { json: { name: 'anna', role: 'viewer' } }, 'GET /display/x': UNAUTHORIZED });
     vi.useFakeTimers();
-    const { container } = render(<App />);
-    expect(container).toHaveTextContent('Wall display x');
+    render(<App />);
     await advance(100);
-    expect(mock.requests).toHaveLength(0);
+    expect(screen.getByRole('heading', { name: 'Wall display x' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Display token')).toBeInTheDocument();
+    expect(mock.count('GET /display/x')).toBe(1);
+    expect(mock.count('GET /session')).toBe(0);
   });
 
   it.each([

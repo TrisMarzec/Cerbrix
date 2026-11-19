@@ -1,0 +1,105 @@
+import type { DisplayShow, DisplayState } from '../api/types';
+
+/** The units of a duration as the configuration writes it. */
+export type EveryUnit = 's' | 'm' | 'h' | 'd';
+
+const UNIT_SECONDS: Record<EveryUnit, number> = { s: 1, m: 60, h: 3600, d: 86_400 };
+
+/**
+ * The parts of a duration as the configuration writes it, in order: "1m30s" → 1 m, 30 s. Undefined
+ * for anything else (spaces, decimals, signs, capitals, an empty text). The one parser of `every`.
+ */
+export function everyParts(text: string): { amount: number; unit: EveryUnit }[] | undefined {
+  if (!/^(\d+[smhd])+$/.test(text)) return undefined;
+  return [...text.matchAll(/(\d+)([smhd])/g)].map((m) => ({ amount: Number(m[1]), unit: m[2] as EveryUnit }));
+}
+
+/** "30s", "5m", "1h", "1m30s" → seconds; anything else → undefined. */
+export function parseEvery(text: string): number | undefined {
+  return everyParts(text)?.reduce((sum, part) => sum + part.amount * UNIT_SECONDS[part.unit], 0);
+}
+
+/** A rotation never moves on faster than this: an `every` that is shorter or unreadable counts as it. */
+const MIN_EVERY_MS = 5000;
+
+/** The dashboards a display goes through when nothing is wrong; a fixed display has one. */
+export function rotationList(show: DisplayShow): string[] {
+  return 'dashboard' in show ? [show.dashboard] : show.rotate;
+}
+
+/** How long each dashboard of a rotation is shown, in ms; undefined for a fixed display. */
+export function rotationMs(show: DisplayShow): number | undefined {
+  if ('dashboard' in show) return undefined;
+  return Math.max(MIN_EVERY_MS, (parseEvery(show.every) ?? 0) * 1000);
+}
+
+/** The position in the rotation list and when it was reached (monotonic ms). */
+export interface Rotation {
+  index: number;
+  since: number;
+}
+
+export interface Shown {
+  /** The dashboard to show; undefined when no dashboard of the display exists. */
+  dashboard: string | undefined;
+  /** Set while an alarm decides what is shown: where the display came from and how many wait. */
+  alarm?: { switchedFrom?: string; waiting: number };
+  rotation: Rotation;
+}
+
+/**
+ * While an alarm holds the rotation, `since` lies in the future: the first call without an alarm
+ * starts the interrupted dashboard's interval at that moment, so it gets its full time.
+ */
+const HELD = Number.POSITIVE_INFINITY;
+
+/** The first entry from `from` on (wrapping) that is not missing; undefined when all are. */
+function presentFrom(list: string[], from: number, missing: ReadonlySet<string>): number | undefined {
+  for (let step = 0; step < list.length; step += 1) {
+    const i = (from + step) % list.length;
+    const id = list[i];
+    if (id !== undefined && !missing.has(id)) return i;
+  }
+  return undefined;
+}
+
+/**
+ * What a display shows (concept section 6), from the server's state, the page's rotation, the
+ * current monotonic time and the dashboards that answered 404. Pure: the caller keeps the returned
+ * rotation and passes it in again.
+ *
+ * - The alarm target, when the server names one the display may show (and it exists), is shown;
+ *   the rotation holds where it is.
+ * - Otherwise the rotation's current dashboard is shown; it moves on, wrapping, when its interval is
+ *   over, skipping dashboards that do not exist. One that turns out not to exist is left at once and
+ *   the next gets a full interval, as does the interrupted dashboard after an alarm.
+ */
+export function whatToShow(
+  state: DisplayState,
+  rotation: Rotation,
+  nowMs: number,
+  missing: ReadonlySet<string>,
+): Shown {
+  const list = rotationList(state.show);
+  const every = rotationMs(state.show);
+  const start = list.length === 0 ? 0 : ((rotation.index % list.length) + list.length) % list.length;
+  const found = presentFrom(list, start, missing);
+  const current = found === undefined ? undefined : list[found];
+
+  const target = state.target;
+  if (target !== null && state.allowed.includes(target) && !missing.has(target)) {
+    const alarm: { switchedFrom?: string; waiting: number } = { waiting: state.waiting.length };
+    if (current !== undefined && current !== target) alarm.switchedFrom = current;
+    return { dashboard: target, alarm, rotation: { index: found ?? start, since: HELD } };
+  }
+
+  if (found === undefined) return { dashboard: undefined, rotation: { index: start, since: nowMs } };
+  let index = found;
+  // Back from an alarm, or the dashboard at this place does not exist: a full interval from now.
+  let since = rotation.since > nowMs || found !== start ? nowMs : rotation.since;
+  if (every !== undefined && nowMs - since >= every) {
+    index = presentFrom(list, index + 1, missing) ?? index;
+    since = nowMs;
+  }
+  return { dashboard: list[index], rotation: { index, since } };
+}
