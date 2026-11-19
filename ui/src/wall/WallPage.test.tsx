@@ -223,6 +223,25 @@ describe('WallPage', () => {
     expect(container.querySelectorAll('.wall-panel')).toHaveLength(4);
   });
 
+  it('keeps the picture on a plain-text 404 (a reverse proxy while the server restarts), not the not-found page', async () => {
+    const { container } = await open({ [DASHBOARD]: { json: kundeA } });
+    mock.on(DASHBOARD, { status: 404, text: '404 page not found' });
+    await advance(5000);
+    expect(screen.queryByText('There is no dashboard named kunde-a.')).not.toBeInTheDocument();
+    expect(title()).toBe('Kunde A');
+    expect(container.querySelectorAll('.wall-panel')).toHaveLength(4);
+    await advance(15_000);
+    expect(screen.getByText(/^The server reported an error since/)).toBeInTheDocument();
+    expect(dimmed(container)).toBe(true);
+  });
+
+  it('keeps the picture on a plain-text 403 of a gateway', async () => {
+    const { container } = await open({ [DASHBOARD]: { json: kundeA } });
+    mock.on(DASHBOARD, { status: 403, text: 'Forbidden' });
+    await advance(5000);
+    expect(container.querySelectorAll('.wall-panel')).toHaveLength(4);
+  });
+
   it('says that there is no such dashboard for 404, with a link back to the dashboards', async () => {
     const { container } = await open({}, 'gone');
     expect(screen.getByText('There is no dashboard named gone.')).toBeInTheDocument();

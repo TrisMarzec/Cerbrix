@@ -158,25 +158,55 @@ export function noteMissing(
 }
 
 /**
- * The dashboards held out now (ruling R10 amended): a rotation entry for `MISSING_RETRY_MS` after
- * its 404; the alarm target only until the next state answer (`answer` is the number of the
- * latest), so a target that came back is asked for again at once. A changed `allowed` list tries
- * every dashboard again.
+ * When holding the rotation entries out leaves the display nothing to show, they are tried again
+ * after this long instead: the poll interval.
  */
-export function stillMissing(missing: Missing, state: DisplayState, nowMs: number, answer: number): Set<string> {
+export const EMPTY_RETRY_MS = 5000;
+
+/**
+ * The dashboards held out with `retryMs` as a rotation entry's retry time. The target of the newest
+ * state answer is held out only by its own 404 as the target, and only until the next state answer
+ * (ruling R15): a 404 it gave as a rotation entry never holds it out.
+ */
+function heldWith(missing: Missing, state: DisplayState, nowMs: number, answer: number, retryMs: number): Set<string> {
   const held = new Set<string>();
   for (const [dashboard, entry] of entriesFor(missing, state)) {
-    const holds = entry.answer === undefined ? nowMs - entry.at < MISSING_RETRY_MS : answer <= entry.answer;
+    const holds =
+      entry.answer !== undefined
+        ? answer <= entry.answer
+        : dashboard !== state.target && nowMs - entry.at < retryMs;
     if (holds) held.add(dashboard);
   }
   return held;
 }
 
+/** The retry time of the rotation entries now: short when holding them out leaves nothing to show. */
+function retryFor(missing: Missing, state: DisplayState, nowMs: number, answer: number): number {
+  const held = heldWith(missing, state, nowMs, answer, MISSING_RETRY_MS);
+  const target = state.target;
+  const targetShown = target !== null && state.allowed.includes(target) && !held.has(target);
+  const list = rotationList(state.show);
+  const nothing = !targetShown && list.length > 0 && list.every((id) => held.has(id));
+  return nothing ? EMPTY_RETRY_MS : MISSING_RETRY_MS;
+}
+
+/**
+ * The dashboards held out now (rulings R10 amended, R15): a rotation entry for `MISSING_RETRY_MS`
+ * after its 404, or `EMPTY_RETRY_MS` when that would leave nothing to show; the alarm target only
+ * until the next state answer (`answer` is the number of the latest), so a target that came back
+ * is asked for again at once. A dashboard the newest state names as the target is never held out
+ * by a rotation entry's 404. A changed `allowed` list tries every dashboard again.
+ */
+export function stillMissing(missing: Missing, state: DisplayState, nowMs: number, answer: number): Set<string> {
+  return heldWith(missing, state, nowMs, answer, retryFor(missing, state, nowMs, answer));
+}
+
 /** When the next held-out rotation entry is due to be tried again (monotonic ms); undefined without one. */
-export function missingDueAt(missing: Missing, state: DisplayState, nowMs: number): number | undefined {
-  const due = [...entriesFor(missing, state).values()]
-    .filter((entry) => entry.answer === undefined)
-    .map((entry) => entry.at + MISSING_RETRY_MS)
+export function missingDueAt(missing: Missing, state: DisplayState, nowMs: number, answer: number): number | undefined {
+  const retryMs = retryFor(missing, state, nowMs, answer);
+  const due = [...entriesFor(missing, state)]
+    .filter(([dashboard, entry]) => entry.answer === undefined && dashboard !== state.target)
+    .map(([, entry]) => entry.at + retryMs)
     .filter((at) => at > nowMs);
   return due.length === 0 ? undefined : Math.min(...due);
 }

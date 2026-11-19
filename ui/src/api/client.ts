@@ -92,6 +92,17 @@ export async function errorFrom(response: Response): Promise<ApiError> {
   return new ApiError(response.status, code, message);
 }
 
+/**
+ * Whether `e` is the API's own error answer with `code` (ruling R15): its JSON body names the code.
+ * A reverse proxy or gateway in between answers 404, 401 or 403 with a page of its own (`errorFrom`
+ * gives that the code `internal`), which says nothing about the dashboard, the token or the role:
+ * decide on the code, never on the bare status.
+ */
+export function isApiError(e: unknown, code: string): boolean {
+  // Status 0 is no answer at all.
+  return e instanceof ApiError && e.status !== 0 && e.code === code;
+}
+
 /** No answer: fetch failed, the request was aborted, or the time limit passed. */
 export function networkError(): ApiError {
   return new ApiError(0, 'network', 'Could not reach the server');

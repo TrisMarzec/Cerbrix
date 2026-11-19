@@ -2,6 +2,7 @@ import type { DisplayState } from '../api/types';
 import {
   everyParts,
   followShow,
+  EMPTY_RETRY_MS,
   MISSING_RETRY_MS,
   missingDueAt,
   NO_MISSING,
@@ -236,8 +237,8 @@ describe('the missing dashboards', () => {
     expect([...stillMissing(missing, s, 1000, 1)]).toEqual(['b']);
     expect([...stillMissing(missing, s, 1000 + MISSING_RETRY_MS - 1, 50)]).toEqual(['b']);
     expect([...stillMissing(missing, s, 1000 + MISSING_RETRY_MS, 50)]).toEqual([]);
-    expect(missingDueAt(missing, s, 2000)).toBe(1000 + MISSING_RETRY_MS);
-    expect(missingDueAt(missing, s, 1000 + MISSING_RETRY_MS)).toBeUndefined();
+    expect(missingDueAt(missing, s, 2000, 1)).toBe(1000 + MISSING_RETRY_MS);
+    expect(missingDueAt(missing, s, 1000 + MISSING_RETRY_MS, 50)).toBeUndefined();
   });
 
   it('holds the alarm target out only until the next state answer', () => {
@@ -246,7 +247,7 @@ describe('the missing dashboards', () => {
     expect([...stillMissing(missing, s, 1000, 7)]).toEqual(['x']);
     expect([...stillMissing(missing, s, 2000, 8)]).toEqual([]);
     // No timer for it: the next state answer decides.
-    expect(missingDueAt(missing, s, 2000)).toBeUndefined();
+    expect(missingDueAt(missing, s, 2000, 8)).toBeUndefined();
   });
 
   it('tries every dashboard again when the allowed list changes', () => {
@@ -254,9 +255,34 @@ describe('the missing dashboards', () => {
     expect(stillMissing(missing, s, 2000, 3).size).toBe(2);
     const changed = state({ allowed: ['a', 'b', 'c'] });
     expect(stillMissing(missing, changed, 2000, 3).size).toBe(0);
-    expect(missingDueAt(missing, changed, 2000)).toBeUndefined();
+    expect(missingDueAt(missing, changed, 2000, 3)).toBeUndefined();
     // A 404 under the new list starts a new set.
     expect([...stillMissing(noteMissing(missing, changed, 'c', 2000, undefined), changed, 2000, 3)]).toEqual(['c']);
+  });
+
+  it('never holds out the target of the newest state for a 404 it gave as a rotation entry (R15)', () => {
+    const missing = noteMissing(NO_MISSING, s, 'b', 1000, undefined);
+    const alarm = state({ target: 'b' });
+    expect([...stillMissing(missing, alarm, 2000, 4)]).toEqual([]);
+    expect(whatToShow(alarm, START, 2000, stillMissing(missing, alarm, 2000, 4)).dashboard).toBe('b');
+    // Its 404 as the target holds it until the next state answer only.
+    const again = noteMissing(missing, alarm, 'b', 3000, 4);
+    expect([...stillMissing(again, alarm, 3000, 4)]).toEqual(['b']);
+    expect([...stillMissing(again, alarm, 3000, 5)]).toEqual([]);
+  });
+
+  it('tries the held-out entries again after 5 s when holding them out leaves nothing to show', () => {
+    const fixed = state({ show: { dashboard: 'a' } });
+    const missing = noteMissing(NO_MISSING, fixed, 'a', 1000, undefined);
+    expect([...stillMissing(missing, fixed, 1000 + EMPTY_RETRY_MS - 1, 1)]).toEqual(['a']);
+    expect([...stillMissing(missing, fixed, 1000 + EMPTY_RETRY_MS, 1)]).toEqual([]);
+    expect(missingDueAt(missing, fixed, 2000, 1)).toBe(1000 + EMPTY_RETRY_MS);
+    // A rotation with every entry missing, too.
+    const all = ['a', 'b', 'c'].reduce((m, id) => noteMissing(m, s, id, 1000, undefined), NO_MISSING);
+    expect(missingDueAt(all, s, 2000, 1)).toBe(1000 + EMPTY_RETRY_MS);
+    // While something else can be shown, the five minutes stay.
+    const one = noteMissing(NO_MISSING, s, 'b', 1000, undefined);
+    expect(missingDueAt(one, s, 2000, 1)).toBe(1000 + MISSING_RETRY_MS);
   });
 
   it('changes nothing it is given', () => {

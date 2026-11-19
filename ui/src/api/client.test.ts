@@ -1,6 +1,7 @@
 import {
   api,
   ApiError,
+  isApiError,
   newSessionGeneration,
   onSessionDoubt,
   onUnauthorized,
@@ -51,6 +52,28 @@ describe('api.get', () => {
     const error: unknown = await api.get('/hosts').catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 0, code: 'network' });
+  });
+});
+
+describe('isApiError', () => {
+  it("tells the API's own error answer by its code, not by the status", async () => {
+    mock = mockFetch({
+      'GET /a': { status: 404, json: { error: 'not_found', message: 'no such dashboard' } },
+      // A reverse proxy while the server restarts: the same status, a page of its own.
+      'GET /b': { status: 404, text: '404 page not found' },
+      'GET /c': { status: 401, text: 'Unauthorized' },
+      'GET /d': { status: 403, json: { error: 'forbidden', message: 'no' } },
+      'GET /e': 'network',
+    });
+    const errorOf = (path: string) => api.probe(path).catch((e: unknown) => e);
+    expect(isApiError(await errorOf('/a'), 'not_found')).toBe(true);
+    expect(isApiError(await errorOf('/b'), 'not_found')).toBe(false);
+    expect(isApiError(await errorOf('/c'), 'unauthorized')).toBe(false);
+    expect(isApiError(await errorOf('/d'), 'forbidden')).toBe(true);
+    expect(isApiError(await errorOf('/d'), 'not_found')).toBe(false);
+    expect(isApiError(await errorOf('/e'), 'network')).toBe(false);
+    expect(isApiError(new Error('not_found'), 'not_found')).toBe(false);
+    expect(isApiError(undefined, 'not_found')).toBe(false);
   });
 });
 

@@ -214,6 +214,13 @@ describe('DisplayPage: the token', () => {
     expect(storedToken(ID)).toBeUndefined();
   });
 
+  it("does not call a token invalid on a gateway's plain-text 401", async () => {
+    await open({ [STATE]: [UNAUTHORIZED, { status: 401, text: 'Unauthorized' }] });
+    await enter(TOKEN);
+    expect(screen.queryByText('This token is not valid for this display.')).not.toBeInTheDocument();
+    expect(screen.getByText('The server reported an error.')).toBeInTheDocument();
+  });
+
   it('says that the server could not be reached when checking the token fails', async () => {
     await open({ [STATE]: [UNAUTHORIZED, 'network'] });
     await enter(TOKEN);
@@ -639,6 +646,125 @@ describe('DisplayPage: what it shows', () => {
     mock.on(STATE, { json: displayState({ allowed: ['a', 'b', 'c'] }) });
     await advance(5000);
     await settle();
+    expect(title()).toBe('Alpha');
+  });
+});
+
+describe("DisplayPage: only the API's own answers decide (R15)", () => {
+  // A reverse proxy answers so for every path while the server container restarts.
+  const PROXY_404: Answer = { status: 404, text: '404 page not found' };
+  const PROXY_401: Answer = { status: 401, text: 'Unauthorized' };
+  const API_404: Answer = { status: 404, json: { error: 'not_found', message: 'no such dashboard' } };
+
+  it('keeps the picture on a plain-text 404 of the state, and says after 15 s that the server reported an error', async () => {
+    await open({ [STATE]: { json: displayState() }, [dash('a')]: { json: alpha } });
+    mock.on(STATE, PROXY_404);
+    mock.on(dash('a'), PROXY_404);
+    await walk(14_000);
+    expect(screen.queryByText(`There is no display named ${ID}.`)).not.toBeInTheDocument();
+    expect(title()).toBe('Alpha');
+    expect(frontShows()).toBe('alpha');
+    expect(dimmed()).toBe(false);
+    await walk(1000);
+    expect(screen.getByText(/^The server reported an error since/)).toHaveTextContent(
+      'The server reported an error since 14:30',
+    );
+    expect(dimmed()).toBe(true);
+    expect(frontShows()).toBe('alpha');
+  });
+
+  it('says that the server reported an error, not that there is no such display, for a plain-text 404 at the start', async () => {
+    await open({ [STATE]: PROXY_404 });
+    expect(screen.queryByText(`There is no display named ${ID}.`)).not.toBeInTheDocument();
+    expect(screen.getByText('The server reported an error')).toBeInTheDocument();
+  });
+
+  it('does not take a plain-text 404 of a dashboard for a missing one: the rotation does not skip it', async () => {
+    const three = { ...ROTATING, show: { rotate: ['a', 'b', 'c'], every: '30s' } };
+    await open({
+      [STATE]: { json: three },
+      [dash('a')]: { json: alpha },
+      [dash('b')]: PROXY_404,
+      [dash('c')]: { json: gamma },
+    });
+    await advance(30_000);
+    await settle();
+    await advance(400);
+    // Not skipped to Gamma: Beta is named, could not be loaded, and is asked for again.
+    expect(title()).toBe('Beta');
+    expect(screen.getByText('This dashboard could not be loaded.')).toBeInTheDocument();
+    expect(mock.count(dash('c'))).toBe(0);
+    await walk(5000);
+    expect(mock.count(dash('b'))).toBe(2);
+    expect(title()).toBe('Beta');
+  });
+
+  it('keeps the picture of the shown dashboard on a plain-text 404 of it', async () => {
+    await open({ [STATE]: { json: displayState() }, [dash('a')]: { json: alpha } });
+    mock.on(dash('a'), PROXY_404);
+    await walk(10_000);
+    expect(frontShows()).toBe('alpha');
+    expect(screen.queryByText('This display has no dashboard to show.')).not.toBeInTheDocument();
+    await walk(5000);
+    expect(screen.getByText(/^The server reported an error since/)).toBeInTheDocument();
+    expect(frontShows()).toBe('alpha');
+  });
+
+  it('does not forget the token on a plain-text 401, and keeps the picture', async () => {
+    await open(
+      { [STATE]: withToken({ json: displayState() }), [dash('a')]: withToken({ json: alpha }) },
+      { token: TOKEN },
+    );
+    mock.on(STATE, PROXY_401);
+    mock.on(dash('a'), PROXY_401);
+    await walk(15_000);
+    expect(storedToken(ID)).toBe(TOKEN);
+    expect(screen.queryByLabelText('Display token')).not.toBeInTheDocument();
+    expect(frontShows()).toBe('alpha');
+    expect(screen.getByText(/^The server reported an error since/)).toBeInTheDocument();
+    // The polls go on, and the display is back when the server is.
+    mock.on(STATE, withToken({ json: displayState() }));
+    mock.on(dash('a'), withToken({ json: alpha }));
+    await walk(5000);
+    expect(screen.queryByText(/reported an error/)).not.toBeInTheDocument();
+  });
+
+  it('asks for a target that is also a held-out rotation entry again with the next state', async () => {
+    const three = { ...ROTATING, show: { rotate: ['a', 'b', 'c'], every: '30s' } };
+    await open({
+      [STATE]: { json: three },
+      [dash('a')]: { json: alpha },
+      [dash('b')]: API_404,
+      [dash('c')]: { json: gamma },
+    });
+    await advance(30_000);
+    await settle();
+    // b does not exist: skipped, and held out as a rotation entry for five minutes.
+    expect(mock.count(dash('b'))).toBe(1);
+    expect(title()).toBe('Gamma');
+    // The newest state names b as the target: asked for with it, not after five minutes.
+    mock.on(STATE, { json: { ...three, target: 'b' } });
+    await walk(5000);
+    expect(mock.count(dash('b'))).toBe(2);
+    // Still not there: held out until the next state, which asks for it again.
+    await walk(5000);
+    expect(mock.count(dash('b'))).toBe(3);
+    mock.on(dash('b'), { json: beta });
+    await walk(5000);
+    expect(title()).toBe('Beta');
+    expect(band()).toBe('Alarm: showing Beta. Switched from Gamma.');
+  });
+
+  it('tries the dashboards again after 5 s when holding them out leaves nothing to show', async () => {
+    await open({ [STATE]: { json: displayState() }, [dash('a')]: [API_404, { json: alpha }] });
+    expect(screen.getByText('This display has no dashboard to show.')).toBeInTheDocument();
+    expect(mock.count(dash('a'))).toBe(1);
+    await advance(4999);
+    await settle();
+    expect(mock.count(dash('a'))).toBe(1);
+    await advance(1);
+    await settle();
+    expect(mock.count(dash('a'))).toBe(2);
     expect(title()).toBe('Alpha');
   });
 });

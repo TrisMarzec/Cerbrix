@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { ApiError, READ_LIMIT_MS, seg } from '../api/client';
+import { ApiError, isApiError, READ_LIMIT_MS, seg } from '../api/client';
 import type { DashboardDetail, DisplayState } from '../api/types';
 import { displayGet, forgetToken, storedToken } from './displayClient';
 
@@ -27,8 +27,9 @@ function asApiError(e: unknown): ApiError {
 /**
  * Polls the state of a display while `active`: at once, or, with `seed` (the answer the token form
  * just got), 5 seconds after it; then 5 seconds after each answer, so one request at most is in
- * flight. A failure keeps the last state and never stops the loop, except a 401: the stored token
- * the request carried is forgotten, `onUnauthorized(withToken)` is called and the loop stops.
+ * flight. A failure keeps the last state and never stops the loop, except the API's own 401 (R15):
+ * the stored token the request carried is forgotten, `onUnauthorized(withToken)` is called and the
+ * loop stops. A 401 without the API's JSON body (a gateway's) is an ordinary failure.
  * Inactive, or on unmount, the request in flight is aborted and no timer is left.
  */
 export function useDisplayState(
@@ -71,7 +72,8 @@ export function useDisplayState(
         (e: unknown) => {
           if (mine.signal.aborted) return;
           const error = asApiError(e);
-          if (error.status === 401) {
+          // Only the API's own 401 (R15): a gateway's is an ordinary failure, and the token stays.
+          if (isApiError(error, 'unauthorized')) {
             // Only the token this request carried: one entered meanwhile is not touched.
             if (sent !== undefined && storedToken(id) === sent) forgetToken(id);
             unauthorized.current(sent !== undefined);
@@ -144,7 +146,8 @@ function loadDashboard(id: string, dashboard: string, signal: AbortSignal): Prom
  * Polls the dashboard a display shows: at once when it changes, then 5 seconds after each answer,
  * one request at most in flight. Everything it gives back belongs to `dashboard`: a change starts
  * from nothing in the same render, so a page never takes one dashboard's answer for another's. A
- * 401 changes nothing here (the state poll handles the token); a 403 drops the data.
+ * 401 of the API changes nothing here (the state poll handles the token); its 403 drops the data.
+ * A 401 or 403 without the API's JSON body is an ordinary failure (R15).
  */
 export function useDashboardPoll(id: string, dashboard: string | undefined): DashboardPoll {
   const entry = useRef<DashboardPoll>(fresh(dashboard));
@@ -176,9 +179,9 @@ export function useDashboardPoll(id: string, dashboard: string | undefined): Das
         (e: unknown) => {
           if (request.signal.aborted) return;
           const error = asApiError(e);
-          if (error.status !== 401) {
+          if (!isApiError(error, 'unauthorized')) {
             mine.error = error;
-            if (error.status === 403) {
+            if (isApiError(error, 'forbidden')) {
               mine.data = undefined;
               mine.answeredAt = moment();
             }

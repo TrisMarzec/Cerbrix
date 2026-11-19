@@ -2,7 +2,7 @@ import './wall.css';
 
 import { useEffect } from 'preact/hooks';
 
-import { api, ApiError, seg } from '../api/client';
+import { api, ApiError, isApiError, seg } from '../api/client';
 import type { DashboardDetail, Status } from '../api/types';
 import { usePolled } from '../lib/poll';
 import { Link } from '../lib/router';
@@ -39,7 +39,8 @@ export function WallPage({ id }: { id: string }) {
     document.title = `${name ?? id} · Cerbrix`;
   }, [name, id]);
 
-  if (dashboard.error?.status === 404) {
+  // Only the API's own 404 (R15): a proxy's while the server restarts keeps the picture.
+  if (isApiError(dashboard.error, 'not_found')) {
     // Not a wall: a page on the wall's dark background with the way back.
     return (
       <div class="wall">

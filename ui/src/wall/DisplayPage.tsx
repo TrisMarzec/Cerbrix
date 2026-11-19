@@ -2,7 +2,7 @@ import './wall.css';
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
-import { ApiError, serverSkewMs } from '../api/client';
+import { ApiError, isApiError, serverSkewMs } from '../api/client';
 import type { DashboardDetail, DisplayState } from '../api/types';
 import { useServerNow } from '../lib/serverNow';
 import { DashboardGrid } from './DashboardView';
@@ -104,7 +104,8 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError }: Runn
   const isTarget = shown.alarm !== undefined;
 
   const poll = useDashboardPoll(id, dashboard);
-  const notFound = dashboard !== undefined && poll.error?.status === 404;
+  // Only the API's own 404 (R15): a proxy's while the server restarts is an ordinary failure.
+  const notFound = dashboard !== undefined && isApiError(poll.error, 'not_found');
   useEffect(() => {
     if (!notFound || dashboard === undefined) return;
     const at = performance.now();
@@ -117,7 +118,7 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError }: Runn
   let handingOver = false;
   if (dashboard === undefined) {
     current = text('none', 'This display has no dashboard to show.');
-  } else if (poll.error?.status === 403) {
+  } else if (isApiError(poll.error, 'forbidden')) {
     current = text(`forbidden:${dashboard}`, `This display may not show ${dashboard}.`);
   } else {
     title = poll.data?.name ?? state.names[dashboard] ?? dashboard;
@@ -160,7 +161,7 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError }: Runn
   const answered = useRef<Moment>(moment());
   if (dashboard === undefined) {
     answered.current = moment();
-  } else if (poll.answeredAt !== undefined && (current?.kind === 'grid' || poll.error?.status === 403)) {
+  } else if (poll.answeredAt !== undefined && (current?.kind === 'grid' || isApiError(poll.error, 'forbidden'))) {
     answered.current = poll.answeredAt;
   }
   const stale = nowMs - answered.current.mono >= LOST_MS;
@@ -177,7 +178,7 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError }: Runn
   // stand-in time is over or the picture in front gets too old.
   const due = [
     rotationDueAt(state.show, shown.rotation),
-    missingDueAt(missing, state, nowMs),
+    missingDueAt(missing, state, nowMs, answers),
     handingOver ? poll.since.mono + HANDOVER_MS : undefined,
     stale ? undefined : answered.current.mono + LOST_MS,
   ].filter((at): at is number => at !== undefined);
@@ -281,7 +282,7 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
   }
   // A logged-in user asking for a display that is not (or no longer) in the configuration; a sync
   // may add it, so the poll goes on.
-  if (poll.error?.status === 404) return <Notice text={`There is no display named ${id}.`} />;
+  if (isApiError(poll.error, 'not_found')) return <Notice text={`There is no display named ${id}.`} />;
   if (poll.state === undefined) {
     if (poll.error === undefined) return <div class="wall" />;
     return (

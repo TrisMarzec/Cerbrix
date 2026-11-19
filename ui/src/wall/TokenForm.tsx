@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { ApiError } from '../api/client';
+import { ApiError, isApiError } from '../api/client';
 import type { DisplayState } from '../api/types';
 import { displayGet, storeToken, tokenKept } from './displayClient';
 
@@ -17,7 +17,8 @@ interface Props {
 
 function messageFor(e: unknown): string {
   const status = e instanceof ApiError ? e.status : 0;
-  if (status === 401) return 'This token is not valid for this display.';
+  // Only the API's own 401 (R15): a gateway's says nothing about the token.
+  if (isApiError(e, 'unauthorized')) return 'This token is not valid for this display.';
   if (status === 0) return 'Could not reach the server.';
   return 'The server reported an error.';
 }
