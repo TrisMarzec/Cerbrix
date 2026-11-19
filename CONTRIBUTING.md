@@ -86,7 +86,9 @@ Compose lower-cases it in the name of the network that the smoke run joins.
 ## Browser smoke run
 
 `ui/e2e/smoke.spec.ts` is one Playwright test (Chromium) that logs in, visits every page,
-acknowledges a problem, creates a display token and logs out. It fails on any console error,
+creates a display token, opens the dashboard `e2e` on the screen, starts the wall display with
+the token in a second browser context without a session (where it shows the alarm), then
+acknowledges the problem and logs out. It fails on any console error,
 failed request to the server, status 500 or higher and content security policy violation. It
 needs a running server in the state `scripts/e2e.sh` leaves before this step:
 
@@ -98,9 +100,11 @@ needs a running server in the state `scripts/e2e.sh` leaves before this step:
 - the configuration in sync (see `CERBRIX_UI_SMOKE_EXPECT_SYNC` below).
 
 The run fails on the first unexpected 401 answer: a load of a page without a login is allowed
-one 401 for `GET /session`, a wrong password one more, and the run fails when an allowed one
-does not happen. The spec never passes the password to Playwright's `fill`, whose error log
-echoes the value; it sets the field's value with `evaluate`, which is not logged. `npm run check`
+one 401 for `GET /session`, a wrong password one more, the wall display opened without a token
+one for `GET /display/e2e-wall`, and the wrong token entered on it one more for the same route;
+the run fails when an allowed one does not happen. The spec never passes the password or the
+display token to Playwright's `fill`, whose error log echoes the value; it sets the field's value
+with `evaluate`, which is not logged. `npm run check`
 does not run the smoke run. By hand, in `ui/`:
 
 ```sh

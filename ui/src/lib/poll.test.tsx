@@ -147,6 +147,24 @@ describe('usePolled', () => {
     expect(screen.getByText('stale=-')).toBeInTheDocument();
   });
 
+  it("drops the data and skips a 401 only for the API's own answers, not for a gateway's (R15)", async () => {
+    // A gateway's 403 and 401 have no JSON body: `errorFrom` gives them the code internal.
+    const load = vi
+      .fn<Loader>()
+      .mockResolvedValueOnce('shown')
+      .mockRejectedValueOnce(new ApiError(403, 'internal', 'The server answered 403'))
+      .mockRejectedValueOnce(new ApiError(401, 'internal', 'The server answered 401'));
+    render(<Probe load={load} />);
+    await advance(0);
+    await advance(10000);
+    expect(screen.getByText('data=shown')).toBeInTheDocument();
+    expect(screen.getByText('error=internal')).toBeInTheDocument();
+    await advance(10000);
+    expect(screen.getByText('data=shown')).toBeInTheDocument();
+    expect(screen.getByText('error=internal')).toBeInTheDocument();
+    expect(screen.getByText(/^stale=\d/)).toBeInTheDocument();
+  });
+
   it('never throws on an error that is not an ApiError', async () => {
     const load = vi.fn<Loader>().mockRejectedValue(new Error('boom'));
     render(<Probe load={load} />);

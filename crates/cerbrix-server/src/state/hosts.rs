@@ -69,6 +69,12 @@ impl StateStore {
     /// Like [`Self::bind_credential`], and sets the agent version in the same statement, so the
     /// binding and the version stand or fall together (a failing version write can never leave
     /// a bound credential the agent did not receive).
+    ///
+    /// The host row is locked `FOR UPDATE`, not `FOR SHARE`: the statement updates that row
+    /// afterwards, and two concurrent binds that both held a share lock would each wait for the
+    /// other (one on the credential's key, one on the row) until PostgreSQL broke the deadlock
+    /// with an error that is not `Conflict`. With the exclusive lock the second bind waits for
+    /// the first and then fails on the primary key.
     pub async fn bind_credential_with_version(
         &self,
         host_id: Uuid,
@@ -78,7 +84,7 @@ impl StateStore {
         let done = sqlx::query(
             "WITH bound AS ( \
                  INSERT INTO agent_credentials (host_id, credential_hash) \
-                 SELECT id, $2 FROM hosts WHERE id = $1 AND active FOR SHARE \
+                 SELECT id, $2 FROM hosts WHERE id = $1 AND active FOR UPDATE \
                  RETURNING host_id) \
              UPDATE hosts SET agent_version = $3 WHERE id IN (SELECT host_id FROM bound)",
         )

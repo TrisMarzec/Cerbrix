@@ -1,10 +1,11 @@
 import './DashboardsPage.css';
 
-import { api } from '../api/client';
+import { api, seg } from '../api/client';
 import type { DashboardSummary, Display, HostsByState, Severity } from '../api/types';
 import { Banner } from '../components/Banner';
 import { Empty } from '../components/Empty';
 import { StaleNote } from '../components/StaleNote';
+import { durationParts, type DurationUnit } from '../lib/duration';
 import { severityWord } from '../lib/format';
 import { usePolled } from '../lib/poll';
 import { Link } from '../lib/router';
@@ -88,14 +89,13 @@ function ProblemsInWords({ dashboard }: { dashboard: DashboardSummary }) {
   );
 }
 
-const UNIT_WORDS: Record<string, string> = { s: 's', m: 'min', h: 'h', d: 'd' };
+const UNIT_WORDS: Record<DurationUnit, string> = { s: 's', m: 'min', h: 'h', d: 'd' };
 
 /** "90s" → "90 s", "1m30s" → "1 min 30 s", "1d" → "1 d"; anything else as given. */
 function every(text: string): string {
-  if (!/^(\d+[smhd])+$/.test(text)) return text;
-  return [...text.matchAll(/(\d+)([smhd])/g)]
-    .map((m) => `${m[1] ?? ''} ${UNIT_WORDS[m[2] ?? ''] ?? ''}`)
-    .join(' ');
+  const parts = durationParts(text);
+  if (parts === undefined) return text;
+  return parts.map((p) => `${p.amount} ${UNIT_WORDS[p.unit]}`).join(' ');
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -114,6 +114,7 @@ function DashboardTable({ items }: { items: DashboardSummary[] }) {
             <th scope="col" class="right">
               Priority
             </th>
+            <th scope="col">Wall</th>
           </tr>
         </thead>
         <tbody>
@@ -135,6 +136,12 @@ function DashboardTable({ items }: { items: DashboardSummary[] }) {
                 <ProblemsInWords dashboard={d} />
               </td>
               <td class="right num">{d.priority}</td>
+              <td>
+                {/* The hidden name makes each link's accessible name unique; the row shows it. Two spaces collapse into one. */}
+                <Link href={`/wall/${seg(d.id)}`}>
+                  Open <span class="visually-hidden">{d.name}</span> on this screen
+                </Link>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -188,7 +195,10 @@ function DisplayTable({ items, nameOf }: { items: Display[]; nameOf: (id: string
           {items.map((d) => (
             <tr key={d.id}>
               <th scope="row">
-                <span class="dashboard-name">{d.name}</span>
+                {/* The hidden words make the link's accessible name say where it leads. */}
+                <Link class="dashboard-name" href={`/display/${seg(d.id)}`}>
+                  <span class="visually-hidden">Open the wall display</span> {d.name}
+                </Link>
                 <small>{settingSentence(d, nameOf)}</small>
               </th>
               <td>

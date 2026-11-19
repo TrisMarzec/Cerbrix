@@ -3,7 +3,7 @@ import type uPlot from 'uplot';
 
 import type { Threshold } from '../api/types';
 import { NOW } from '../test/fixtures';
-import { Graph, tickLabels } from './Graph';
+import { Graph, placeLabels, tickLabels } from './Graph';
 
 interface Instance {
   opts: uPlot.Options;
@@ -11,6 +11,7 @@ interface Instance {
   target: HTMLElement;
   setSize: ReturnType<typeof vi.fn>;
   setData: ReturnType<typeof vi.fn>;
+  setScale: ReturnType<typeof vi.fn>;
   destroy: ReturnType<typeof vi.fn>;
 }
 
@@ -25,6 +26,7 @@ vi.mock('uplot', () => ({
       self.target = target;
       self.setSize = vi.fn();
       self.setData = vi.fn();
+      self.setScale = vi.fn();
       self.destroy = vi.fn();
       instances.push(self);
     }
@@ -343,6 +345,295 @@ describe('Graph labels', () => {
     const [label] = drawWith([THRESHOLDS[0] as Threshold], () => 7);
     expect(label).toMatchObject({ align: 'right', baseline: 'top' });
     expect(label?.y).toBeGreaterThan(7);
+  });
+});
+
+describe('Graph on the wall', () => {
+  let rect = { width: 0, height: 0 };
+
+  beforeEach(() => {
+    rect = { width: 0, height: 0 };
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('graph-canvas')
+        ? new DOMRect(0, 0, rect.width, rect.height)
+        : new DOMRect(0, 0, 0, 0);
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function draw(instance: Instance) {
+    const hooks = instance.opts.hooks?.draw;
+    const hook = Array.isArray(hooks) ? hooks[0] : hooks;
+    const canvas = fakeCanvas();
+    hook?.(canvas.u as unknown as uPlot);
+    return canvas;
+  }
+
+  it('with fill takes the width and height of its container and follows a resize', () => {
+    rect = { width: 500.6, height: 300.2 };
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" height={140} fill />);
+    expect(instances).toHaveLength(1);
+    expect(last().opts.width).toBe(500);
+    expect(last().opts.height).toBe(300);
+    rect = { width: 700, height: 350 };
+    act(() => {
+      for (const o of FakeResizeObserver.all) o.fire(0);
+    });
+    expect(instances).toHaveLength(1);
+    expect(last().setSize).toHaveBeenCalledWith({ width: 700, height: 350 });
+  });
+
+  it('with fill draws nothing until its container has a height', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fill />);
+    expect(instances).toHaveLength(0);
+    rect = { width: 400, height: 200 };
+    act(() => {
+      for (const o of FakeResizeObserver.all) o.fire(0);
+    });
+    expect(instances).toHaveLength(1);
+    expect(last().opts).toMatchObject({ width: 400, height: 200 });
+  });
+
+  it('with fill follows the window where ResizeObserver does not exist, and stops on unmount', () => {
+    vi.stubGlobal('ResizeObserver', undefined);
+    rect = { width: 400, height: 200 };
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fill />);
+    rect = { width: 420, height: 210 };
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(last().setSize).toHaveBeenCalledWith({ width: 420, height: 210 });
+    act(() => {
+      view.unmount();
+    });
+    last().setSize.mockClear();
+    window.dispatchEvent(new Event('resize'));
+    expect(last().setSize).not.toHaveBeenCalled();
+  });
+
+  it('with fill stops observing and destroys the plot on unmount', () => {
+    rect = { width: 400, height: 200 };
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fill />);
+    act(() => {
+      view.unmount();
+    });
+    expect(last().destroy).toHaveBeenCalledTimes(1);
+    for (const o of FakeResizeObserver.all) expect(o.disconnect).toHaveBeenCalled();
+  });
+
+  it('with fill writes the severity word on the line instead of a list below', () => {
+    rect = { width: 400, height: 200 };
+    const apart: Threshold[] = [
+      { trigger: 'Disk almost full', severity: 'critical', op: '>', value: 90 },
+      { trigger: 'Disk filling up', severity: 'warning', op: '>', value: 40 },
+    ];
+    const { container } = render(
+      <Graph now={NOW} points={points([50, 60])} thresholds={apart} unitKey="disk.used_percent" fill />,
+    );
+    expect(container.querySelector('.graph-limits')).toBeNull();
+    expect(draw(last()).texts.map((t) => t.text)).toEqual([
+      'Disk almost full · Critical',
+      'Disk filling up · Warning',
+    ]);
+  });
+
+  it('without interaction has no cursor, no hover and no readout line, but keeps its description', () => {
+    render(
+      <Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="cpu.usage" interactive={false} />,
+    );
+    expect(last().opts.cursor?.show).toBe(false);
+    expect(last().opts.hooks?.setCursor).toBeUndefined();
+    expect(screen.queryByTestId('graph-readout')).toBeNull();
+    expect(screen.getByRole('img', { name: 'cpu.usage, latest 2.0 %, 0 thresholds' })).toBeInTheDocument();
+  });
+
+  it('sets the axis font, the axis sizes, the label font and the line width from fontPx', () => {
+    render(<Graph now={NOW} points={points([50, 60])} thresholds={THRESHOLDS} unitKey="x" fontPx={36} />);
+    const [x, y] = last().opts.axes ?? [];
+    expect(x?.font).toMatch(/^36px /);
+    expect(y?.font).toMatch(/^36px /);
+    expect(x?.size).toBeGreaterThan(36);
+    expect(typeof y?.size).toBe('function');
+    expect(last().opts.series[1]?.width).toBe(3);
+    const { u } = draw(last());
+    expect(u.ctx.font).toMatch(/^36px /);
+  });
+
+  it('keeps a line width of at least 1.5 for a small font', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fontPx={12} />);
+    expect(last().opts.series[1]?.width).toBe(1.5);
+  });
+
+  it('creates a new plot when fontPx changes', () => {
+    const view = render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fontPx={24} />);
+    const first = last();
+    view.rerender(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fontPx={30} />);
+    expect(first.destroy).toHaveBeenCalledTimes(1);
+    expect(instances).toHaveLength(2);
+    expect(last().opts.axes?.[0]?.font).toMatch(/^30px /);
+  });
+
+  it('keeps the desk look without the wall props', () => {
+    const { container } = render(
+      <Graph now={NOW} points={points([50, 60])} thresholds={THRESHOLDS} unitKey="disk.used_percent" />,
+    );
+    const { opts } = last();
+    expect(opts.axes?.[0]?.font).toBeUndefined();
+    expect(opts.axes?.[0]?.size).toBeUndefined();
+    expect(opts.series[1]?.width).toBe(2);
+    expect(opts.cursor?.show).toBeUndefined();
+    expect(opts.hooks?.setCursor).toHaveLength(1);
+    expect(container.querySelector('.graph-limits')).not.toBeNull();
+    const { u, texts } = draw(last());
+    expect(u.ctx.font).toMatch(/^12px /);
+    expect(texts.map((t) => t.text)).toEqual(['Disk almost full', 'Disk filling up']);
+  });
+});
+
+describe('Graph window and labels on the wall', () => {
+  const END = T0 / 1000 + 120;
+
+  beforeEach(() => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      () => new DOMRect(0, 0, 400, 200),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function xRange(instance: Instance): [number, number] {
+    const range = instance.opts.scales?.['x']?.range as (u: unknown, min: number, max: number) => [number, number];
+    return range({}, 0, 0);
+  }
+
+  it('ends the x scale at until and starts it spanSecs before', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" until={END} spanSecs={3600} />);
+    expect(xRange(last())).toEqual([END - 3600, END]);
+  });
+
+  it('starts the x scale at the first point without spanSecs', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" until={END + 600} />);
+    expect(xRange(last())).toEqual([T0 / 1000, END + 600]);
+  });
+
+  it('spans the data without until, as on the desk', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" />);
+    expect(last().opts.scales?.['x']?.range).toBeUndefined();
+  });
+
+  it('moves the window with setScale when until moves by more than a step, never with a new plot', () => {
+    // The same points: a poll that brings new ones resets the window through setData instead.
+    const same = points([1, 2]);
+    const at = (until: number) => (
+      <Graph now={NOW} points={same} thresholds={[]} unitKey="x" stepSecs={60} until={until} spanSecs={3600} />
+    );
+    const view = render(at(END));
+    view.rerender(at(END + 30));
+    view.rerender(at(END + 60));
+    expect(last().setScale).not.toHaveBeenCalled();
+    view.rerender(at(END + 61));
+    expect(last().setScale).toHaveBeenCalledWith('x', { min: END + 61 - 3600, max: END + 61 });
+    expect(instances).toHaveLength(1);
+    expect(last().destroy).not.toHaveBeenCalled();
+  });
+
+  it('takes a given description for a screen reader', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" description="All of it" />);
+    expect(screen.getByRole('img', { name: 'All of it' })).toBeInTheDocument();
+  });
+
+  it('with fill leaves out the label of the less severe of two close lines and says so', () => {
+    const onLabels = vi.fn();
+    const close: Threshold[] = [
+      { trigger: 'Disk filling up', severity: 'warning', op: '>', value: 80 },
+      { trigger: 'Disk almost full', severity: 'critical', op: '>', value: 90 },
+    ];
+    render(
+      <Graph now={NOW} points={points([50, 60])} thresholds={close} unitKey="x" fill onLabels={onLabels} />,
+    );
+    const hooks = last().opts.hooks?.draw;
+    const draw = Array.isArray(hooks) ? hooks[0] : hooks;
+    const { u, texts, calls } = fakeCanvas();
+    draw?.(u as unknown as uPlot);
+    expect(texts.map((t) => t.text)).toEqual(['Disk almost full · Critical']);
+    expect(calls.filter((c) => c.startsWith('stroke'))).toHaveLength(2);
+    expect(onLabels).toHaveBeenLastCalledWith(false);
+  });
+
+  it('with fill reports when every line has its label', () => {
+    const onLabels = vi.fn();
+    render(<Graph now={NOW} points={points([50, 60])} thresholds={THRESHOLDS.slice(0, 1)} unitKey="x" fill onLabels={onLabels} />);
+    const hooks = last().opts.hooks?.draw;
+    const draw = Array.isArray(hooks) ? hooks[0] : hooks;
+    draw?.(fakeCanvas().u as unknown as uPlot);
+    expect(onLabels).toHaveBeenLastCalledWith(true);
+  });
+
+  it('makes the y axis as wide as its widest value in the axis font', () => {
+    render(<Graph now={NOW} points={points([1, 2])} thresholds={[]} unitKey="x" fontPx={24} />);
+    const size = last().opts.axes?.[1]?.size as (self: unknown, values: string[] | null) => number;
+    const fonts: string[] = [];
+    const ctx = {
+      font: '',
+      save: () => undefined,
+      restore: () => undefined,
+      measureText(text: string) {
+        fonts.push(ctx.font);
+        return { width: text.length * 10 };
+      },
+    };
+    const narrow = size({ ctx }, ['1.5', '2']);
+    const wide = size({ ctx }, ['1.5', '1,234.5 GiB']);
+    expect(wide - narrow).toBe(80);
+    expect(wide).toBeGreaterThan(110);
+    expect(fonts[0]).toMatch(/^24px /);
+    expect(size({ ctx }, null)).toBeGreaterThan(24);
+  });
+});
+
+describe('placeLabels', () => {
+  // A plot from 0 to 200, labels 24 high, 3 from their line.
+  const place = (lines: { y: number; rank: number }[]) => placeLabels(lines, 24, 3, 0, 200);
+
+  it('puts distant labels above their lines', () => {
+    expect(place([{ y: 50, rank: 0 }, { y: 150, rank: 2 }])).toEqual([
+      { y: 47, baseline: 'bottom' },
+      { y: 147, baseline: 'bottom' },
+    ]);
+  });
+
+  it('puts the less severe of two close lines below its line when there is room', () => {
+    // Critical at 50 takes 23..47; warning at 60 cannot take 33..57, takes 63..87.
+    expect(place([{ y: 60, rank: 2 }, { y: 50, rank: 0 }])).toEqual([
+      { y: 63, baseline: 'top' },
+      { y: 47, baseline: 'bottom' },
+    ]);
+  });
+
+  it('leaves out the less severe label when neither side is free', () => {
+    // Critical at 50 above (23..47), high at 75 above (48..72); warning at 62: 35..59 and 65..89 taken.
+    expect(place([{ y: 50, rank: 0 }, { y: 75, rank: 1 }, { y: 62, rank: 2 }])).toEqual([
+      { y: 47, baseline: 'bottom' },
+      { y: 72, baseline: 'bottom' },
+      null,
+    ]);
+  });
+
+  it('puts a label below a line at the top edge', () => {
+    expect(place([{ y: 10, rank: 0 }])).toEqual([{ y: 13, baseline: 'top' }]);
+  });
+
+  it('keeps a label above a line at the bottom edge', () => {
+    expect(place([{ y: 198, rank: 0 }])).toEqual([{ y: 195, baseline: 'bottom' }]);
+  });
+
+  it('places nothing in a plot lower than a label', () => {
+    expect(placeLabels([{ y: 10, rank: 0 }], 24, 3, 0, 20)).toEqual([null]);
   });
 });
 

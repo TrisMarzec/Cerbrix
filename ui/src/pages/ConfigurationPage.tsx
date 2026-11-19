@@ -659,7 +659,7 @@ function DisplaysSection({ now, onSecret, track, locked }: SecretSectionProps) {
     return {
       title: `Token of ${display.name}`,
       value: created.token,
-      note: `Keep this token for the wall display ${display.name}. The page that uses it comes with the next release.`,
+      note: `Open /display/${seg(display.id)} on the wall monitor and enter this token.`,
     };
   };
 

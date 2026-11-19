@@ -1,0 +1,745 @@
+/* The wall (concept sections 7 and 8.1, mockup direction A). Every length is a multiple of --u, a
+   1920th of the viewport width, so a 4K monitor shows the same layout as a Full HD one, sharper.
+   Every font size is one of the type sizes below; none is smaller than 24 at 1920. All rules are
+   scoped under the frame, so nothing here reaches the desk pages. */
+
+.wall {
+  --u: calc(100vw / 1920);
+  --wall-title: calc(var(--u) * 60);
+  --wall-host: calc(var(--u) * 48);
+  --wall-clock: calc(var(--u) * 42);
+  --wall-text: calc(var(--u) * 38);
+  --wall-band: calc(var(--u) * 30);
+  --wall-meta: calc(var(--u) * 28);
+  --wall-label: calc(var(--u) * 26);
+  --wall-small: calc(var(--u) * 24);
+  --wall-value-s: calc(var(--u) * 60);
+  --wall-value-m: calc(var(--u) * 90);
+  --wall-value-l: calc(var(--u) * 120);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--wall-small);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The desk's element rules (base.css) would set smaller sizes; inside the wall they take the
+   size of their wall parent. */
+.wall small,
+.wall h1,
+.wall h2,
+.wall h3,
+.wall th,
+.wall td {
+  font-size: inherit;
+}
+
+.wall.is-idle {
+  cursor: none;
+}
+
+/* Header: the name left, the sync state and the clock right. */
+.wall .wall-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(var(--u) * 42);
+  padding: calc(var(--u) * 31) calc(var(--u) * 42) calc(var(--u) * 21);
+}
+
+.wall .wall-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--wall-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.wall .wall-meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--u) * 46);
+  white-space: nowrap;
+  font-size: var(--wall-meta);
+  color: var(--dim);
+}
+
+.wall .wall-sync.is-in-sync {
+  color: var(--git);
+}
+
+.wall .wall-sync.is-out-of-sync,
+.wall .wall-sync.is-lost {
+  color: var(--warning);
+}
+
+.wall .wall-sync.is-never {
+  color: var(--dim);
+}
+
+/* The state and, for a display that runs on a login instead of a display token, a dim note. */
+.wall .wall-state {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--u) * 24);
+}
+
+.wall .wall-login {
+  font-size: var(--wall-small);
+  color: var(--dim);
+}
+
+.wall .wall-clock {
+  font-size: var(--wall-clock);
+  font-weight: 500;
+  color: var(--text);
+}
+
+/* While idle the link is transparent, not hidden: it stays in the tab order and shows with focus. */
+.wall.is-idle .wall-back {
+  opacity: 0;
+}
+
+.wall.is-idle .wall-back:focus-visible {
+  opacity: 1;
+}
+
+/* Bands under the header: the switch band first, then the Out Of Sync band. */
+.wall .wall-band {
+  padding: calc(var(--u) * 12) calc(var(--u) * 42);
+  color: var(--bg);
+  font-size: var(--wall-band);
+  font-weight: 600;
+}
+
+.wall .wall-band.is-alarm {
+  background: var(--critical);
+}
+
+.wall .wall-band.is-out-of-sync {
+  background: var(--warning);
+}
+
+.wall .wall-band-line {
+  display: flex;
+  gap: calc(var(--u) * 16);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.wall .wall-band-detail {
+  font-size: var(--wall-label);
+  font-weight: 500;
+}
+
+.wall .wall-band-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wall .wall-band-more {
+  flex: 0 0 auto;
+}
+
+/* The bands and the content fill what is left of the screen. Without connection they stay, dimmed:
+   the bands are as old as the content. */
+.wall .wall-body,
+.wall .wall-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wall .wall-body.is-lost {
+  opacity: 0.45;
+}
+
+/* The 12 by 6 grid of a dashboard. */
+.wall .wall-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-rows: repeat(6, minmax(0, 1fr));
+  gap: calc(var(--u) * 21);
+  padding: calc(var(--u) * 25) calc(var(--u) * 42) calc(var(--u) * 38);
+}
+
+.wall .wall-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: calc(var(--u) * 21) calc(var(--u) * 25);
+  border-radius: calc(var(--u) * 10);
+  background: var(--panel);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wall,
+  .wall *,
+  .wall *::before,
+  .wall *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* Problems and host-states panels */
+
+/* Every panel: a label, then a body that takes the rest of the height and never scrolls. The
+   panels measure the body and hidden samples, so the samples use the real classes. */
+.wall .wall-panel-label {
+  flex: 0 0 auto;
+  margin-bottom: calc(var(--u) * 12);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--wall-label);
+  font-weight: 500;
+  color: var(--dim);
+}
+
+/* A problems panel too small for any line: the label carries the count in the colour of the most
+   urgent problem, so open problems are never hidden by the layout. */
+.wall .wall-panel-label.is-count {
+  font-weight: 600;
+  color: var(--sev);
+}
+
+.wall .wall-panel-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.wall .wall-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Problem row (mockup A): bar, host in the severity colour and the problem on the first line, the
+   severity word on the second, the duration right. A fixed height, so every row is one sample. */
+.wall .wall-problem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: calc(var(--u) * 25);
+  height: calc(var(--u) * 108);
+  padding: 0 calc(var(--u) * 25) 0 calc(var(--u) * 38);
+  border-top: calc(var(--u) * 1) solid var(--line);
+}
+
+.wall .wall-problem::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(var(--u) * 13);
+  background: var(--sev);
+}
+
+.wall .wall-problem-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wall .wall-problem-line {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--u) * 20);
+  min-width: 0;
+}
+
+/* The host keeps its full width up to half the row; the problem text takes the rest. */
+.wall .wall-problem-host {
+  flex: 0 0 auto;
+  max-width: 50%;
+  font-size: var(--wall-host);
+  font-weight: 600;
+  color: var(--sev);
+}
+
+/* Too narrow for host and duration side by side: the duration is left out and the host may take
+   the whole line, so the host and the severity word are the last things to go. */
+.wall .wall-problems.is-narrow .wall-problem-host {
+  flex-shrink: 1;
+  max-width: none;
+}
+
+.wall .wall-problem-text {
+  flex: 1 1 0;
+  font-size: var(--wall-text);
+}
+
+.wall .wall-problem.is-acknowledged .wall-problem-text {
+  color: var(--dim);
+}
+
+.wall .wall-problem-meta {
+  font-size: var(--wall-label);
+  color: var(--dim);
+}
+
+.wall .wall-problem-duration {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: var(--wall-text);
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+/* A row that caused the switch: its background fades in once and stays while it is a cause. The
+   fade is a transition from the starting style, so it also runs when a shown row becomes a cause.
+   A reordering that moves an existing cause row can run the fade again; the highlight stays.
+   Without color-mix (older browsers) the row is raised instead of tinted; without @starting-style
+   it shows at once, without the fade. */
+.wall .wall-problem.is-cause {
+  background-color: var(--raised);
+  background-color: color-mix(in srgb, var(--sev-full) 16%, transparent);
+  transition: background-color 1.5s ease-out;
+}
+
+@starting-style {
+  .wall .wall-problem.is-cause {
+    background-color: transparent;
+  }
+}
+
+/* One line at the 38 size: "and N more" under the rows (dim), or the count alone, which carries
+   the severity of the most urgent problem. Lower than a row, so it fits where a row does not. */
+.wall .wall-problems-more {
+  padding: calc(var(--u) * 12) calc(var(--u) * 25) calc(var(--u) * 12) calc(var(--u) * 38);
+  border-top: calc(var(--u) * 1) solid var(--line);
+  font-size: var(--wall-text);
+  color: var(--dim);
+}
+
+.wall .wall-problems-more.is-alone {
+  font-weight: 600;
+  color: var(--sev);
+}
+
+/* One line, centred; the 38 size when the 48 one is wider than the panel. */
+.wall .wall-problems-empty {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  transform: translateY(-50%);
+  text-align: center;
+  font-size: var(--wall-host);
+  font-weight: 600;
+  color: var(--healthy-text);
+}
+
+.wall .wall-problems-empty.is-small {
+  font-size: var(--wall-text);
+}
+
+/* Host states: the sentence, then a wrapping grid of squares. The panel reads the square size and
+   the gap from the sample square (its width and right margin). */
+.wall .wall-hosts {
+  --square-size: calc(var(--u) * 40);
+  --square-gap: calc(var(--u) * 8);
+}
+
+.wall .wall-hosts-sentence {
+  font-size: var(--wall-text);
+  font-weight: 600;
+}
+
+.wall .wall-hosts-sentence.is-ok {
+  color: var(--healthy-text);
+}
+
+.wall .wall-squares {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, var(--square-size));
+  grid-auto-rows: var(--square-size);
+  gap: var(--square-gap);
+  margin-top: var(--square-gap);
+}
+
+.wall .wall-square {
+  width: var(--square-size);
+  height: var(--square-size);
+  border-radius: calc(var(--u) * 4);
+  background: var(--sev);
+}
+
+.wall .wall-square.is-ok {
+  background: var(--healthy-square);
+}
+
+/* "+N" at the end of the grid, spanning as many cells as its measured width needs. */
+.wall .wall-squares-more {
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  font-size: var(--wall-label);
+  font-weight: 600;
+  color: var(--dim);
+}
+
+/* The samples: measured, never seen, out of the flow. */
+.wall .wall-panel-body > .wall-sample {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Samples whose width is measured are as wide as their content. */
+.wall .wall-panel-body > .wall-problem.wall-sample,
+.wall .wall-panel-body > .wall-problems-empty.wall-sample,
+.wall .wall-panel-body > .wall-squares-more.wall-sample {
+  right: auto;
+  width: max-content;
+  transform: none;
+}
+
+.wall .wall-panel-body > .wall-square.wall-sample {
+  right: auto;
+  margin-right: var(--square-gap);
+}
+
+/* Graph and value panels */
+
+/* The graph panel's label line: the series left, cut first when long; then the worst threshold
+   in words when the plot could not label every line; the latest value right, at the 38 size. The
+   panel measures the samples and leaves out what does not fit whole, so nothing here is cut. */
+.wall .wall-panel-label.has-latest {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--u) * 20);
+}
+
+.wall .wall-panel-label-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wall .wall-panel-worst {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--sev);
+}
+
+.wall .wall-panel-latest {
+  flex: 0 0 auto;
+  font-size: var(--wall-text);
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Older than the larger of ten minutes and three steps: "old" and the warning colour. */
+.wall .wall-panel-latest.is-old {
+  color: var(--warning);
+}
+
+/* The label line's samples: measured, never seen, out of the flow, as wide as their content. */
+.wall .wall-panel-label > .wall-sample {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: max-content;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* The graph covers the body; the plot takes the size of its canvas box. */
+.wall .wall-graph > .graph {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+/* "No data", or that the metrics are not available: one dim line at the 38 size. */
+.wall .wall-nodata {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--wall-text);
+  color: var(--dim);
+}
+
+/* The value panel: the value block centred in the height, the value over its age, or beside it
+   in a one-row panel. The panel measures the samples, one per size, and shows the largest that
+   fits. */
+.wall .wall-value-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.wall .wall-value {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.wall .wall-value.is-inline {
+  flex-direction: row;
+  align-items: baseline;
+  gap: calc(var(--u) * 20);
+}
+
+.wall .wall-value-number {
+  font-size: var(--wall-text);
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.wall .wall-value.is-s .wall-value-number {
+  font-size: var(--wall-value-s);
+}
+
+.wall .wall-value.is-m .wall-value-number {
+  font-size: var(--wall-value-m);
+}
+
+.wall .wall-value.is-l .wall-value-number {
+  font-size: var(--wall-value-l);
+}
+
+.wall .wall-value-age {
+  font-size: var(--wall-label);
+  color: var(--dim);
+}
+
+.wall .wall-value.is-inline .wall-value-age {
+  flex: 0 1 auto;
+}
+
+/* Older than ten minutes: the word "old" and the warning colour. */
+.wall .wall-value-age.is-old {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+/* The value samples are as wide as their content, so the panel can compare them with the body. */
+.wall .wall-panel-body > .wall-value.wall-sample {
+  right: auto;
+  width: max-content;
+}
+
+/* Wall page */
+
+/* "There is no dashboard named ...": not a wall, but on its dark full-screen background, centred,
+   with the link back to the desk. */
+.wall .wall-missing {
+  flex: 1 1 auto;
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--u) * 38);
+  padding: calc(var(--u) * 42);
+  font-size: var(--wall-text);
+  text-align: center;
+}
+
+.wall .wall-missing-text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* "This dashboard has no panels." in the grid's place. */
+.wall .wall-no-panels {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--u) * 42);
+  font-size: var(--wall-text);
+  color: var(--dim);
+  text-align: center;
+}
+
+/* The session gate on a wall path: the desk's gate, at a wall size on the wall's background. */
+.wall .wall-gate {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: none;
+  gap: calc(var(--u) * 26);
+  padding: calc(var(--u) * 42);
+  font-size: var(--wall-text);
+}
+
+.wall .wall-gate .btn {
+  font-size: var(--wall-meta);
+  padding: calc(var(--u) * 8) calc(var(--u) * 20);
+}
+
+/* Links inside the wall root look and focus as on the desk. */
+.wall a {
+  color: var(--git);
+  text-decoration: underline;
+}
+
+.wall a:focus-visible {
+  outline: calc(var(--u) * 3) solid var(--git);
+  outline-offset: calc(var(--u) * 3);
+}
+
+/* Display page */
+
+/* The grid area of a display, inside its one frame (ruling R11): the shown dashboard, and during a
+   change (D13) the one before it underneath, at full strength, while the new one fades in over
+   it on the wall's background; then the old one is removed. Unchanged pixels never dip. */
+.wall .wall-layers {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.wall .wall-layer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* The previous grid standing in for a dashboard that has not answered yet: dimmed as lost content
+   is, since it is not the dashboard named in the header. */
+.wall .wall-layer.is-lost {
+  opacity: 0.45;
+}
+
+.wall .wall-layer.is-entering {
+  transition: opacity 400ms ease-in-out;
+}
+
+@starting-style {
+  .wall .wall-layer.is-entering {
+    opacity: 0;
+  }
+}
+
+/* "This display may not show ...": one dim line at the 38 size in the grid's place. */
+.wall .wall-display-text {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--u) * 42);
+  overflow-wrap: anywhere;
+  font-size: var(--wall-text);
+  color: var(--dim);
+  text-align: center;
+}
+
+/* Before a display can be shown: one sentence at the 38 size on the dark root, centred; dim, or in
+   the warning colour without a connection. */
+.wall .wall-notice {
+  flex: 1 1 auto;
+  max-width: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--u) * 42);
+  font-size: var(--wall-text);
+  color: var(--dim);
+  text-align: center;
+}
+
+.wall .wall-notice.is-warning {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.wall .wall-notice-text {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* The token form, read from a normal distance: the heading at 38, the rest at 26. */
+.wall .wall-token {
+  flex: 1 1 auto;
+  max-width: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--u) * 42);
+}
+
+.wall .wall-token-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(var(--u) * 21);
+  width: calc(var(--u) * 760);
+  max-width: 100%;
+  font-size: var(--wall-label);
+}
+
+.wall .wall-token-title {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  margin-bottom: calc(var(--u) * 12);
+  font-size: var(--wall-text);
+  font-weight: 600;
+}
+
+.wall .wall-token-label {
+  color: var(--dim);
+}
+
+.wall .wall-token-input {
+  width: 100%;
+  padding: calc(var(--u) * 12) calc(var(--u) * 16);
+  border-radius: calc(var(--u) * 8);
+  font-size: var(--wall-label);
+  background: var(--panel);
+}
+
+.wall .wall-token-button {
+  padding: calc(var(--u) * 10) calc(var(--u) * 32);
+  border-radius: calc(var(--u) * 8);
+  font-size: var(--wall-label);
+  font-weight: 600;
+}
+
+.wall .wall-token-input:focus-visible,
+.wall .wall-token-button:focus-visible {
+  outline: calc(var(--u) * 3) solid var(--git);
+  outline-offset: calc(var(--u) * 3);
+}
+
+.wall .wall-token-message {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.wall .wall-token-notice {
+  color: var(--dim);
+}

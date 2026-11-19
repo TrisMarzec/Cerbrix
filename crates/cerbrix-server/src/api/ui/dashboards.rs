@@ -310,21 +310,47 @@ async fn detail(
     Viewer(_): Viewer,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    answer(&app, &id).await
+    answer(&app, &id, Reader::User).await
+}
+
+/// Who reads a dashboard answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reader {
+    /// A logged-in user: everything.
+    User,
+    /// A wall display by its token: no names of people and no comments.
+    DisplayToken,
+}
+
+/// Removes from the problems of `hosts` who acknowledged or closed them and the comments,
+/// keeping `acknowledged_at` and everything else.
+fn without_user_fields(hosts: &mut [HostRow]) {
+    for problem in hosts.iter_mut().flat_map(|h| h.open.iter_mut()) {
+        problem.acknowledged_by = None;
+        problem.ack_comment = None;
+        problem.closed_by = None;
+        problem.close_comment = None;
+    }
 }
 
 /// The answer of the dashboard route, also given to a wall display through its own route.
 /// An unknown id, or one that cannot be a dashboard id, is a 404.
-pub(super) async fn answer(app: &AppState, id: &str) -> Result<Response, ApiError> {
+///
+/// For [`Reader::DisplayToken`] the user fields are removed from the loaded problems before
+/// anything is built from them: every problem of the answer, in any panel, comes from those.
+pub(super) async fn answer(app: &AppState, id: &str, reader: Reader) -> Result<Response, ApiError> {
     if validate_name(id).is_err() {
         return Err(not_found());
     }
-    let board = app
+    let mut board = app
         .store
         .dashboard_hosts(id)
         .await
         .map_err(|e| store_failed("reading a dashboard failed", &e))?
         .ok_or_else(not_found)?;
+    if reader == Reader::DisplayToken {
+        without_user_fields(&mut board.hosts);
+    }
     let panels = board.dashboard.effective_panels();
     let hosts: Vec<&HostRow> = board.hosts.iter().collect();
 

@@ -5,6 +5,8 @@
 //! queries (token lookup, the display, the dashboards with their hosts and open problems,
 //! the sync state), however many dashboards and hosts exist.
 
+use std::collections::BTreeMap;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -141,6 +143,8 @@ struct StateOut<'a> {
     show: &'a Show,
     switch_on_alarm: &'a Option<SwitchOnAlarm>,
     allowed: Vec<String>,
+    /// The name of each dashboard in `allowed` that exists.
+    names: BTreeMap<&'a str, &'a str>,
     #[serde(flatten)]
     alarm: DisplayTarget,
     /// The sync part of `/api/v1/status`, issues included: the wall shows "out of sync"
@@ -180,12 +184,20 @@ async fn state(State(app): State<AppState>, access: DisplayAccess) -> Result<Res
         .iter()
         .map(|(id, _, _)| id.clone())
         .collect();
+    let allowed = allowed_dashboards(&display, &all);
+    let names = inputs
+        .dashboards
+        .iter()
+        .filter(|(id, _, _)| allowed.contains(id))
+        .map(|(id, _, dashboard)| (id.as_str(), dashboard.name.as_str()))
+        .collect();
     let out = StateOut {
         id: &id,
         name: &display.name,
         show: &display.show,
         switch_on_alarm: &display.switch_on_alarm,
-        allowed: allowed_dashboards(&display, &all),
+        allowed,
+        names,
         alarm: alarm_target(&display, &inputs),
         sync: SyncView::from(sync),
     };
@@ -207,7 +219,12 @@ async fn dashboard(
     if !allowed_dashboards(&display, &all).contains(&dashboard) {
         return Err(forbidden("this display may not show that dashboard"));
     }
-    dashboards::answer(&app, &dashboard).await
+    let reader = if access.by_token {
+        dashboards::Reader::DisplayToken
+    } else {
+        dashboards::Reader::User
+    };
+    dashboards::answer(&app, &dashboard, reader).await
 }
 
 #[cfg(test)]
@@ -470,6 +487,7 @@ mod tests {
                 "causes",
                 "id",
                 "name",
+                "names",
                 "show",
                 "switch_on_alarm",
                 "sync",
@@ -729,5 +747,222 @@ mod tests {
         assert_eq!(wall.status, StatusCode::OK);
         assert_eq!(wall.json(), desk.json());
         assert!(!desk.json()["hosts"].as_array().unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn display_state_names_its_allowed_dashboards(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        put_doc(
+            &fx,
+            "dashboard",
+            "a",
+            r#"{"name": "Customer A", "hosts": {"groups": ["ga"]}}"#,
+        )
+        .await;
+        board(&fx, "unlisted", 1, "gu").await;
+        // `gone` is in the display's setting but not in the configuration.
+        put_doc(
+            &fx,
+            "display",
+            "wall",
+            r#"{"name": "Wall", "show": {"rotate": ["a", "gone"], "every": "30s"}}"#,
+        )
+        .await;
+        let token = fx
+            .store
+            .create_display_token("wall", OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        let v = fx
+            .call_with_token("/api/v1/display/wall", &token)
+            .await
+            .json();
+        assert_eq!(v["allowed"], json!(["a", "gone"]));
+        assert_eq!(v["names"], json!({"a": "Customer A"}));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn names_cost_no_extra_query_per_dashboard(pool: PgPool) {
+        // The names come from the dashboards the route reads anyway (`board_inputs`); the
+        // answer has one name for each of ten dashboards.
+        let fx = Fixture::new(pool).await;
+        for i in 0..10 {
+            board(&fx, &format!("d{i}"), i, "g").await;
+        }
+        put_doc(
+            &fx,
+            "display",
+            "wall",
+            r#"{"name": "Wall", "show": {"dashboard": "d0"}, "switch_on_alarm": {}}"#,
+        )
+        .await;
+        let token = fx
+            .store
+            .create_display_token("wall", OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        let v = fx
+            .call_with_token("/api/v1/display/wall", &token)
+            .await
+            .json();
+        let names = v["names"].as_object().unwrap();
+        assert_eq!(names.len(), 10);
+        for i in 0..10 {
+            assert_eq!(names[&format!("d{i}")], format!("d{i}"));
+        }
+    }
+
+    /// A dashboard with both panels that show problems and a host with an acknowledged
+    /// problem that carries every user field; returns the token of a display that shows it.
+    async fn named_problem(fx: &Fixture) -> String {
+        put_doc(
+            fx,
+            "dashboard",
+            "named",
+            r#"{"name": "Named", "hosts": {"groups": ["gn"]}}"#,
+        )
+        .await;
+        put_doc(
+            fx,
+            "display",
+            "wall",
+            r#"{"name": "Wall", "show": {"dashboard": "named"}}"#,
+        )
+        .await;
+        host_in(fx, "host-n", "gn").await;
+        let id = alarm(fx, "host-n", "high", true).await;
+        // `closed_by` and `close_comment` belong to a closed problem; set here to check that
+        // none of the four leaves through the display route.
+        sqlx::query(
+            "UPDATE problems SET acknowledged_by = 'anna', ack_comment = 'looking', \
+             closed_by = 'bob', close_comment = 'gone' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        fx.store
+            .create_display_token("wall", OffsetDateTime::now_utc())
+            .await
+            .unwrap()
+    }
+
+    /// Every problem object in a dashboard answer.
+    fn problems_of(body: &Value) -> Vec<&Value> {
+        body["panels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["type"] == "problems")
+            .flat_map(|p| p["problems"].as_array().unwrap())
+            .collect()
+    }
+
+    const USER_FIELDS: [&str; 4] = [
+        "acknowledged_by",
+        "ack_comment",
+        "closed_by",
+        "close_comment",
+    ];
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn token_sees_no_user_names(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        let token = named_problem(&fx).await;
+        let reply = fx
+            .call_with_token("/api/v1/display/wall/dashboards/named", &token)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let text = String::from_utf8(reply.body.clone()).unwrap();
+        for word in ["anna", "looking", "bob", "\"gone\""] {
+            assert!(!text.contains(word), "{word} in {text}");
+        }
+        let body = reply.json();
+        let problems = problems_of(&body);
+        assert_eq!(problems.len(), 1);
+        for p in problems {
+            for field in USER_FIELDS {
+                assert!(p[field].is_null(), "{field}: {p}");
+            }
+            assert!(p["acknowledged_at"].is_string(), "{p}");
+            assert_eq!(p["host"], "host-n");
+            assert_eq!(p["severity"], "high");
+        }
+        // The host states carry no user field at all.
+        let state = &body["hosts"][0]["state"];
+        assert_eq!(state["acknowledged"], true);
+        for field in USER_FIELDS {
+            assert!(state.get(field).is_none(), "{field}: {state}");
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn user_still_sees_user_names(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        named_problem(&fx).await;
+        let reply = get(&fx, "/api/v1/display/wall/dashboards/named").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let body = reply.json();
+        let problems = problems_of(&body);
+        assert_eq!(problems.len(), 1);
+        let p = problems[0];
+        assert_eq!(p["acknowledged_by"], "anna");
+        assert_eq!(p["ack_comment"], "looking");
+        assert_eq!(p["closed_by"], "bob");
+        assert_eq!(p["close_comment"], "gone");
+        // The same as the desk's dashboard route.
+        assert_eq!(body, get(&fx, "/api/v1/dashboards/named").await.json());
+    }
+
+    /// The values of the four user fields in the display dashboard answer to a request that
+    /// carries the session cookie `cookie` and the bearer token `token`.
+    async fn user_fields_with(fx: &Fixture, cookie: &str, token: &str) -> Vec<Value> {
+        let bearer = format!("Bearer {token}");
+        let reply = fx
+            .call(
+                "GET",
+                "/api/v1/display/wall/dashboards/named",
+                Some(cookie),
+                &[("authorization", bearer.as_str())],
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let body = reply.json();
+        let problems = problems_of(&body);
+        assert_eq!(problems.len(), 1);
+        USER_FIELDS.iter().map(|f| problems[0][f].clone()).collect()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn valid_session_and_token_is_the_user(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        let token = named_problem(&fx).await;
+        let session = fx.session(Role::Viewer).await;
+        assert_eq!(
+            user_fields_with(&fx, &session, &token).await,
+            [json!("anna"), json!("looking"), json!("bob"), json!("gone")]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn invalid_or_expired_session_and_token_is_the_token(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        let token = named_problem(&fx).await;
+        // A session that expired a minute ago, still in the table.
+        let expired = fx.session(Role::Viewer).await;
+        let now = OffsetDateTime::now_utc();
+        sqlx::query("UPDATE sessions SET expires_at = $1")
+            .bind(now - Duration::minutes(1))
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        for (case, cookie) in [("unknown", "cbx_se_unknown"), ("expired", expired.as_str())] {
+            assert_eq!(
+                user_fields_with(&fx, cookie, &token).await,
+                [Value::Null, Value::Null, Value::Null, Value::Null],
+                "{case} session"
+            );
+        }
     }
 }

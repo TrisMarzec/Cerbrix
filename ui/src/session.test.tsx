@@ -388,3 +388,123 @@ describe('SessionProvider and a check that never answers', () => {
     expect(screen.getByText('user=anna/operator')).toBeInTheDocument();
   });
 });
+
+describe('SessionProvider while the server cannot be reached', () => {
+  let hidden = false;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    hidden = false;
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(document, 'hidden');
+    vi.useRealTimers();
+  });
+
+  function showGate(answers: Answer[]) {
+    mock = mockFetch({ 'GET /session': answers });
+    return render(
+      <SessionProvider>
+        <Probe />
+      </SessionProvider>,
+    );
+  }
+
+  it('asks again every 5 seconds by itself, one request at a time, and shows the page once it answers', async () => {
+    showGate(['network', 'network', { json: { name: 'anna', role: 'viewer' } }]);
+    await advance(0);
+    expect(screen.getByText('Could not reach the server')).toBeInTheDocument();
+    expect(mock.count('GET /session')).toBe(1);
+    await advance(4999);
+    expect(mock.count('GET /session')).toBe(1);
+    await advance(1);
+    // The gate stays while it asks; it does not flicker to an empty page.
+    expect(mock.count('GET /session')).toBe(2);
+    expect(screen.getByText('Could not reach the server')).toBeInTheDocument();
+    await advance(5000);
+    expect(mock.count('GET /session')).toBe(3);
+    expect(screen.getByText('user=anna/viewer')).toBeInTheDocument();
+    // Left the unreachable state: no more retries.
+    await advance(30_000);
+    expect(mock.count('GET /session')).toBe(3);
+  });
+
+  it('waits for an answer before it asks again', async () => {
+    mock = mockFetch({ 'GET /session': ['network', () => new Promise(() => {})] });
+    render(
+      <SessionProvider>
+        <Probe />
+      </SessionProvider>,
+    );
+    await advance(0);
+    await advance(5000);
+    expect(mock.count('GET /session')).toBe(2);
+    // The second request hangs until the client's 15 s limit; nothing else is sent meanwhile.
+    await advance(14_000);
+    expect(mock.count('GET /session')).toBe(2);
+    await advance(1000);
+    await advance(5000);
+    expect(mock.count('GET /session')).toBe(3);
+  });
+
+  it('asks at once when the tab becomes visible, and not while it is hidden', async () => {
+    showGate(['network']);
+    await advance(0);
+    hidden = true;
+    await advance(20_000);
+    expect(mock.count('GET /session')).toBe(1);
+    hidden = false;
+    document.dispatchEvent(new Event('visibilitychange'));
+    await advance(0);
+    expect(mock.count('GET /session')).toBe(2);
+  });
+
+  it('shows the login page when a retry is answered 401', async () => {
+    showGate(['network', UNAUTHORIZED]);
+    await advance(0);
+    await advance(5000);
+    expect(screen.getByLabelText('User name')).toBeInTheDocument();
+    await advance(30_000);
+    expect(mock.count('GET /session')).toBe(2);
+  });
+
+  it('keeps "Try again", which asks at once', async () => {
+    showGate(['network', { json: { name: 'anna', role: 'viewer' } }]);
+    await advance(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await advance(0);
+    expect(mock.count('GET /session')).toBe(2);
+    expect(screen.getByText('user=anna/viewer')).toBeInTheDocument();
+    await advance(10_000);
+    expect(mock.count('GET /session')).toBe(2);
+  });
+
+  it('leaves no timer and no listener after unmount', async () => {
+    const removed = vi.spyOn(document, 'removeEventListener');
+    const { unmount } = showGate(['network']);
+    await advance(100);
+    unmount();
+    await advance(100);
+    expect(vi.getTimerCount()).toBe(0);
+    await advance(30_000);
+    expect(mock.count('GET /session')).toBe(1);
+    expect(removed).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    removed.mockRestore();
+  });
+
+  it('draws the states before a session on the wall background with `wall`', async () => {
+    mock = mockFetch({ 'GET /session': ['network'] });
+    const { container } = render(
+      <SessionProvider wall>
+        <Probe />
+      </SessionProvider>,
+    );
+    expect(container.firstElementChild).toHaveClass('wall');
+    await advance(0);
+    expect(screen.getByText('No connection to the server').closest('.wall')).not.toBeNull();
+    // Outside the frame too, the cursor goes after 3 s without input.
+    expect(container.firstElementChild).not.toHaveClass('is-idle');
+    await advance(3000);
+    expect(container.firstElementChild).toHaveClass('is-idle');
+  });
+});

@@ -1,14 +1,19 @@
 import type {
+  DashboardDetail,
   DashboardSummary,
   Display,
   EnrollmentKey,
+  GraphPanelData,
   HostDetail,
   HostRow,
   HostState,
+  HostStatesPanelData,
   Problem,
+  ProblemsPanelData,
   Status,
   SyncHistoryEntry,
   User,
+  ValuePanelData,
 } from '../api/types';
 
 /** The fixed "now" of the tests: 17 Nov 2026, 14:30 local time. */
@@ -141,6 +146,79 @@ export function dashboardFixture(overrides: Partial<DashboardSummary> = {}): Das
     hosts_by_state: { critical: 0, high: 0, warning: 0, info: 0, acknowledged: 0, ok: 0 },
     open_problems: { ...NO_COUNTS },
     unacknowledged: { ...NO_COUNTS },
+    ...overrides,
+  };
+}
+
+/** A problems panel over the left two thirds with the critical problem; override what a test needs. */
+export function problemsPanelFixture(overrides: Partial<ProblemsPanelData> = {}): ProblemsPanelData {
+  return { type: 'problems', x: 0, y: 0, w: 8, h: 6, problems: [criticalProblem], more: 0, ...overrides };
+}
+
+/** A host-states panel with one critical host of one; override what a test needs. */
+export function hostStatesPanelFixture(overrides: Partial<HostStatesPanelData> = {}): HostStatesPanelData {
+  return {
+    type: 'host-states',
+    x: 8,
+    y: 0,
+    w: 4,
+    h: 3,
+    total: 1,
+    without_problems: 0,
+    hosts: [{ name: 'db-01', state: criticalState }],
+    ...overrides,
+  };
+}
+
+/** A graph panel with two points and one threshold; override what a test needs. */
+export function graphPanelFixture(overrides: Partial<GraphPanelData> = {}): GraphPanelData {
+  return {
+    type: 'graph',
+    x: 8,
+    y: 3,
+    w: 4,
+    h: 2,
+    host: 'db-01',
+    item: 'cpu.usage',
+    params: {},
+    range: '1h',
+    step_secs: 15,
+    points: [
+      [NOW.getTime() - 15_000, 28.2028656006],
+      [NOW.getTime(), 27.432800292968],
+    ],
+    thresholds: [{ trigger: 'CPU high', severity: 'high', op: '>', value: 90 }],
+    ...overrides,
+  };
+}
+
+/** A value panel with a value measured 30 seconds before `NOW`; override what a test needs. */
+export function valuePanelFixture(overrides: Partial<ValuePanelData> = {}): ValuePanelData {
+  return {
+    type: 'value',
+    x: 8,
+    y: 5,
+    w: 4,
+    h: 1,
+    host: 'db-01',
+    item: 'load.1m',
+    params: {},
+    value: 0.42,
+    at: new Date(NOW.getTime() - 30_000).toISOString(),
+    ...overrides,
+  };
+}
+
+/** A dashboard with one host and one panel of each type (docs/api.md); override what a test needs. */
+export function dashboardDetailFixture(overrides: Partial<DashboardDetail> = {}): DashboardDetail {
+  return {
+    id: 'e2e',
+    name: 'E2E',
+    file: 'dashboards/e2e.json',
+    priority: 0,
+    hosts: [{ name: 'db-01', state: criticalState }],
+    panels: [problemsPanelFixture(), hostStatesPanelFixture(), graphPanelFixture(), valuePanelFixture()],
+    metrics_available: true,
     ...overrides,
   };
 }

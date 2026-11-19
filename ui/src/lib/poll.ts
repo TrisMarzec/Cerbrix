@@ -1,11 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 
-import { ApiError } from '../api/client';
+import { ApiError, isApiError } from '../api/client';
+
+/** A moment on both clocks: the monotonic one to measure, the browser's one to show. */
+export interface Moment {
+  mono: number;
+  wall: number;
+}
+
+export function moment(): Moment {
+  return { mono: performance.now(), wall: Date.now() };
+}
 
 interface Polled<T> {
   data: T | undefined;
   error: ApiError | undefined;
   staleSince: Date | undefined;
+  /** When the answer behind `data` arrived; undefined without data. */
+  answeredAt: Moment | undefined;
   /**
    * True from a change of `deps` until the first answer (success or failure) for the new deps has
    * arrived. While it is true `data` is still the previous deps' data (a page may show it dimmed),
@@ -19,6 +31,7 @@ interface State<T> {
   data: T | undefined;
   error: ApiError | undefined;
   staleSince: Date | undefined;
+  answeredAt: Moment | undefined;
   /** The deps generation the last answer belongs to. */
   answered: number;
 }
@@ -41,9 +54,11 @@ export const ONCE = 'once';
  * last load failed (or none was made). A request is aborted when the hook unmounts or `deps`
  * change. An error (also an exception thrown by `load` itself) keeps the last data and sets
  * `staleSince` to the first failure, except for the first answer after a deps change: a failure
- * there leaves no data. A `403` drops the data as well, on any poll: a role that may no longer read
- * something must not keep seeing the last answer. A 401 is not an error here (the client has told
- * `onUnauthorized`). It never throws.
+ * there leaves no data. The API's `403` drops the data as well, on any poll: a role that may no
+ * longer read something must not keep seeing the last answer. The API's 401 is not an error here
+ * (the client has told `onUnauthorized`). A 401 or 403 without the API's JSON body (a gateway's
+ * page) is an ordinary failure. `answeredAt` is the moment of the last successful answer, for the
+ * wall's rule of a lost connection (R17). It never throws.
  */
 export function usePolled<T>(
   load: (signal: AbortSignal) => Promise<T>,
@@ -62,6 +77,7 @@ export function usePolled<T>(
     data: undefined,
     error: undefined,
     staleSince: undefined,
+    answeredAt: undefined,
     answered: 0,
   });
   const loadRef = useRef(load);
@@ -96,24 +112,26 @@ export function usePolled<T>(
         (data) => {
           if (mine.signal.aborted) return;
           needed = false;
-          setState({ data, error: undefined, staleSince: undefined, answered: current });
+          setState({ data, error: undefined, staleSince: undefined, answeredAt: moment(), answered: current });
           schedule();
         },
         (e: unknown) => {
           if (mine.signal.aborted) return;
           const error = asApiError(e);
-          if (error.status !== 401) {
+          // Only the API's own 401 and 403 (R15): a gateway's is an ordinary failure.
+          if (!isApiError(error, 'unauthorized')) {
             needed = true;
-            const keep = error.status !== 403;
+            const keep = !isApiError(error, 'forbidden');
             setState((previous) =>
               previous.answered === current
                 ? {
                     data: keep ? previous.data : undefined,
                     error,
                     staleSince: previous.staleSince ?? new Date(),
+                    answeredAt: previous.answeredAt,
                     answered: current,
                   }
-                : { data: undefined, error, staleSince: new Date(), answered: current },
+                : { data: undefined, error, staleSince: new Date(), answeredAt: undefined, answered: current },
             );
           }
           schedule();
@@ -146,6 +164,7 @@ export function usePolled<T>(
     data: state.data,
     error: pending ? undefined : state.error,
     staleSince: pending ? undefined : state.staleSince,
+    answeredAt: state.answeredAt,
     pending,
     reload,
   };

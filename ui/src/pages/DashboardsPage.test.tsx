@@ -156,6 +156,42 @@ describe('dashboards table', () => {
     );
   });
 
+  it('opens each dashboard on this screen from the last column, encoding the id', async () => {
+    await open({
+      'GET /dashboards': {
+        json: {
+          items: [
+            dashboardFixture({ id: 'kunde a/ü&x', name: 'Kunde A' }),
+            dashboardFixture({ id: 'b', name: 'Bravo' }),
+          ],
+        },
+      },
+      'GET /displays': { json: { items: [] } },
+    });
+    const headers = within(screen.getByRole('table', { name: 'Dashboards' })).getAllByRole('columnheader');
+    expect(headers.at(-1)).toHaveTextContent('Wall');
+    const [first, second] = dataRows();
+    const cells = (row: HTMLElement | undefined) => within(row as HTMLElement).getAllByRole('cell');
+    // Each link names its dashboard for a screen reader; the visible text is the same in every row.
+    const open1 = within(cells(first).at(-1) as HTMLElement).getByRole('link', {
+      name: 'Open Kunde A on this screen',
+    });
+    expect(open1).toHaveAttribute('href', '/wall/kunde%20a%2F%C3%BC%26x');
+    expect(open1.querySelector('.visually-hidden')).toHaveTextContent('Kunde A');
+    const visible = open1.textContent?.replace(open1.querySelector('.visually-hidden')?.textContent ?? '', '');
+    expect(visible?.replace(/\s+/g, ' ')).toBe('Open on this screen');
+    expect(
+      within(cells(second).at(-1) as HTMLElement).getByRole('link', { name: 'Open Bravo on this screen' }),
+    ).toHaveAttribute('href', '/wall/b');
+    // The name still leads to the problems.
+    expect(within(first as HTMLElement).getByRole('link', { name: 'Kunde A' })).toHaveAttribute(
+      'href',
+      '/problems?dashboard=kunde+a%2F%C3%BC%26x',
+    );
+    fireEvent.click(open1);
+    expect(window.location.pathname).toBe('/wall/kunde%20a%2F%C3%BC%26x');
+  });
+
   it('shows hostile text as text', async () => {
     const hostile = '<img src=x onerror=alert(1)>';
     const view = await open({
@@ -287,6 +323,25 @@ describe('wall displays', () => {
     expect(row).toHaveTextContent('Office');
     expect(row).toHaveTextContent('Shows Kunde A – Region 2, never switches');
     expect(row).toHaveTextContent('Following its setting');
+  });
+
+  it('links each display by its name to its wall page', async () => {
+    await open({
+      'GET /dashboards': { json: { items: two } },
+      'GET /displays': {
+        json: { items: [displayFixture({ name: 'Office' }), displayFixture({ id: 'hall 2/ü', name: 'Hall' })] },
+      },
+    });
+    const rows = within(displayTable()).getAllByRole('row');
+    const office = within(rows[1] as HTMLElement).getByRole('link', { name: 'Open the wall display Office' });
+    expect(office).toHaveAttribute('href', '/display/e2e-wall');
+    // The row shows the name only; the rest of the accessible name is for a screen reader.
+    const hidden = office.querySelector('.visually-hidden');
+    expect(hidden).toHaveTextContent('Open the wall display');
+    expect(office.textContent?.replace(hidden?.textContent ?? '', '').trim()).toBe('Office');
+    expect(
+      within(rows[2] as HTMLElement).getByRole('link', { name: 'Open the wall display Hall' }),
+    ).toHaveAttribute('href', '/display/hall%202%2F%C3%BC');
   });
 
   it('describes a rotating display that switches on alarms', async () => {

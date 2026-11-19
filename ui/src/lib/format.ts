@@ -11,6 +11,9 @@ export function severityWord(s: Severity): string {
   return WORDS[s];
 }
 
+/** Severities from the most to the least severe: 0 is the most severe. */
+export const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, warning: 2, info: 3 };
+
 /** What is shown where a value is missing. */
 export const DASH = '–';
 

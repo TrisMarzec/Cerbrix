@@ -1,4 +1,15 @@
-import { api, ApiError, newSessionGeneration, onSessionDoubt, onUnauthorized, seg } from './client';
+import {
+  api,
+  ApiError,
+  isApiError,
+  newSessionGeneration,
+  onSessionDoubt,
+  onUnauthorized,
+  recordServerDate,
+  resetServerSkew,
+  seg,
+  serverSkewMs,
+} from './client';
 import { mockFetch, type FetchMock } from '../test/mockFetch';
 
 let mock: FetchMock;
@@ -41,6 +52,28 @@ describe('api.get', () => {
     const error: unknown = await api.get('/hosts').catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 0, code: 'network' });
+  });
+});
+
+describe('isApiError', () => {
+  it("tells the API's own error answer by its code, not by the status", async () => {
+    mock = mockFetch({
+      'GET /a': { status: 404, json: { error: 'not_found', message: 'no such dashboard' } },
+      // A reverse proxy while the server restarts: the same status, a page of its own.
+      'GET /b': { status: 404, text: '404 page not found' },
+      'GET /c': { status: 401, text: 'Unauthorized' },
+      'GET /d': { status: 403, json: { error: 'forbidden', message: 'no' } },
+      'GET /e': 'network',
+    });
+    const errorOf = (path: string) => api.probe(path).catch((e: unknown) => e);
+    expect(isApiError(await errorOf('/a'), 'not_found')).toBe(true);
+    expect(isApiError(await errorOf('/b'), 'not_found')).toBe(false);
+    expect(isApiError(await errorOf('/c'), 'unauthorized')).toBe(false);
+    expect(isApiError(await errorOf('/d'), 'forbidden')).toBe(true);
+    expect(isApiError(await errorOf('/d'), 'not_found')).toBe(false);
+    expect(isApiError(await errorOf('/e'), 'network')).toBe(false);
+    expect(isApiError(new Error('not_found'), 'not_found')).toBe(false);
+    expect(isApiError(undefined, 'not_found')).toBe(false);
   });
 });
 
@@ -218,18 +251,66 @@ describe('time limit', () => {
 });
 
 describe('server date', () => {
-  it('gives the Date header of the answer with the data', async () => {
-    mock = mockFetch({
-      'GET /status': { json: { ok: 1 }, headers: { Date: 'Tue, 17 Nov 2026 13:30:00 GMT' } },
-    });
-    const answer = await api.getDated<{ ok: number }>('/status');
-    expect(answer.data).toEqual({ ok: 1 });
-    expect(answer.serverDate?.toISOString()).toBe('2026-11-17T13:30:00.000Z');
+  afterEach(() => {
+    resetServerSkew();
   });
 
-  it('gives no date when the header is missing or not a date', async () => {
-    mock = mockFetch({ 'GET /status': [{ json: {} }, { json: {}, headers: { Date: 'soon' } }] });
-    expect((await api.getDated('/status')).serverDate).toBeUndefined();
-    expect((await api.getDated('/status')).serverDate).toBeUndefined();
+  it('records how far the server clock is ahead from the answers with a date, of any request', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T13:30:00.000Z'));
+    mock = mockFetch({
+      'GET /dashboards/a': { json: {}, headers: { Date: 'Tue, 17 Nov 2026 13:30:07 GMT' } },
+      'GET /hosts': [{ json: {} }, { json: {}, headers: { Date: 'soon' } }],
+      'GET /status': { json: {}, headers: { Date: 'Tue, 17 Nov 2026 13:29:58 GMT' } },
+    });
+    expect(serverSkewMs()).toBe(0);
+    await api.get('/dashboards/a');
+    expect(serverSkewMs()).toBe(7000);
+    // An answer without a usable date keeps the last difference.
+    await api.get('/hosts');
+    await api.get('/hosts');
+    expect(serverSkewMs()).toBe(7000);
+    await api.get('/status');
+    expect(serverSkewMs()).toBe(-2000);
+  });
+
+  it('records the date of an error answer too', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T13:30:00.000Z'));
+    mock = mockFetch({ 'GET /hosts': { status: 500, json: {}, headers: { Date: 'Tue, 17 Nov 2026 13:31:00 GMT' } } });
+    await api.get('/hosts').catch(() => undefined);
+    expect(serverSkewMs()).toBe(60_000);
+  });
+
+  it('does not take the clock of an answer that is not the API, such as the HTML page of a gateway', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T13:30:00.000Z'));
+    mock = mockFetch({
+      'GET /hosts': {
+        status: 502,
+        text: '<html>Bad gateway</html>',
+        headers: { 'Content-Type': 'text/html', Date: 'Tue, 17 Nov 2026 15:00:00 GMT' },
+      },
+      'GET /status': {
+        json: {},
+        headers: { 'Content-Type': 'application/json; charset=utf-8', Date: 'Tue, 17 Nov 2026 13:30:05 GMT' },
+      },
+    });
+    await expect(api.get('/hosts')).rejects.toMatchObject({ status: 502 });
+    expect(serverSkewMs()).toBe(0);
+    await api.get('/status');
+    expect(serverSkewMs()).toBe(5000);
+  });
+
+  it('keeps the difference while it moves by two seconds or less, the resolution of the header', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T13:30:00.400Z'));
+    recordServerDate(new Date('2026-11-17T13:30:10.000Z'));
+    expect(serverSkewMs()).toBe(9600);
+    recordServerDate(new Date('2026-11-17T13:30:11.000Z'));
+    recordServerDate(new Date('2026-11-17T13:30:08.000Z'));
+    expect(serverSkewMs()).toBe(9600);
+    recordServerDate(new Date('2026-11-17T13:30:07.000Z'));
+    expect(serverSkewMs()).toBe(6600);
   });
 });

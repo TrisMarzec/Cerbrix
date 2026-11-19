@@ -24,13 +24,14 @@
 # printed.
 #
 # Last, a smoke run in a real browser (Chromium, Playwright) walks through the web UI: login,
-# the pages, acknowledging the open problem, a display token, logout. It runs in the Playwright
-# Docker image (the version of @playwright/test in ui/package-lock.json) on the network of the
-# stack and talks to the server by its service name, so Docker is all it needs. The admin
-# password reaches it as a read-only file under this script's private work directory. The spec
-# never hands the password to Playwright's `fill` (whose error log echoes the value), and on a
-# failure the output is printed with tokens and the exact password masked. It leaves an
-# acknowledged problem behind and nothing else is checked afterwards.
+# the pages, a display token, a dashboard in wall mode, the wall display started with that token
+# (it shows the open problem as an alarm), acknowledging the open problem, logout. It runs in
+# the Playwright Docker image (the version of @playwright/test in ui/package-lock.json) on the
+# network of the stack and talks to the server by its service name, so Docker is all it needs.
+# The admin password reaches it as a read-only file under this script's private work directory.
+# The spec never hands the password or the display token to Playwright's `fill` (whose error log
+# echoes the value), and on a failure the output is printed with tokens and the exact password
+# masked. It leaves an acknowledged problem behind and nothing else is checked afterwards.
 #
 # Environment variables (defaults in parentheses):
 #   CERBRIX_E2E_PROJECT       compose project name (cerbrix-e2e); lower-cased, because compose
@@ -722,7 +723,7 @@ if [ "${CERBRIX_E2E_SKIP_UI:-0}" = 1 ]; then
 else
     echo "e2e: the web UI in a browser"
     run_ui_smoke
-    UI_NOTE="web UI smoke run in a browser (login, pages, acknowledge, display token, logout)"
+    UI_NOTE="web UI smoke run in a browser (login, pages, display token, wall mode, wall display, acknowledge, logout)"
 fi
 
 echo "e2e: OK: configuration from Git, values kept arriving, problems opened and resolved with their e-mails, acknowledgement, no-data problem after the agent stopped, no duplicate message, API walk-through (login, status, hosts, series, problems, dashboard, display token, access rules), $UI_NOTE"

@@ -70,6 +70,14 @@ Other commands: `admin user list`, `admin user set-role <name> <viewer|operator|
 disabling or deleting a user ends the user's sessions. The last enabled admin cannot be
 demoted, disabled or deleted.
 
+A monitor on the wall needs no user: it opens `https://<server>/display/<id>` for a display
+defined in the configuration repository and uses a token that an admin creates in the UI at a
+desk. Do not log in on the monitor's browser: a display opened there with a login runs on that
+login and stops when it ends. The monitor's browser must keep the token in a persistent profile,
+and it must be started by a script that waits for the server's `/healthz`, so that the wall comes
+back by itself after a power cut. See [Wall displays](web-ui.md#wall-displays) for setting one up
+and [Kiosk mode](web-ui.md#kiosk-mode) for the start script.
+
 ### Plain HTTP is for testing only
 
 The quick start serves the UI over plain HTTP. That is fine at `http://127.0.0.1:8443/` on the
@@ -100,7 +108,9 @@ user. The [API reference](api.md) describes the login and the roles.
 ### Behind a reverse proxy
 
 Pass every path to the server, not only `/api`: the web UI is served at `/` and its pages, such as
-`/hosts` or `/problems`, are answered by the server too.
+`/hosts` or `/problems`, are answered by the server too. That includes `/healthz`, which the start
+script of a wall monitor asks before it starts the browser (see
+[Kiosk mode](web-ui.md#kiosk-mode)).
 
 The login and every request that changes something are checked against cross-site requests:
 when a browser sends an `Origin` header, its host and port must equal those of the `Host`

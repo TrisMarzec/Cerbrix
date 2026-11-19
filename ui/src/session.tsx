@@ -13,10 +13,14 @@ import {
 import type { Role, SessionUser } from './api/types';
 import { navigate } from './lib/router';
 import { LoginPage } from './shell/LoginPage';
+import { WallRoot } from './wall/WallRoot';
 
 export type { Role };
 
 const RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
+
+/** While the server cannot be reached, the session check is repeated this often by itself. */
+const RETRY_MS = 5000;
 
 interface Session {
   user: SessionUser;
@@ -53,8 +57,12 @@ function isStatus(e: unknown, status: number): boolean {
  * takes the place of the page in the same URL, so after a login the user is where they were.
  * Everything below is keyed by the user's name and role: when the cookie turns out to belong to
  * someone else, nothing of the previous user survives.
+ *
+ * While the server cannot be reached the check is repeated every 5 seconds (and at once when the tab
+ * becomes visible), so a wall monitor that started during an outage comes up without a click. With
+ * `wall`, the states before a session is known are drawn on the wall's dark background.
  */
-export function SessionProvider({ children }: { children: ComponentChildren }) {
+export function SessionProvider({ children, wall = false }: { children: ComponentChildren; wall?: boolean }) {
   const [state, setState] = useState<State>({ kind: 'loading' });
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -102,6 +110,42 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
     );
   }, []);
 
+  // A quiet retry: the gate stays as it is until an answer changes the state.
+  const unreachable = state.kind === 'unreachable';
+  useEffect(() => {
+    if (!unreachable) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    let asking = false;
+    const attempt = () => {
+      clearTimeout(timer);
+      if (stopped || asking || document.hidden) return;
+      asking = true;
+      api.probe<SessionUser>('/session').then(
+        (user) => {
+          asking = false;
+          if (!stopped) setState({ kind: 'in', user });
+        },
+        (e: unknown) => {
+          asking = false;
+          if (stopped) return;
+          if (isStatus(e, 401)) setState({ kind: 'out', expired: false });
+          else timer = setTimeout(attempt, RETRY_MS);
+        },
+      );
+    };
+    const onVisibility = () => {
+      if (!document.hidden) attempt();
+    };
+    timer = setTimeout(attempt, RETRY_MS);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [unreachable]);
+
   useEffect(() => {
     onUnauthorized(recheck);
     onSessionDoubt(recheck);
@@ -142,16 +186,18 @@ export function SessionProvider({ children }: { children: ComponentChildren }) {
     };
   }, [user]);
 
-  if (state.kind === 'loading') return null;
+  if (state.kind === 'loading') return wall ? <WallRoot /> : null;
   if (state.kind === 'unreachable') {
-    return (
-      <main class="gate">
-        <p role="alert">Could not reach the server</p>
+    const gate = (
+      <main class={wall ? 'gate wall-gate' : 'gate'}>
+        {/* On a wall path, the wall's words for it; the desk keeps its own. */}
+        <p role="alert">{wall ? 'No connection to the server' : 'Could not reach the server'}</p>
         <button type="button" class="btn" onClick={check}>
           Try again
         </button>
       </main>
     );
+    return wall ? <WallRoot>{gate}</WallRoot> : gate;
   }
   if (session === undefined) {
     return (
