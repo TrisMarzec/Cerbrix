@@ -1173,17 +1173,22 @@ describe('DisplayPage: a new version', () => {
     expect(window.location.pathname).toBe(`/display/${ID}`);
   });
 
-  it('does not reload again within 10 minutes of a reload, whatever the ETag says (the mark survives it)', async () => {
-    // This page is the one the reload loaded, 9 minutes ago by the wall clock.
-    window.history.replaceState({ cerbrixReloadAt: NOW.getTime() - 9 * 60_000 }, '', `/display/${ID}`);
+  it('does not reload within 10 minutes of a reload, and does at the first check after them (the mark survives it)', async () => {
+    // This page is the one the reload loaded, 8 min 30 s ago by the wall clock.
+    window.history.replaceState({ cerbrixReloadAt: NOW.getTime() - 510_000 }, '', `/display/${ID}`);
     await open({
       [STATE]: { json: displayState() },
       [dash('a')]: { json: alpha },
       'HEAD /': [{ headers: { ETag: '"v2"' } }, { headers: { ETag: '"v3"' } }, { headers: { ETag: '"v4"' } }],
     });
-    await advance(600_000);
-    expect(mock.count('HEAD /')).toBeGreaterThan(5);
+    // The next check, 9 min 30 s after the mark: another ETag, but no reload.
+    await advance(60_000);
+    expect(mock.count('HEAD /')).toBe(2);
     expect(reload).not.toHaveBeenCalled();
+    // The first check after the mark is 10 minutes old (10 min 30 s): the reload.
+    await advance(60_000);
+    expect(mock.count('HEAD /')).toBe(3);
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   it('reloads for a new version when the mark of the last reload is older than 10 minutes', async () => {

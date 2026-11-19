@@ -245,9 +245,9 @@ function markReload(): void {
  * check, `HEAD /`; the first `ETag` seen is this page's version. When a later one differs and
  * `mayReload` is true at that moment (the latest state poll succeeded, no token form is shown, the
  * browser keeps the token), the time is marked in `history.state` and `reload` is called, once per
- * page life. A page loaded less than 10 minutes after such a mark (wall clock, either way) does
- * not reload at all (ruling R18): a server whose `ETag` changes on every answer cannot make the
- * wall reload again and again. A failed check is ignored.
+ * page life. While such a mark is less than 10 minutes old (wall clock, either way), read at each
+ * check, it does not reload (ruling R18): the mark survives the reload, so a server whose `ETag`
+ * changes on every answer reloads the wall once in 10 minutes at most. A failed check is ignored.
  */
 export function useNewVersion(reload: () => void, mayReload: boolean): void {
   const may = useRef(mayReload);
@@ -261,18 +261,20 @@ export function useNewVersion(reload: () => void, mayReload: boolean): void {
     let limit: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | undefined;
     let stopped = false;
-    const mark = reloadMark();
-    // Read at the load: this page is the one a recent reload brought.
-    const reloadedLately = mark !== undefined && Math.abs(Date.now() - mark) < RELOAD_GUARD_MS;
 
     const seen = (tag: string) => {
       if (first === undefined) {
         first = tag;
-      } else if (tag !== first && may.current && !reloadAsked && !reloadedLately) {
-        reloadAsked = true;
-        markReload();
-        reloadRef.current();
+        return;
       }
+      if (tag === first || !may.current || reloadAsked) return;
+      // Read at each check (R18): no second reload within 10 minutes of the last one (wall clock,
+      // either way), also on the page that reload brought.
+      const mark = reloadMark();
+      if (mark !== undefined && Math.abs(Date.now() - mark) < RELOAD_GUARD_MS) return;
+      reloadAsked = true;
+      markReload();
+      reloadRef.current();
     };
 
     function check() {
