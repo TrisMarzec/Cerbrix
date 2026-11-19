@@ -913,4 +913,56 @@ mod tests {
         // The same as the desk's dashboard route.
         assert_eq!(body, get(&fx, "/api/v1/dashboards/named").await.json());
     }
+
+    /// The values of the four user fields in the display dashboard answer to a request that
+    /// carries the session cookie `cookie` and the bearer token `token`.
+    async fn user_fields_with(fx: &Fixture, cookie: &str, token: &str) -> Vec<Value> {
+        let bearer = format!("Bearer {token}");
+        let reply = fx
+            .call(
+                "GET",
+                "/api/v1/display/wall/dashboards/named",
+                Some(cookie),
+                &[("authorization", bearer.as_str())],
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let body = reply.json();
+        let problems = problems_of(&body);
+        assert_eq!(problems.len(), 1);
+        USER_FIELDS.iter().map(|f| problems[0][f].clone()).collect()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn valid_session_and_token_is_the_user(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        let token = named_problem(&fx).await;
+        let session = fx.session(Role::Viewer).await;
+        assert_eq!(
+            user_fields_with(&fx, &session, &token).await,
+            [json!("anna"), json!("looking"), json!("bob"), json!("gone")]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn invalid_or_expired_session_and_token_is_the_token(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        let token = named_problem(&fx).await;
+        // A session that expired a minute ago, still in the table.
+        let expired = fx.session(Role::Viewer).await;
+        let now = OffsetDateTime::now_utc();
+        sqlx::query("UPDATE sessions SET expires_at = $1")
+            .bind(now - Duration::minutes(1))
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        for (case, cookie) in [("unknown", "cbx_se_unknown"), ("expired", expired.as_str())] {
+            assert_eq!(
+                user_fields_with(&fx, cookie, &token).await,
+                [Value::Null, Value::Null, Value::Null, Value::Null],
+                "{case} session"
+            );
+        }
+    }
 }
