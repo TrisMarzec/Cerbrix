@@ -33,6 +33,13 @@ function label(container: Element): Element | null {
   return container.querySelector('.wall-panel-label');
 }
 
+/** The label as it is seen: without its visually hidden part. */
+function shownLabel(container: Element): string {
+  const copy = label(container)?.cloneNode(true) as Element | undefined;
+  for (const hidden of copy?.querySelectorAll('.visually-hidden') ?? []) hidden.remove();
+  return copy?.textContent ?? '';
+}
+
 function empty(container: Element): Element | null {
   return container.querySelector('.wall-problems-empty:not(.wall-sample)');
 }
@@ -171,14 +178,17 @@ describe('ProblemsPanel', () => {
     const { container } = show({ problems: problems(10), more: 2 });
     expect(rows(container)).toHaveLength(0);
     expect(summary(container)).toBeNull();
-    expect(label(container)).toHaveTextContent(/^Critical · 12 open$/);
+    // Seen: the severity and the count; for assistive technology the panel's name comes first.
+    expect(shownLabel(container)).toMatch(/^Critical · 12 open$/);
+    expect(label(container)).toHaveTextContent(/^Problems: Critical · 12 open$/);
+    expect(label(container)?.querySelector('.visually-hidden')).toHaveTextContent(/^Problems:$/);
     expect(label(container)).toHaveClass('is-count', 'sev-critical');
   });
 
   it('puts an acknowledged-only count into the label at half strength with the severity word', () => {
     installMeasure(room(0, { bodyHeight: LINE - 1 }));
     const { container } = show({ problems: problems(3, acknowledgedProblem) });
-    expect(label(container)).toHaveTextContent(/^Warning \(acknowledged\) · 3 open$/);
+    expect(shownLabel(container)).toMatch(/^Warning \(acknowledged\) · 3 open$/);
     expect(label(container)).toHaveClass('is-count', 'sev-warning', 'is-acknowledged');
   });
 
@@ -186,17 +196,18 @@ describe('ProblemsPanel', () => {
     installMeasure(room(0, { bodyHeight: LINE - 1 }));
     const acknowledgedCritical = { ...acknowledgedProblem, severity: 'critical' as const };
     const { container } = show({ problems: problems(3, acknowledgedCritical) });
-    expect(label(container)).toHaveTextContent(/^Critical \(acknowledged\) · 3 open$/);
+    expect(shownLabel(container)).toMatch(/^Critical \(acknowledged\) · 3 open$/);
     expect(label(container)).toHaveClass('sev-critical', 'is-acknowledged');
   });
 
   it.each([
-    ['the label', LINE - 1, label],
-    ['the lone summary', ROW - 1, summary],
+    // As seen: the label's hidden name for assistive technology takes no width.
+    ['the label', LINE - 1, shownLabel],
+    ['the lone summary', ROW - 1, (c: Element) => summary(c)?.textContent ?? ''],
   ] as const)('starts %s with the severity word in a one-column panel', (_, bodyHeight, find) => {
     installMeasure(room(0, { bodyWidth: 120, bodyHeight }));
     const { container } = show({ problems: problems(10), more: 2 });
-    expect(find(container)?.textContent?.startsWith('Critical · ')).toBe(true);
+    expect(find(container).startsWith('Critical · ')).toBe(true);
   });
 
   it('measures the summary line from a one-line sample, even in a narrow panel', () => {

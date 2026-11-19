@@ -95,9 +95,10 @@ async function exchange<T>(url: string, token: string | undefined, signal: Abort
 /**
  * `GET /api/v1/display/<id><path>`: `''` for the display's state, `/dashboards/<id>` (built with
  * `seg`) for a dashboard. Sends `token`, by default the stored one, as a bearer token without the
- * session cookie, and the session cookie when there is none. As the desk client: a 15-second limit, errors as `ApiError` (`network` with
- * status 0 when no answer came), the server's clock recorded from the `Date` header. Unlike it,
- * nothing here touches the session: a 401 is the caller's to handle.
+ * session cookie, and the session cookie when there is none. As the desk client: a 15-second
+ * limit, errors as `ApiError` (`network` with status 0 when no answer came), the server's clock
+ * recorded from the `Date` header. Unlike it, nothing here touches the session: a 401 is the
+ * caller's to handle.
  */
 export function displayGet<T>(
   displayId: string,

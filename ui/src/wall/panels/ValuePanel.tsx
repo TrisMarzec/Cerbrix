@@ -76,7 +76,8 @@ function Block({ step, text, age: ago, sample = false, cut }: BlockProps) {
     >
       <span class="wall-value-number">{cut === undefined ? text : '…'}</span>
       {ago !== null && (
-        <span class={`wall-value-age${ago.old ? ' is-old' : ''}`}>
+        // Cut, the block may still be wider than the body: the age then ends in an ellipsis.
+        <span class={`wall-value-age${ago.old ? ' is-old' : ''}${cut === undefined ? '' : ' wall-ellipsis'}`}>
           {ago.old ? `${ago.text} · old` : ago.text}
         </span>
       )}

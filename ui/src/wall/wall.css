@@ -306,8 +306,11 @@
 
 /* A row that caused the switch: its background fades in once and stays while it is a cause. The
    fade is a transition from the starting style, so it also runs when a shown row becomes a cause.
-   A reordering that moves an existing cause row can run the fade again; the highlight stays. */
+   A reordering that moves an existing cause row can run the fade again; the highlight stays.
+   Without color-mix (older browsers) the row is raised instead of tinted; without @starting-style
+   it shows at once, without the fade. */
 .wall .wall-problem.is-cause {
+  background-color: var(--raised);
   background-color: color-mix(in srgb, var(--sev-full) 16%, transparent);
   transition: background-color 1.5s ease-out;
 }

@@ -13,6 +13,7 @@ import {
 import type { Role, SessionUser } from './api/types';
 import { navigate } from './lib/router';
 import { LoginPage } from './shell/LoginPage';
+import { WallRoot } from './wall/WallRoot';
 
 export type { Role };
 
@@ -185,7 +186,7 @@ export function SessionProvider({ children, wall = false }: { children: Componen
     };
   }, [user]);
 
-  if (state.kind === 'loading') return wall ? <div class="wall" /> : null;
+  if (state.kind === 'loading') return wall ? <WallRoot /> : null;
   if (state.kind === 'unreachable') {
     const gate = (
       <main class={wall ? 'gate wall-gate' : 'gate'}>
@@ -195,7 +196,7 @@ export function SessionProvider({ children, wall = false }: { children: Componen
         </button>
       </main>
     );
-    return wall ? <div class="wall">{gate}</div> : gate;
+    return wall ? <WallRoot>{gate}</WallRoot> : gate;
   }
   if (session === undefined) {
     return (

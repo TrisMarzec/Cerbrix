@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen } from '@testing-library/preact';
 import type uPlot from 'uplot';
 import { vi } from 'vitest';
 
@@ -277,6 +277,27 @@ describe('DisplayPage: the token', () => {
     expect(window.location.pathname).toBe(`/display/${ID}`);
   });
 
+  it('shows the form when #token is added to the address of a running display', async () => {
+    await open(
+      { [STATE]: withToken({ json: displayState() }), [dash('a')]: withToken({ json: alpha }) },
+      { token: TOKEN },
+    );
+    expect(title()).toBe('Alpha');
+    await act(async () => {
+      window.history.replaceState(null, '', `/display/${ID}#token`);
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    await settle();
+    expect(tokenInput()).toBeInTheDocument();
+    // The polls rest while the form waits.
+    const before = mock.count(STATE);
+    await advance(30_000);
+    expect(mock.count(STATE)).toBe(before);
+    await enter(TOKEN);
+    expect(title()).toBe('Alpha');
+    expect(window.location.hash).toBe('');
+  });
+
   it('keeps the old token when a wrong one is entered after #token', async () => {
     window.history.replaceState(null, '', `/display/${ID}#token`);
     await open({ [STATE]: withToken({ json: displayState() }) }, { token: TOKEN });
@@ -294,6 +315,8 @@ describe('DisplayPage: the token', () => {
     expect(
       screen.getByText('This browser does not keep the token. It must be entered again after a restart.'),
     ).toBeInTheDocument();
+    // The token is no longer in the field while the notice stands on the monitor.
+    expect(tokenInput().value).toBe('');
     expect(title()).toBe('');
     await advance(9999);
     expect(title()).toBe('');
@@ -421,6 +444,36 @@ describe('DisplayPage: before the display can be shown', () => {
     mock.on(STATE, NOT_FOUND);
     await advance(5000);
     expect(screen.getByText(`There is no display named ${ID}.`)).toBeInTheDocument();
+  });
+});
+
+describe('DisplayPage: the cursor outside the frame', () => {
+  function root(): Element | null {
+    return document.querySelector('.wall');
+  }
+
+  it.each([
+    ['there is no such display', NOT_FOUND],
+    ['the server cannot be reached at the start', 'network' as const],
+  ])('hides the cursor after 3 s when %s', async (_, answer) => {
+    await open({ [STATE]: answer });
+    await advance(2999);
+    expect(root()).not.toHaveClass('is-idle');
+    await advance(1);
+    expect(root()).toHaveClass('is-idle');
+  });
+
+  it('hides the cursor over the token form after 3 s without input, not while typing', async () => {
+    await open({ [STATE]: withToken({ json: displayState() }) });
+    await advance(2000);
+    fireEvent.keyDown(tokenInput(), { key: 'c' });
+    await advance(2000);
+    expect(root()).not.toHaveClass('is-idle');
+    await advance(1000);
+    expect(root()).toHaveClass('is-idle');
+    fireEvent.mouseMove(window, { screenX: 10, screenY: 10 });
+    await advance(0);
+    expect(root()).not.toHaveClass('is-idle');
   });
 });
 

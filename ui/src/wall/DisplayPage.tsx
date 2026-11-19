@@ -24,6 +24,7 @@ import {
 import { TokenForm } from './TokenForm';
 import { useDashboardPoll, useDisplayState, useNewVersion } from './useDisplay';
 import { WallFrame, type WallAlarm } from './WallFrame';
+import { WallRoot } from './WallRoot';
 
 /** The wall's clock moves on this often; it shows minutes. */
 const CLOCK_MS = 5000;
@@ -249,14 +250,14 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError, onLogi
   );
 }
 
-/** A sentence on the wall's dark root, before a display can be shown. */
+/** A sentence on the wall's dark root, before a display can be shown; the cursor goes while idle. */
 function Notice({ text: sentence, warning = false }: { text: string; warning?: boolean }) {
   return (
-    <div class="wall">
+    <WallRoot>
       <main class={warning ? 'wall-notice is-warning' : 'wall-notice'}>
         <p class="wall-notice-text">{sentence}</p>
       </main>
-    </div>
+    </WallRoot>
   );
 }
 
@@ -285,6 +286,14 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
   const [form, setForm] = useState<{ message?: string } | undefined>(() =>
     window.location.hash === '#token' ? {} : undefined,
   );
+  // `#token` added to the address of a running display shows the form too (D12).
+  useEffect(() => {
+    const onHash = () => {
+      if (window.location.hash === '#token') setForm((shown) => shown ?? {});
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
   const [seed, setSeed] = useState<DisplayState>();
   const poll = useDisplayState(id, form === undefined, seed, (withToken) => {
     setForm(withToken ? { message: 'The token of this display is no longer valid.' } : {});
@@ -318,7 +327,7 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
   // may add it, so the poll goes on.
   if (isApiError(poll.error, 'not_found')) return <Notice text={`There is no display named ${id}.`} />;
   if (poll.state === undefined) {
-    if (poll.error === undefined) return <div class="wall" />;
+    if (poll.error === undefined) return <WallRoot />;
     return (
       <Notice
         warning

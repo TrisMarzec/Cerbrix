@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError, isApiError } from '../api/client';
 import type { DisplayState } from '../api/types';
 import { displayGet, storeToken, tokenKept } from './displayClient';
+import { WallRoot } from './WallRoot';
 
 /** How long the notice that the browser does not keep the token stays before the display starts. */
 const NOTICE_MS = 10_000;
@@ -65,6 +66,8 @@ export function TokenForm({ id, message, onStart }: Props) {
       (state) => {
         if (mine.signal.aborted) return;
         storeToken(id, token);
+        // Out of the field before anything else is shown: the monitor must not show the token.
+        if (input.current !== null) input.current.value = '';
         if (tokenKept(id)) {
           start.current(state);
         } else {
@@ -82,7 +85,7 @@ export function TokenForm({ id, message, onStart }: Props) {
   };
 
   return (
-    <div class="wall">
+    <WallRoot>
       <main class="wall-token">
         <form class="wall-token-form" onSubmit={submit}>
           <h1 class="wall-token-title">Wall display {id}</h1>
@@ -115,6 +118,6 @@ export function TokenForm({ id, message, onStart }: Props) {
           )}
         </form>
       </main>
-    </div>
+    </WallRoot>
   );
 }

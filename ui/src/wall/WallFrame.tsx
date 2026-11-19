@@ -1,15 +1,12 @@
 import './wall.css';
 
 import type { ComponentChildren } from 'preact';
-import { useEffect, useState } from 'preact/hooks';
 
 import type { SyncIssue, SyncState } from '../api/types';
 import { TimeText } from '../components/TimeText';
 import { clock } from '../lib/format';
 import { Link } from '../lib/router';
-
-/** The cursor and the back link disappear after this long without mouse movement. */
-const IDLE_MS = 3_000;
+import { WallRoot } from './WallRoot';
 
 /** Why the display shows the dashboard it shows: an alarm (concept section 6, rule 4). */
 export interface WallAlarm {
@@ -117,38 +114,6 @@ function OutOfSyncBand({ sync, now }: { sync: SyncState; now: Date }) {
   );
 }
 
-/** Events that wake the frame: the mouse, a pointer (touch included) and the keyboard. */
-const WAKE_EVENTS = ['mousemove', 'pointermove', 'pointerdown', 'keydown'] as const;
-
-/**
- * Whether nobody has used the mouse, a pointer or the keyboard for `IDLE_MS`; the timer runs from
- * mount. A move to the position of the last one is no movement (remote desktops and KVM switches
- * send such moves) and does not wake the frame.
- */
-function useIdle(): boolean {
-  const [idle, setIdle] = useState(false);
-  useEffect(() => {
-    let timer = window.setTimeout(() => setIdle(true), IDLE_MS);
-    let last: { x: number; y: number } | undefined;
-    const wake = (event: Event) => {
-      if (event.type === 'mousemove' || event.type === 'pointermove') {
-        const { screenX: x, screenY: y } = event as MouseEvent;
-        if (last !== undefined && last.x === x && last.y === y) return;
-        last = { x, y };
-      }
-      setIdle(false);
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => setIdle(true), IDLE_MS);
-    };
-    for (const type of WAKE_EVENTS) window.addEventListener(type, wake);
-    return () => {
-      for (const type of WAKE_EVENTS) window.removeEventListener(type, wake);
-      window.clearTimeout(timer);
-    };
-  }, []);
-  return idle;
-}
-
 /**
  * The frame of a wall dashboard (concept sections 7 and 8.1): the header with the name, the sync
  * state and the clock, the switch band and the Out Of Sync band, then the content, filling the
@@ -165,10 +130,9 @@ export function WallFrame({
   back,
   children,
 }: Props) {
-  const idle = useIdle();
   const nowIso = now.toISOString();
   return (
-    <div class={idle ? 'wall is-idle' : 'wall'}>
+    <WallRoot>
       <header class="wall-header">
         <h1 class="wall-title" title={title}>
           {title}
@@ -203,6 +167,6 @@ export function WallFrame({
         {sync?.status === 'out_of_sync' && <OutOfSyncBand sync={sync} now={now} />}
         <div class="wall-content">{children}</div>
       </div>
-    </div>
+    </WallRoot>
   );
 }

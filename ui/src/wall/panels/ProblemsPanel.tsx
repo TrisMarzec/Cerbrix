@@ -163,7 +163,15 @@ export function ProblemsPanel({ panel, now, causes }: Props) {
   return (
     <>
       <div class={`wall-panel-label${counted ? ` is-count${urgent}` : ''}`}>
-        {counted ? `${word}${total} open` : 'Problems'}
+        {/* The count in place of the name: the name stays for assistive technology, taking no width. */}
+        {counted ? (
+          <>
+            <span class="visually-hidden">Problems: </span>
+            {`${word}${total} open`}
+          </>
+        ) : (
+          'Problems'
+        )}
       </div>
       <div class={`wall-panel-body wall-problems${narrow ? ' is-narrow' : ''}`} ref={body}>
         <Samples />

@@ -129,6 +129,8 @@ describe('ValuePanel', () => {
     expect(step(container)).toBe('is-inline');
     expect(shown(container)?.querySelector('.wall-value-number')).toHaveTextContent(/^…$/);
     expect(getByRole('img', { name: 'db-01 · disk.used: 1.2 GiB, 30 s ago' })).toBeInTheDocument();
+    // Cut, the block may still be wider than the body: the age ends in an ellipsis on its one line.
+    expect(shown(container)?.querySelector('.wall-value-age')).toHaveClass('wall-ellipsis');
   });
 
   it('names a cut old value as old for a screen reader', () => {
@@ -141,6 +143,7 @@ describe('ValuePanel', () => {
     body(600, 300);
     const { container } = show();
     expect(shown(container)).not.toHaveAttribute('role');
+    expect(shown(container)?.querySelector('.wall-value-age')).not.toHaveClass('wall-ellipsis');
   });
 
   it('shows a value measured in the future as 0 s ago, not old', () => {

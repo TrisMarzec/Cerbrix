@@ -8,6 +8,7 @@ import { usePolled } from '../lib/poll';
 import { Link } from '../lib/router';
 import { useServerNow } from '../lib/serverNow';
 import { DashboardView } from './DashboardView';
+import { WallRoot } from './WallRoot';
 import { useLostSince } from './lost';
 
 const POLL_MS = 5000;
@@ -44,7 +45,7 @@ export function WallPage({ id }: { id: string }) {
   if (isApiError(dashboard.error, 'not_found')) {
     // Not a wall: a page on the wall's dark background with the way back.
     return (
-      <div class="wall">
+      <WallRoot>
         <main class="wall-missing">
           <p class="wall-missing-text">There is no dashboard named {id}.</p>
           <p>
@@ -53,7 +54,7 @@ export function WallPage({ id }: { id: string }) {
             </Link>
           </p>
         </main>
-      </div>
+      </WallRoot>
     );
   }
 
