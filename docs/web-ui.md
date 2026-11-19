@@ -158,31 +158,60 @@ dashboards with a token of its own, which works for that one display only.
 
 ### Setting up a display
 
+Prepare the token at a desk, and do not log in to the UI on the monitor's own browser.
+
 1. Add the display file to the configuration repository, for example `displays/noc.json`, and
    push it. Its id is the file name without `.json`, here `noc`. Once the configuration is in
    sync, the display is listed on the Dashboards page under "Wall displays".
-2. As an admin, open Configuration → Display tokens and create the display's token. It is shown
-   once; copy it.
-3. On the monitor's computer open `https://<server>/display/<id>`, here
-   `https://<server>/display/noc`, in a browser (see [Kiosk mode](#kiosk-mode) below).
-4. Enter the token under "Display token" and press Start. The page checks the token with the
+2. At a desk, as an admin, open Configuration → Display tokens and create the display's token.
+   It is shown once; copy it.
+3. On the monitor's computer, install the start script of [Kiosk mode](#kiosk-mode) below, with
+   a browser profile that is kept between starts, but do not register it yet.
+4. Start the browser once by hand with the command of the script and the address
+   `https://<server>/display/<id>#token`, here `https://<server>/display/noc#token`. `#token` is
+   that word, not the token: the token itself never goes into an address. A kiosk window has no
+   address bar, so `#token` goes into this one start command.
+5. Enter the token under "Display token" and press Start. The page checks the token with the
    server; a wrong one is answered with "This token is not valid for this display." With a valid
-   token the display starts.
+   token the display starts, and `#token` is removed from the address.
+6. Close the browser (Alt+F4) and register the start script, which opens the address without
+   `#token` at every start.
 
-The token is entered once. The browser keeps it in its storage for this one page; it is the only
-thing the UI stores besides the session cookie. Use a normal browser profile, not a private
-window, or the token is gone after the browser restarts. If the browser refuses to store it, the
-page says "This browser does not keep the token. It must be entered again after a restart." and
-starts the display after 10 seconds.
+**Do not log in on the monitor.** A display opened in a browser that is logged in to the UI, and
+that has no token, runs on that login. Its header then says "Running on your login, not on a
+display token", and it stops working when the login ends: after 12 hours without use, and 7 days
+after the login at the latest (the defaults of `CERBRIX_AUTH__SESSION_IDLE_SECS` and
+`CERBRIX_AUTH__SESSION_MAX_SECS`, see [Login settings](install.md#login-settings)). If you logged
+in on the monitor, log out before you open `/display/<id>`. Once a token is entered, the page
+ignores any login in the same browser: it sends only the token. That a logged-in user needs no
+token is meant for the desk: a click on a display's name on the Dashboards page opens it this way.
 
-To give a monitor a new token, open `https://<server>/display/<id>#token`: the token form is shown
-even though a token is kept, and the new token replaces the old one. Creating a new token under
-Configuration (Replace token) makes the old one stop working at once. Revoking a token, or
-removing the display from the repository, does the same: at its next request (they come every
-5 seconds) the monitor shows the token form again with "The token of this display is no longer valid." and forgets the old token.
+**The browser must keep the token.** The token is entered once; the browser keeps it in its
+storage for this one page. It is the only thing the UI stores besides the session cookie. A
+browser that throws its storage away at every start accepts the token and forgets it at the next
+start, without any notice: the monitor then shows the token form again after every restart. That
+is the case for a private window (`--incognito`, `--private-window`) and for a temporary profile,
+such as a profile directory under `/tmp` or one that is reset at login. Use a normal profile in a
+directory that survives a restart. Only when the browser refuses storage outright does the page
+say "This browser does not keep the token. It must be entered again after a restart." and start
+the display after 10 seconds; such a page also does not reload itself after an upgrade (see
+[What the monitor shows](#what-the-monitor-shows)), because the reload would lose the token.
 
-Someone who is logged in to the UI in the same browser needs no token: `/display/<id>` then
-opens with the session, which is what a click on a display's name on the Dashboards page does.
+#### Entering or replacing the token
+
+The token form appears when the page has no token, when its token is no longer valid, and when the
+address ends in `#token`. To give a monitor a new token, either start its browser once with
+`https://<server>/display/<id>#token` (on Linux, stop the service first with
+`systemctl --user stop cerbrix-wall.service`, and start it again when the token is entered and
+the browser closed), or, where you can reach the address bar, add `#token` to the address of the
+running page: the form is shown even though a token is kept, and the new token replaces the old
+one. Never put `#token` into the command that starts the browser at every boot: the form would
+come back at every start, and the wall would wait for someone to type.
+
+Creating a new token under Configuration (Replace token) makes the old one stop working at once.
+Revoking a token, or removing the display from the repository, does the same: at its next request
+(they come every 5 seconds) the monitor shows the token form again with "The token of this
+display is no longer valid." and forgets the old token.
 
 ### What the monitor shows
 
@@ -194,25 +223,44 @@ problem shows within a few seconds.
 
 - **Rotation.** A display set to `rotate` shows each of its dashboards for `every` and then the
   next one, in the order of the file, starting again at the first. A dashboard of the list that
-  does not exist is skipped (and tried again after 5 minutes).
+  does not exist is skipped and tried again after 5 minutes; when none of the list can be shown,
+  the display tries them again every 5 seconds.
 - **Alarm.** A display with `switch_on_alarm` switches to a dashboard that has an alarm: an open,
   unacknowledged problem of at least `min_severity` on one of its hosts. When several dashboards
   have one, the one with the highest priority wins, then the one with the most severe and oldest
-  alarm. A band under the header says why, for example "Alarm: showing Production. Switched
-  from Lobby. 1 more dashboard waiting." The problems that caused the switch are highlighted in
-  the problems panel. When the alarm is acknowledged or resolved, the display goes on with the
-  next dashboard with an alarm, or back to its own setting; the interrupted dashboard of a
-  rotation gets its full time again.
+  alarm. A band under the header says why. For the display `NOC` of the
+  [example](configuration-repository.md#display-files-displays), which rotates through
+  `production` and `web`, a critical problem on a production host while "Web servers" is on the
+  screen gives "Alarm: showing Production. Switched from Web servers."; when other dashboards have
+  an alarm as well, the band adds "1 more dashboard waiting." or "N more dashboards waiting.". The
+  problems that caused the switch are highlighted in the problems panel. When the alarm is
+  acknowledged or resolved, the display goes on with the next dashboard with an alarm, or back to
+  its own setting; the interrupted dashboard of a rotation gets its full time again.
+- **A dashboard that cannot be loaded.** When the dashboard that should be on the screen cannot
+  be loaded (above all the dashboard of an alarm), the display does not go on showing the previous
+  one: it shows that dashboard's name, the alarm band if there is an alarm, and "This dashboard
+  could not be loaded." While the display changes from one dashboard to the next, the previous
+  dashboard's panels may stand in, dimmed, under the new name, for at most 5 seconds.
 - **Out of sync.** While the last commit of the configuration repository is refused, a band
   says "Out of sync since <time>, showing the configuration from commit <commit>", with the file
   and the reason below it ("and N more" when more files were refused). The display goes on with
   the configuration that is still active.
-- **No connection.** When no answer has come from the server for 15 seconds, the header says "No
-  connection to the server since <time>" and the content is dimmed: what is on the screen is old.
-  When the server answers, but with an error, it says "The server reported an error since
-  <time>" instead. The display keeps trying every 5 seconds and returns to normal by itself.
+- **No connection.** When the server has not answered successfully for 15 seconds, the header says
+  "No connection to the server since <time>" and the content is dimmed: what is on the screen is
+  old. When the server answers, but with an error, it says "The server reported an error since
+  <time>" instead. The time is that of the last successful answer. The display keeps trying every
+  5 seconds and returns to normal by itself. A restart of the server shows the same way, also
+  behind a reverse proxy that answers every request with "404" while the server is away: the
+  display does not take that for a display or dashboard that no longer exists, and keeps its
+  token.
+- **Metrics store down.** When the server cannot reach its metrics store, graph and value panels
+  say "Metrics are not available right now"; the problems and host-states panels go on.
 - **Upgrades.** The page looks for a new version of the UI on the server every 60 seconds. After
-  a server upgrade it reloads itself once; the token is kept.
+  a server upgrade it reloads itself once, and not again within 10 minutes. A token that the
+  browser keeps survives the reload; a page whose browser does not keep the token does not
+  reload itself (reload it by hand and enter the token again). If the server goes away exactly
+  while the page reloads, the browser shows its own error page and stays there; the start script
+  below does not see that, so restart the browser or the computer.
 
 The wall shows no user names and no comments: a problem that somebody acknowledged shows as
 "acknowledged", without who or why, because everyone in the room can read the wall. The token
@@ -231,21 +279,100 @@ dashboard file before a monitor shows it.
 
 ### Kiosk mode
 
-Run the browser on the monitor's computer full screen, without its own bars, and start it with
-the computer. For Chromium or Google Chrome:
+The monitor's computer runs a browser full screen, without its own bars, started with the
+computer. Set it up so that it survives a power cut without anybody touching it.
+
+**Wait for the server.** After a power cut the monitor's computer is usually up before the
+server. A browser started then shows its own error page ("This site can't be reached") and stays
+there: the display's page never loads, so it cannot retry. Start the browser from a small script
+that waits until `https://<server>/healthz` answers, and that starts the browser again whenever
+it exits. (`/healthz` answers 200 once the server and its database are up.) Once the display's
+page is loaded, it rides out a server restart by itself (see "No connection" above).
+
+On Linux, save this as `/usr/local/bin/cerbrix-wall` and make it executable
+(`chmod +x /usr/local/bin/cerbrix-wall`); set `SERVER` and `WALL` to your server and display id.
+It needs `curl`.
 
 ```sh
-chromium --kiosk --app=https://monitoring.example.net/display/noc
+#!/bin/sh
+# Starts the wall display once the Cerbrix server answers, and again whenever the browser exits.
+SERVER=https://monitoring.example.net
+WALL=noc
+PROFILE="$HOME/.local/share/cerbrix-wall"
+
+mkdir -p "$PROFILE"
+while true; do
+  until curl -fsS -o /dev/null --max-time 10 "$SERVER/healthz"; do
+    sleep 5
+  done
+  chromium --kiosk --app="$SERVER/display/$WALL" \
+    --no-first-run --noerrdialogs --hide-crash-restore-bubble \
+    --user-data-dir="$PROFILE"
+  sleep 5
+done
 ```
+
+Register it as a systemd user service of the user that is logged in automatically on the
+monitor's computer (turn on automatic login in the desktop's settings), in
+`~/.config/systemd/user/cerbrix-wall.service`:
+
+```ini
+[Unit]
+Description=Cerbrix wall display
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/cerbrix-wall
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+Then, as that user, `systemctl --user daemon-reload` and
+`systemctl --user enable --now cerbrix-wall.service`. The `graphical-session.target` is started
+by desktops such as GNOME and KDE Plasma; with a desktop that does not start it, put the script
+into the desktop's autostart instead (a `.desktop` file in `~/.config/autostart/` with
+`Exec=/usr/local/bin/cerbrix-wall`).
+
+On Windows, the equivalent is a scheduled task that runs at logon of the automatically logged-in
+user and starts a PowerShell script with the same loop: `Invoke-WebRequest` against `/healthz`
+until it succeeds, then `Start-Process -Wait` with the browser and the flags below, and again.
+
+**The browser and its flags.** Chromium (the binary is `chromium-browser` on some
+distributions) and Google Chrome (`google-chrome`) take the same flags:
+
+```sh
+chromium --kiosk --app=https://<server>/display/<id> --no-first-run --noerrdialogs \
+  --hide-crash-restore-bubble --user-data-dir=<persistent directory>
+```
+
+| Flag | What it is for |
+| --- | --- |
+| `--kiosk` | Full screen without the browser's bars. |
+| `--app=<address>` | Opens the address as an application window, without tabs. |
+| `--no-first-run` | Skips the first-run prompts and pages of a new profile. |
+| `--noerrdialogs` | Suppresses the browser's error dialogs. |
+| `--hide-crash-restore-bubble` | No "Restore pages?" bubble after the computer lost power: a browser that was not closed counts as crashed. |
+| `--user-data-dir=<directory>` | The profile, which keeps the token. Use a directory that survives a restart, not one under `/tmp`. |
+
+Older guides use `--disable-session-crashed-bubble` for the restore bubble; current Chromium no
+longer has that flag and ignores it.
 
 For Firefox:
 
 ```sh
-firefox --kiosk https://monitoring.example.net/display/noc
+firefox --kiosk https://<server>/display/<id> --profile <persistent directory>
 ```
 
-Enter the token once in the kiosk window. Turn off the screen saver, the screen lock and sleep on
-that computer, or the monitor goes dark after a while.
+`--kiosk` (Firefox 71 and later) opens the address full screen without the browser's bars;
+`--profile` names the profile directory, which keeps the token. Start Firefox once with that
+profile in a normal window and close any first-run pages before you use it in kiosk mode.
+
+**Power settings.** Turn off the screen saver, the screen lock, display sleep and system sleep on
+the monitor's computer, or the monitor goes dark after a while.
 
 ### Screen sizes
 
