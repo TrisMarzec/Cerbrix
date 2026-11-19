@@ -1,10 +1,11 @@
 import type { DashboardDetail, Panel, SyncState } from '../api/types';
+import { NO_CAUSES } from './constants';
 import { PanelGrid } from './PanelGrid';
 import { GraphPanel } from './panels/GraphPanel';
 import { HostStatesPanel } from './panels/HostStatesPanel';
 import { ProblemsPanel } from './panels/ProblemsPanel';
 import { ValuePanel } from './panels/ValuePanel';
-import { WallFrame, type WallAlarm } from './WallFrame';
+import { WallFrame } from './WallFrame';
 
 interface Props {
   /** Undefined before the first answer: the frame shows `title` and an empty grid area. */
@@ -13,24 +14,22 @@ interface Props {
   title?: string;
   sync?: SyncState;
   now: Date;
-  alarm?: WallAlarm;
-  /** The ids of the alarms that caused a switch to this dashboard; every problems panel marks them. */
-  causes: string[];
   lostSince?: Date;
   /** With `lostSince`: the server answers, but with an error. */
   serverError?: boolean;
   back?: string;
 }
 
-/** The content of one panel by its type; a type this page does not know yet keeps its cell. */
 interface ContentProps {
   panel: Panel;
   now: Date;
+  /** The ids of the alarms that caused a switch to this dashboard; every problems panel marks them. */
   causes: string[];
   /** False when the metrics store could not be read: the graph and value panels say so. */
   metricsAvailable: boolean;
 }
 
+/** The content of one panel by its type; a type this page does not know yet keeps its cell. */
 function PanelContent({ panel, now, causes, metricsAvailable }: ContentProps) {
   switch (panel.type) {
     case 'problems':
@@ -66,21 +65,22 @@ export function DashboardGrid({ dashboard, now, causes }: { dashboard: Dashboard
 }
 
 /**
- * One dashboard on the wall: the frame with its name, and its panels on the 12 by 6 grid. The frame
- * is the same element before and after the first answer (ruling R11).
+ * One dashboard on the wall page (`/wall/…`): the frame with its name, and its panels on the 12 by
+ * 6 grid. The frame is the same element before and after the first answer (ruling R11). No alarm
+ * switched to it, so it has no band and marks no causes; the display page draws its layers with
+ * `DashboardGrid` in its own frame.
  */
-export function DashboardView({ dashboard, title, sync, now, alarm, causes, lostSince, serverError, back }: Props) {
+export function DashboardView({ dashboard, title, sync, now, lostSince, serverError, back }: Props) {
   return (
     <WallFrame
       title={dashboard?.name ?? title ?? ''}
       sync={sync}
       now={now}
-      alarm={alarm}
       lostSince={lostSince}
       serverError={serverError}
       back={back}
     >
-      {dashboard !== undefined && <DashboardGrid dashboard={dashboard} now={now} causes={causes} />}
+      {dashboard !== undefined && <DashboardGrid dashboard={dashboard} now={now} causes={NO_CAUSES} />}
     </WallFrame>
   );
 }

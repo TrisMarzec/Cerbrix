@@ -6,6 +6,7 @@ import { ApiError, isApiError } from '../api/client';
 import type { DashboardDetail, DisplayState } from '../api/types';
 import { moment, type Moment } from '../lib/poll';
 import { useServerNow } from '../lib/serverNow';
+import { CLOCK_MS, NO_CAUSES } from './constants';
 import { DashboardGrid } from './DashboardView';
 import { tokenKept } from './displayClient';
 import { useLostSince } from './lost';
@@ -26,13 +27,10 @@ import { useDashboardPoll, useDisplayState, useNewVersion } from './useDisplay';
 import { WallFrame, type WallAlarm } from './WallFrame';
 import { WallRoot } from './WallRoot';
 
-/** The wall's clock moves on this often; it shows minutes. */
-const CLOCK_MS = 5000;
 /** The cross-fade of a dashboard change (D13). */
 const FADE_MS = 400;
 /** How long the previous picture may stand in for a new dashboard that has not answered yet. */
 const HANDOVER_MS = 5000;
-const NO_CAUSES: string[] = [];
 
 function reloadPage(): void {
   window.location.reload();

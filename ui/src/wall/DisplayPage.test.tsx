@@ -224,7 +224,7 @@ describe('DisplayPage: the token', () => {
   it('says that the server could not be reached when checking the token fails', async () => {
     await open({ [STATE]: [UNAUTHORIZED, 'network'] });
     await enter(TOKEN);
-    expect(screen.getByText('Could not reach the server.')).toBeInTheDocument();
+    expect(screen.getByText('No connection to the server.')).toBeInTheDocument();
     expect(document.activeElement).toBe(tokenInput());
   });
 

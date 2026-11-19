@@ -7,15 +7,10 @@ import type { DashboardDetail, Status } from '../api/types';
 import { usePolled } from '../lib/poll';
 import { Link } from '../lib/router';
 import { useServerNow } from '../lib/serverNow';
+import { CLOCK_MS, POLL_MS } from './constants';
 import { DashboardView } from './DashboardView';
-import { WallRoot } from './WallRoot';
 import { useLostSince } from './lost';
-
-const POLL_MS = 5000;
-/** The wall's clock moves on this often; it shows minutes. */
-const CLOCK_MS = 5000;
-/** A dashboard opened on this screen was not switched to by an alarm. */
-const NO_CAUSES: string[] = [];
+import { WallRoot } from './WallRoot';
 
 function loadDashboard(id: string, signal: AbortSignal): Promise<DashboardDetail> {
   // `.` and `..` cannot be sent as a path segment, and no dashboard has such an id.
@@ -68,7 +63,6 @@ export function WallPage({ id }: { id: string }) {
       title={id}
       sync={sync}
       now={now}
-      causes={NO_CAUSES}
       lostSince={lostSince}
       serverError={serverError}
       back="/dashboards"

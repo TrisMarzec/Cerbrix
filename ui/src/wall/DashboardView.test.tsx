@@ -10,9 +10,8 @@ import {
   problemsPanelFixture,
   statusFixture,
 } from '../test/fixtures';
-import { DashboardView } from './DashboardView';
+import { DashboardGrid, DashboardView } from './DashboardView';
 import { installMeasure, releaseMeasure } from './test/measure';
-import type { WallAlarm } from './WallFrame';
 
 const plots: uPlot.Options[] = [];
 
@@ -64,14 +63,12 @@ afterEach(() => {
 
 interface Props {
   dashboard?: DashboardDetail;
-  causes?: string[];
-  alarm?: WallAlarm;
   lostSince?: Date;
   back?: string;
 }
 
-function show({ dashboard = dashboardDetailFixture({ name: 'Kunde A' }), causes = [], ...rest }: Props = {}) {
-  return render(<DashboardView dashboard={dashboard} now={NOW} causes={causes} {...rest} />);
+function show({ dashboard = dashboardDetailFixture({ name: 'Kunde A' }), ...rest }: Props = {}) {
+  return render(<DashboardView dashboard={dashboard} now={NOW} {...rest} />);
 }
 
 function labels(container: Element): string[] {
@@ -101,7 +98,7 @@ describe('DashboardView', () => {
     const dashboard = dashboardDetailFixture({
       panels: [problemsPanelFixture({ w: 6 }), problemsPanelFixture({ x: 6, w: 6 })],
     });
-    const { container } = show({ dashboard, causes: [criticalProblem.id] });
+    const { container } = render(<DashboardGrid dashboard={dashboard} now={NOW} causes={[criticalProblem.id]} />);
     expect(container.querySelectorAll('.wall-problem.is-cause:not(.wall-sample)')).toHaveLength(2);
   });
 
@@ -112,20 +109,19 @@ describe('DashboardView', () => {
     expect(labels(container)).toEqual(['Problems', 'Unknown panel']);
   });
 
-  it('passes the sync state, the alarm, the lost connection and the back link to the frame', () => {
+  it('passes the sync state, the lost connection and the back link to the frame, and no band', () => {
     const sync = { ...statusFixture().sync, status: 'out_of_sync' as const };
     render(
       <DashboardView
         dashboard={dashboardDetailFixture()}
         now={NOW}
-        causes={[]}
         sync={sync}
-        alarm={{ showing: 'E2E', waiting: 0 }}
         lostSince={new Date(NOW.getTime() - 60_000)}
         back="/dashboards"
       />,
     );
-    expect(screen.getByText(/Alarm: showing E2E\./)).toBeInTheDocument();
+    // No alarm switched to a dashboard opened on this screen.
+    expect(document.querySelector('.wall-band.is-alarm')).toBeNull();
     expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
     expect(screen.getByText(/^Out of sync since/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Back to the desk' })).toHaveAttribute('href', '/dashboards');
@@ -162,7 +158,6 @@ describe('DashboardView', () => {
       <DashboardView
         dashboard={dashboardDetailFixture()}
         now={NOW}
-        causes={[]}
         lostSince={new Date(NOW.getTime() - 60_000)}
         serverError
       />,

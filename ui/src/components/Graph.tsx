@@ -5,7 +5,7 @@ import uPlot from 'uplot';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type { Severity, Threshold } from '../api/types';
-import { clock, severityWord, value } from '../lib/format';
+import { clock, SEVERITY_RANK, severityWord, value } from '../lib/format';
 
 const DEFAULT_WIDTH = 600;
 /**
@@ -102,8 +102,6 @@ export function placeLabels(
   return spots;
 }
 
-/** Severities from the most to the least severe: the rank of a threshold label. */
-const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, warning: 2, info: 3 };
 
 /** The font size of the desk graph: uPlot's default axis font and the threshold labels. */
 const DESK_FONT_PX = 12;

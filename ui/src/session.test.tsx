@@ -501,7 +501,7 @@ describe('SessionProvider while the server cannot be reached', () => {
     );
     expect(container.firstElementChild).toHaveClass('wall');
     await advance(0);
-    expect(screen.getByText('Could not reach the server').closest('.wall')).not.toBeNull();
+    expect(screen.getByText('No connection to the server').closest('.wall')).not.toBeNull();
     // Outside the frame too, the cursor goes after 3 s without input.
     expect(container.firstElementChild).not.toHaveClass('is-idle');
     await advance(3000);

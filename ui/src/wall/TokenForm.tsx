@@ -20,7 +20,7 @@ function messageFor(e: unknown): string {
   const status = e instanceof ApiError ? e.status : 0;
   // Only the API's own 401 (R15): a gateway's says nothing about the token.
   if (isApiError(e, 'unauthorized')) return 'This token is not valid for this display.';
-  if (status === 0) return 'Could not reach the server.';
+  if (status === 0) return 'No connection to the server.';
   return 'The server reported an error.';
 }
 

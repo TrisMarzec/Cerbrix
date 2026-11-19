@@ -190,7 +190,8 @@ export function SessionProvider({ children, wall = false }: { children: Componen
   if (state.kind === 'unreachable') {
     const gate = (
       <main class={wall ? 'gate wall-gate' : 'gate'}>
-        <p role="alert">Could not reach the server</p>
+        {/* On a wall path, the wall's words for it; the desk keeps its own. */}
+        <p role="alert">{wall ? 'No connection to the server' : 'Could not reach the server'}</p>
         <button type="button" class="btn" onClick={check}>
           Try again
         </button>

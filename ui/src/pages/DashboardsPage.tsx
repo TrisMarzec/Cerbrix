@@ -5,10 +5,10 @@ import type { DashboardSummary, Display, HostsByState, Severity } from '../api/t
 import { Banner } from '../components/Banner';
 import { Empty } from '../components/Empty';
 import { StaleNote } from '../components/StaleNote';
+import { durationParts, type DurationUnit } from '../lib/duration';
 import { severityWord } from '../lib/format';
 import { usePolled } from '../lib/poll';
 import { Link } from '../lib/router';
-import { everyParts, type EveryUnit } from '../wall/show';
 
 const MAX_SQUARES = 40;
 
@@ -89,11 +89,11 @@ function ProblemsInWords({ dashboard }: { dashboard: DashboardSummary }) {
   );
 }
 
-const UNIT_WORDS: Record<EveryUnit, string> = { s: 's', m: 'min', h: 'h', d: 'd' };
+const UNIT_WORDS: Record<DurationUnit, string> = { s: 's', m: 'min', h: 'h', d: 'd' };
 
 /** "90s" → "90 s", "1m30s" → "1 min 30 s", "1d" → "1 d"; anything else as given. */
 function every(text: string): string {
-  const parts = everyParts(text);
+  const parts = durationParts(text);
   if (parts === undefined) return text;
   return parts.map((p) => `${p.amount} ${UNIT_WORDS[p.unit]}`).join(' ');
 }

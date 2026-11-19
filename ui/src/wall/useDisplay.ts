@@ -3,10 +3,9 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError, isApiError, READ_LIMIT_MS, seg } from '../api/client';
 import type { DashboardDetail, DisplayState } from '../api/types';
 import { moment, type Moment } from '../lib/poll';
+import { POLL_MS } from './constants';
 import { displayGet, forgetToken, storedToken } from './displayClient';
 
-/** How often a wall asks the server (D3). */
-export const POLL_MS = 5000;
 /** How often a wall looks for a new version of the UI (D7). */
 const VERSION_MS = 60_000;
 

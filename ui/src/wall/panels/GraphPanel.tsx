@@ -1,8 +1,8 @@
 import { useState } from 'preact/hooks';
 
-import type { GraphPanelData, Severity, Threshold } from '../../api/types';
+import type { GraphPanelData, Threshold } from '../../api/types';
 import { Graph } from '../../components/Graph';
-import { age, severityWord, value } from '../../lib/format';
+import { age, SEVERITY_RANK, severityWord, value } from '../../lib/format';
 import { box, px, useFit, useFitOn } from '../measure';
 import { useWallUnit } from '../unit';
 import { noDataText, rangeSecs, rangeWords, seriesLabel } from './series';
@@ -16,7 +16,6 @@ const OLD_MS = 10 * 60_000;
 const OLD_STEPS = 3;
 /** The latest value is shown only beside at least this many characters of the host name. */
 const HOST_CHARS = 8;
-const RANK: Record<Severity, number> = { critical: 0, high: 1, warning: 2, info: 3 };
 
 /** What the panel reads from the body, in pixels. */
 interface Layout {
@@ -64,7 +63,9 @@ function identity(panel: GraphPanelData): string {
 /** The most severe threshold, the first of equals. */
 function worstOf(thresholds: Threshold[]): Threshold | undefined {
   let worst: Threshold | undefined;
-  for (const t of thresholds) if (worst === undefined || RANK[t.severity] < RANK[worst.severity]) worst = t;
+  for (const t of thresholds) {
+    if (worst === undefined || SEVERITY_RANK[t.severity] < SEVERITY_RANK[worst.severity]) worst = t;
+  }
   return worst;
 }
 

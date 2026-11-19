@@ -205,7 +205,7 @@ describe('App paths', () => {
     expect(container.firstElementChild).toHaveClass('wall');
     expect(container.firstElementChild).toBeEmptyDOMElement();
     await advance(0);
-    const gate = screen.getByText('Could not reach the server');
+    const gate = screen.getByText('No connection to the server');
     expect(gate.closest('.wall')).toBe(container.firstElementChild);
     expect(gate.closest('main')).toHaveClass('wall-gate');
     await advance(4999);
@@ -214,7 +214,7 @@ describe('App paths', () => {
     await advance(0);
     expect(mock.count('GET /session')).toBe(2);
     expect(screen.getByRole('heading', { level: 1, name: 'Kunde A' })).toBeInTheDocument();
-    expect(screen.queryByText('Could not reach the server')).not.toBeInTheDocument();
+    expect(screen.queryByText('No connection to the server')).not.toBeInTheDocument();
   });
 
   it('shows the desk gate without the wall background on other paths', async () => {

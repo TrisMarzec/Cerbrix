@@ -1,23 +1,6 @@
 import type { DisplayShow, DisplayState } from '../api/types';
-
-/** The units of a duration as the configuration writes it. */
-export type EveryUnit = 's' | 'm' | 'h' | 'd';
-
-const UNIT_SECONDS: Record<EveryUnit, number> = { s: 1, m: 60, h: 3600, d: 86_400 };
-
-/**
- * The parts of a duration as the configuration writes it, in order: "1m30s" → 1 m, 30 s. Undefined
- * for anything else (spaces, decimals, signs, capitals, an empty text). The one parser of `every`.
- */
-export function everyParts(text: string): { amount: number; unit: EveryUnit }[] | undefined {
-  if (!/^(\d+[smhd])+$/.test(text)) return undefined;
-  return [...text.matchAll(/(\d+)([smhd])/g)].map((m) => ({ amount: Number(m[1]), unit: m[2] as EveryUnit }));
-}
-
-/** "30s", "5m", "1h", "1m30s" → seconds; anything else → undefined. */
-export function parseEvery(text: string): number | undefined {
-  return everyParts(text)?.reduce((sum, part) => sum + part.amount * UNIT_SECONDS[part.unit], 0);
-}
+import { durationSecs } from '../lib/duration';
+import { POLL_MS } from './constants';
 
 /** A rotation never moves on faster than this: an `every` that is shorter or unreadable counts as it. */
 const MIN_EVERY_MS = 5000;
@@ -30,7 +13,7 @@ export function rotationList(show: DisplayShow): string[] {
 /** How long each dashboard of a rotation is shown, in ms; undefined for a fixed display. */
 export function rotationMs(show: DisplayShow): number | undefined {
   if ('dashboard' in show) return undefined;
-  return Math.max(MIN_EVERY_MS, (parseEvery(show.every) ?? 0) * 1000);
+  return Math.max(MIN_EVERY_MS, (durationSecs(show.every) ?? 0) * 1000);
 }
 
 /** The position in the rotation list and when it was reached (monotonic ms). */
@@ -161,7 +144,7 @@ export function noteMissing(
  * When holding the rotation entries out leaves the display nothing to show, they are tried again
  * after this long instead: the poll interval.
  */
-export const EMPTY_RETRY_MS = 5000;
+export const EMPTY_RETRY_MS = POLL_MS;
 
 /**
  * The dashboards held out with `retryMs` as a rotation entry's retry time. The target of the newest
