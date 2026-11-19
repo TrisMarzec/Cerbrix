@@ -1,4 +1,4 @@
-import { ApiError, READ_LIMIT_MS, recordServerDate, seg } from '../api/client';
+import { ApiError, dateOf, errorFrom, networkError, READ_LIMIT_MS, recordServerDate, seg } from '../api/client';
 
 /*
  * The wall monitor's side of the API: the two display routes, with the display token. Ruling R1:
@@ -64,33 +64,6 @@ export function tokenKept(displayId: string): boolean {
   return !unkept.has(displayId);
 }
 
-async function errorFrom(response: Response): Promise<ApiError> {
-  let code = 'internal';
-  let message = `The server answered ${response.status}`;
-  try {
-    const body: unknown = await response.json();
-    if (typeof body === 'object' && body !== null) {
-      const fields = body as { error?: unknown; message?: unknown };
-      if (typeof fields.error === 'string') code = fields.error;
-      if (typeof fields.message === 'string') message = fields.message;
-    }
-  } catch {
-    // The body was not JSON: keep the defaults.
-  }
-  return new ApiError(response.status, code, message);
-}
-
-function networkError(): ApiError {
-  return new ApiError(0, 'network', 'Could not reach the server');
-}
-
-function dateOf(response: Response): Date | undefined {
-  const text = response.headers?.get('Date') ?? null;
-  if (text === null) return undefined;
-  const date = new Date(text);
-  return Number.isNaN(date.getTime()) ? undefined : date;
-}
-
 async function exchange<T>(url: string, token: string | undefined, signal: AbortSignal): Promise<T> {
   let response: Response;
   try {
@@ -99,6 +72,8 @@ async function exchange<T>(url: string, token: string | undefined, signal: Abort
       // A logged-in user's session cookie answers too, so a desk user needs no token.
       credentials: 'same-origin',
       cache: 'no-store',
+      // A redirect must never carry the bearer token to another path: it fails as no answer.
+      redirect: 'error',
       headers: token === undefined ? {} : { Authorization: `Bearer ${token}` },
       signal,
     });

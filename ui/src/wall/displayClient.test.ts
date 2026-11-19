@@ -123,6 +123,25 @@ describe('displayGet', () => {
     expect(await caught(displayGet('noc-left', ''))).toMatchObject({ status: 502, code: 'internal' });
   });
 
+  it('refuses to follow a redirect, which fails as no answer (a network error)', async () => {
+    storeToken('noc-left', TOKEN);
+    // A fetch with `redirect: 'error'` rejects with a TypeError when the server redirects.
+    mock = mockFetch({
+      [STATE]: (request) => (request.init.redirect === 'error' ? 'network' : { json: { followed: true } }),
+    });
+    expect(await caught(displayGet('noc-left', ''))).toMatchObject({ status: 0, code: 'network' });
+    expect(mock.requests[0]?.init.redirect).toBe('error');
+  });
+
+  it('does not take the clock of an answer that is not the API (an HTML 502 of a gateway)', async () => {
+    const ahead = new Date(Date.now() + 5 * 60_000).toUTCString();
+    mock = mockFetch({
+      [STATE]: { status: 502, text: '<html>Bad gateway</html>', headers: { 'Content-Type': 'text/html', Date: ahead } },
+    });
+    expect(await caught(displayGet('noc-left', ''))).toMatchObject({ status: 502 });
+    expect(serverSkewMs()).toBe(0);
+  });
+
   it('gives a failed fetch as a network error with status 0', async () => {
     mock = mockFetch({ [STATE]: 'network' });
     expect(await caught(displayGet('noc-left', ''))).toMatchObject({ status: 0, code: 'network' });

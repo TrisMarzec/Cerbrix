@@ -259,6 +259,26 @@ describe('server date', () => {
     expect(serverSkewMs()).toBe(60_000);
   });
 
+  it('does not take the clock of an answer that is not the API, such as the HTML page of a gateway', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T13:30:00.000Z'));
+    mock = mockFetch({
+      'GET /hosts': {
+        status: 502,
+        text: '<html>Bad gateway</html>',
+        headers: { 'Content-Type': 'text/html', Date: 'Tue, 17 Nov 2026 15:00:00 GMT' },
+      },
+      'GET /status': {
+        json: {},
+        headers: { 'Content-Type': 'application/json; charset=utf-8', Date: 'Tue, 17 Nov 2026 13:30:05 GMT' },
+      },
+    });
+    await expect(api.get('/hosts')).rejects.toMatchObject({ status: 502 });
+    expect(serverSkewMs()).toBe(0);
+    await api.get('/status');
+    expect(serverSkewMs()).toBe(5000);
+  });
+
   it('keeps the difference while it moves by two seconds or less, the resolution of the header', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-11-17T13:30:00.400Z'));

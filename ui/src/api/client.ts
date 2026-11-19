@@ -75,7 +75,8 @@ function withQuery(path: string, query: Query | undefined): string {
   return text === '' ? BASE + path : `${BASE}${path}?${text}`;
 }
 
-async function errorFrom(response: Response): Promise<ApiError> {
+/** The `ApiError` of an answer with an error status, from its JSON body when it has one. */
+export async function errorFrom(response: Response): Promise<ApiError> {
   let code = 'internal';
   let message = `The server answered ${response.status}`;
   try {
@@ -91,11 +92,18 @@ async function errorFrom(response: Response): Promise<ApiError> {
   return new ApiError(response.status, code, message);
 }
 
-function networkError(): ApiError {
+/** No answer: fetch failed, the request was aborted, or the time limit passed. */
+export function networkError(): ApiError {
   return new ApiError(0, 'network', 'Could not reach the server');
 }
 
-function dateOf(response: Response): Date | undefined {
+/**
+ * The server's clock from the `Date` header, only for an answer of the API itself (a JSON body,
+ * success or error): the error page of a proxy or gateway in between may have another clock.
+ */
+export function dateOf(response: Response): Date | undefined {
+  const type = response.headers?.get('Content-Type') ?? '';
+  if (!/^application\/(?:[\w.+-]+\+)?json\b/i.test(type.trim())) return undefined;
   const text = response.headers?.get('Date') ?? null;
   if (text === null) return undefined;
   const date = new Date(text);

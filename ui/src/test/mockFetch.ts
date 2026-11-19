@@ -38,10 +38,15 @@ function isAborted(init: RequestInit): boolean {
 function responseFor(answer: Exclude<Answer, 'network'>): Response {
   const status = answer.status ?? 200;
   const text = status === 204 ? '' : (answer.text ?? JSON.stringify(answer.json ?? {}));
+  // As the API sends it: a JSON body says so; a `text` body (a proxy's page) has no type unless given.
+  const headers = new Headers(answer.headers);
+  if (status !== 204 && answer.text === undefined && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
   const fake = {
     ok: status >= 200 && status < 300,
     status,
-    headers: new Headers(answer.headers),
+    headers,
     json: () => Promise.resolve().then(() => JSON.parse(text) as unknown),
   };
   return fake as unknown as Response;
