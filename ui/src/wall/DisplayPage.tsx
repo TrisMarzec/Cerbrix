@@ -7,6 +7,7 @@ import type { DashboardDetail, DisplayState } from '../api/types';
 import { moment, type Moment } from '../lib/poll';
 import { useServerNow } from '../lib/serverNow';
 import { DashboardGrid } from './DashboardView';
+import { tokenKept } from './displayClient';
 import { useLostSince } from './lost';
 import {
   followShow,
@@ -263,7 +264,11 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
     setForm(withToken ? { message: 'The token of this display is no longer valid.' } : {});
   });
   const stateLost = useLostSince(poll.answeredAt);
-  useNewVersion(reload, form === undefined && poll.state !== undefined && poll.error === undefined);
+  // Not while the browser does not keep the token (R18): the reload would lose it.
+  useNewVersion(
+    reload,
+    form === undefined && poll.state !== undefined && poll.error === undefined && tokenKept(id),
+  );
 
   const name = poll.state?.name;
   useEffect(() => {

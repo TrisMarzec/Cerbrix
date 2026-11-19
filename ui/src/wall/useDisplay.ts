@@ -218,12 +218,37 @@ export function resetVersionCheck(): void {
   reloadAsked = false;
 }
 
+/** The key in `history.state` that carries the time of the last reload across it (ruling R18). */
+const RELOAD_MARK = 'cerbrixReloadAt';
+/** Within this long of a reload (wall clock) the loaded page does not reload again. */
+const RELOAD_GUARD_MS = 10 * 60_000;
+
+/** The time of the reload that loaded this page, from `history.state`; undefined without one. */
+function reloadMark(): number | undefined {
+  const state: unknown = window.history.state;
+  if (typeof state !== 'object' || state === null) return undefined;
+  const at = (state as Record<string, unknown>)[RELOAD_MARK];
+  return typeof at === 'number' && Number.isFinite(at) ? at : undefined;
+}
+
+/**
+ * Records the time of the reload in `history.state`, keeping what is there: unlike a module
+ * variable it survives the reload, and unlike storage it is this tab's only.
+ */
+function markReload(): void {
+  const state: unknown = window.history.state;
+  const kept = typeof state === 'object' && state !== null ? (state as Record<string, unknown>) : {};
+  window.history.replaceState({ ...kept, [RELOAD_MARK]: Date.now() }, '');
+}
+
 /**
  * Looks for a new version of the UI (D7): at mount and then every 60 seconds after the previous
  * check, `HEAD /`; the first `ETag` seen is this page's version. When a later one differs and
- * `mayReload` is true at that moment (the latest state poll succeeded, no token form is shown),
- * `reload` is called, once per page life, so a server whose `ETag` changes on every answer
- * cannot make the wall reload again and again. A failed check is ignored.
+ * `mayReload` is true at that moment (the latest state poll succeeded, no token form is shown, the
+ * browser keeps the token), the time is marked in `history.state` and `reload` is called, once per
+ * page life. A page loaded less than 10 minutes after such a mark (wall clock, either way) does
+ * not reload at all (ruling R18): a server whose `ETag` changes on every answer cannot make the
+ * wall reload again and again. A failed check is ignored.
  */
 export function useNewVersion(reload: () => void, mayReload: boolean): void {
   const may = useRef(mayReload);
@@ -237,12 +262,16 @@ export function useNewVersion(reload: () => void, mayReload: boolean): void {
     let limit: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | undefined;
     let stopped = false;
+    const mark = reloadMark();
+    // Read at the load: this page is the one a recent reload brought.
+    const reloadedLately = mark !== undefined && Math.abs(Date.now() - mark) < RELOAD_GUARD_MS;
 
     const seen = (tag: string) => {
       if (first === undefined) {
         first = tag;
-      } else if (tag !== first && may.current && !reloadAsked) {
+      } else if (tag !== first && may.current && !reloadAsked && !reloadedLately) {
         reloadAsked = true;
+        markReload();
         reloadRef.current();
       }
     };

@@ -1038,6 +1038,66 @@ describe('DisplayPage: a new version', () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  it('marks the time of the reload in the history state, keeping what is there (R18)', async () => {
+    window.history.replaceState({ kept: 'yes' }, '', `/display/${ID}`);
+    await open({
+      [STATE]: { json: displayState() },
+      [dash('a')]: { json: alpha },
+      'HEAD /': [{ headers: { ETag: '"v1"' } }, { headers: { ETag: '"v2"' } }],
+    });
+    let atReload: unknown;
+    reload.mockImplementation(() => {
+      atReload = window.history.state;
+    });
+    await advance(60_000);
+    expect(reload).toHaveBeenCalledTimes(1);
+    // The mark is there before the reload starts.
+    expect(atReload).toEqual({ kept: 'yes', cerbrixReloadAt: NOW.getTime() + 60_000 });
+    expect(window.location.pathname).toBe(`/display/${ID}`);
+  });
+
+  it('does not reload again within 10 minutes of a reload, whatever the ETag says (the mark survives it)', async () => {
+    // This page is the one the reload loaded, 9 minutes ago by the wall clock.
+    window.history.replaceState({ cerbrixReloadAt: NOW.getTime() - 9 * 60_000 }, '', `/display/${ID}`);
+    await open({
+      [STATE]: { json: displayState() },
+      [dash('a')]: { json: alpha },
+      'HEAD /': [{ headers: { ETag: '"v2"' } }, { headers: { ETag: '"v3"' } }, { headers: { ETag: '"v4"' } }],
+    });
+    await advance(600_000);
+    expect(mock.count('HEAD /')).toBeGreaterThan(5);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('reloads for a new version when the mark of the last reload is older than 10 minutes', async () => {
+    window.history.replaceState({ cerbrixReloadAt: NOW.getTime() - 11 * 60_000 }, '', `/display/${ID}`);
+    await open({
+      [STATE]: { json: displayState() },
+      [dash('a')]: { json: alpha },
+      'HEAD /': [{ headers: { ETag: '"v1"' } }, { headers: { ETag: '"v2"' } }],
+    });
+    await advance(60_000);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reload while the browser does not keep the token: the reload would lose it', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    });
+    await open({
+      [STATE]: withToken({ json: displayState() }),
+      [dash('a')]: withToken({ json: alpha }),
+      'HEAD /': [{ headers: { ETag: '"v1"' } }, { headers: { ETag: '"v2"' } }],
+    });
+    await enter(TOKEN);
+    await advance(10_000);
+    await settle();
+    expect(title()).toBe('Alpha');
+    await walk(120_000, 5000);
+    expect(mock.count('HEAD /')).toBeGreaterThan(1);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   it('does not reload while the ETag stays the same, or when the check fails', async () => {
     await open({
       [STATE]: { json: displayState() },
