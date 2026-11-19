@@ -85,6 +85,18 @@
   color: var(--dim);
 }
 
+/* The state and, for a display that runs on a login instead of a display token, a dim note. */
+.wall .wall-state {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--u) * 24);
+}
+
+.wall .wall-login {
+  font-size: var(--wall-small);
+  color: var(--dim);
+}
+
 .wall .wall-clock {
   font-size: var(--wall-clock);
   font-weight: 500;

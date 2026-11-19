@@ -78,6 +78,8 @@ interface RunningProps {
   /** Since when the state poll fails, once it has failed for 15 s. */
   stateLost: Date | undefined;
   stateError: ApiError | undefined;
+  /** The state was read with a login, not a display token: the header says so (R16). */
+  onLogin: boolean;
 }
 
 /**
@@ -87,7 +89,7 @@ interface RunningProps {
  * stands in for a new dashboard only briefly, and the header measures "lost" from the last answer
  * of the picture in front (ruling R12).
  */
-function RunningDisplay({ id, state, answers, now, stateLost, stateError }: RunningProps) {
+function RunningDisplay({ id, state, answers, now, stateLost, stateError, onLogin }: RunningProps) {
   const [wake, setWake] = useState(0);
   const nowMs = performance.now();
 
@@ -204,6 +206,7 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError }: Runn
       alarm={bandOf(state, shown)}
       lostSince={lostSince}
       serverError={serverError}
+      onLogin={onLogin}
     >
       <div class="wall-layers">
         {old !== undefined && (
@@ -300,6 +303,7 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
       now={now}
       stateLost={stateLost}
       stateError={poll.error}
+      onLogin={!poll.withToken}
     />
   );
 }

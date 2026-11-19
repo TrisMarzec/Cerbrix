@@ -32,6 +32,8 @@ interface Props {
   lostSince?: Date;
   /** With `lostSince`: the server answered, but with an error, so the header says that instead. */
   serverError?: boolean;
+  /** A display that runs on a login instead of a display token: the header says so (R16). */
+  onLogin?: boolean;
   /** Where "Back to the desk" leads; a display has none. */
   back?: string;
   children: ComponentChildren;
@@ -135,7 +137,17 @@ function useIdle(): boolean {
  * state and the clock, the switch band and the Out Of Sync band, then the content, filling the
  * screen exactly. It takes no input; only "Back to the desk" can be focused, and only with `back`.
  */
-export function WallFrame({ title, sync, now, alarm, lostSince, serverError = false, back, children }: Props) {
+export function WallFrame({
+  title,
+  sync,
+  now,
+  alarm,
+  lostSince,
+  serverError = false,
+  onLogin = false,
+  back,
+  children,
+}: Props) {
   const idle = useIdle();
   const nowIso = now.toISOString();
   return (
@@ -156,6 +168,7 @@ export function WallFrame({ title, sync, now, alarm, lostSince, serverError = fa
             ) : (
               <SyncText sync={sync} />
             )}
+            {onLogin && <span class="wall-login">Running on your login, not on a display token</span>}
           </span>
           <time class="wall-clock num" dateTime={nowIso}>
             {clock(nowIso, now)}

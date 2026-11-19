@@ -18,6 +18,8 @@ export interface DisplayPoll {
   staleSince: Date | undefined;
   /** How many successful answers (the seed included) there have been: numbers the state answers. */
   answers: number;
+  /** Whether the last successful answer was read with a display token; false: with a login. */
+  withToken: boolean;
 }
 
 function asApiError(e: unknown): ApiError {
@@ -43,6 +45,7 @@ export function useDisplayState(
     error: undefined,
     staleSince: undefined,
     answers: 0,
+    withToken: false,
   });
   const seedRef = useRef(seed);
   seedRef.current = seed;
@@ -66,7 +69,13 @@ export function useDisplayState(
       displayGet<DisplayState>(id, '', mine.signal, sent).then(
         (state) => {
           if (mine.signal.aborted) return;
-          setPoll((previous) => ({ state, error: undefined, staleSince: undefined, answers: previous.answers + 1 }));
+          setPoll((previous) => ({
+            state,
+            error: undefined,
+            staleSince: undefined,
+            answers: previous.answers + 1,
+            withToken: sent !== undefined,
+          }));
           schedule();
         },
         (e: unknown) => {
@@ -84,6 +93,7 @@ export function useDisplayState(
             error,
             staleSince: previous.staleSince ?? new Date(),
             answers: previous.answers,
+            withToken: previous.withToken,
           }));
           schedule();
         },
@@ -92,7 +102,14 @@ export function useDisplayState(
 
     const start = seedRef.current;
     if (start !== undefined) {
-      setPoll((previous) => ({ state: start, error: undefined, staleSince: undefined, answers: previous.answers + 1 }));
+      // The token form's answer, read with the token it stored.
+      setPoll((previous) => ({
+        state: start,
+        error: undefined,
+        staleSince: undefined,
+        answers: previous.answers + 1,
+        withToken: true,
+      }));
       schedule();
     } else {
       run();

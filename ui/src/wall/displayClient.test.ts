@@ -88,6 +88,8 @@ describe('displayGet', () => {
     expect(request?.headers.get('Authorization')).toBe(`Bearer ${TOKEN}`);
     expect(request?.path).toBe('/display/noc-left/dashboards/kunde%20a');
     expect(request?.query.toString()).toBe('');
+    // With a token, never the session cookie too (R16): the server would answer as the user.
+    expect(request?.init.credentials).toBe('omit');
   });
 
   it('sends a token given for one request (the token form checks it) instead of the stored one', async () => {
@@ -95,6 +97,7 @@ describe('displayGet', () => {
     mock = mockFetch({ [STATE]: { json: {} } });
     await displayGet('noc-left', '', undefined, TOKEN);
     expect(mock.requests[0]?.headers.get('Authorization')).toBe(`Bearer ${TOKEN}`);
+    expect(mock.requests[0]?.init.credentials).toBe('omit');
   });
 
   it('encodes the display id as a path segment', async () => {

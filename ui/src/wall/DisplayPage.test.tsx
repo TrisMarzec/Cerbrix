@@ -322,6 +322,66 @@ describe('DisplayPage: the token', () => {
   });
 });
 
+describe('DisplayPage: a token and a login (R16)', () => {
+  const LOGIN_LINE = 'Running on your login, not on a display token';
+
+  /**
+   * As the server with an admin's session cookie in the browser: a request that sends the cookie is
+   * answered as the user, one without it only with the display's token.
+   */
+  function withCookie(answer: Answer): Responder {
+    return (request) => {
+      if (request.init.credentials !== 'omit') return answer;
+      return request.headers.get('Authorization') === `Bearer ${TOKEN}` ? answer : UNAUTHORIZED;
+    };
+  }
+
+  it('refuses a wrong token even where a session cookie exists: the check sends no credentials', async () => {
+    window.history.replaceState(null, '', `/display/${ID}#token`);
+    await open({ [STATE]: withCookie({ json: displayState() }) });
+    await enter('cbx_dt_wrong');
+    expect(screen.getByText('This token is not valid for this display.')).toBeInTheDocument();
+    const check = mock.requests.at(-1);
+    expect(check?.headers.get('Authorization')).toBe('Bearer cbx_dt_wrong');
+    expect(check?.init.credentials).toBe('omit');
+    expect(storedToken(ID)).toBeUndefined();
+  });
+
+  it('sends no credentials with the token in any poll, and says nothing of a login', async () => {
+    await open(
+      { [STATE]: withCookie({ json: displayState() }), [dash('a')]: withCookie({ json: alpha }) },
+      { token: TOKEN },
+    );
+    await walk(10_000);
+    expect(title()).toBe('Alpha');
+    const display = mock.requests.filter((r) => r.path.startsWith('/display/'));
+    expect(display.length).toBeGreaterThan(2);
+    for (const r of display) {
+      expect(r.init.credentials).toBe('omit');
+      expect(r.headers.get('Authorization')).toBe(`Bearer ${TOKEN}`);
+    }
+    expect(screen.queryByText(LOGIN_LINE)).not.toBeInTheDocument();
+  });
+
+  it('sends the session cookie without a token, and says in the header that it runs on a login', async () => {
+    await open({ [STATE]: { json: displayState() }, [dash('a')]: { json: alpha } });
+    expect(title()).toBe('Alpha');
+    for (const r of mock.requests.filter((q) => q.path.startsWith('/display/'))) {
+      expect(r.init.credentials).toBe('same-origin');
+    }
+    const line = screen.getByText(LOGIN_LINE);
+    expect(line.closest('.wall-header')).not.toBeNull();
+    expect(line).toHaveClass('wall-login');
+  });
+
+  it('says nothing of a login once a token was entered in the form', async () => {
+    await open({ [STATE]: withToken({ json: displayState() }), [dash('a')]: withToken({ json: alpha }) });
+    await enter(TOKEN);
+    expect(title()).toBe('Alpha');
+    expect(screen.queryByText(LOGIN_LINE)).not.toBeInTheDocument();
+  });
+});
+
 describe('DisplayPage: before the display can be shown', () => {
   it('says that there is no such display, and asks again every 5 seconds', async () => {
     const { container } = await open({ [STATE]: NOT_FOUND });
