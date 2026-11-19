@@ -100,9 +100,11 @@ needs a running server in the state `scripts/e2e.sh` leaves before this step:
 - the configuration in sync (see `CERBRIX_UI_SMOKE_EXPECT_SYNC` below).
 
 The run fails on the first unexpected 401 answer: a load of a page without a login is allowed
-one 401 for `GET /session`, a wrong password one more, and the run fails when an allowed one
-does not happen. The spec never passes the password to Playwright's `fill`, whose error log
-echoes the value; it sets the field's value with `evaluate`, which is not logged. `npm run check`
+one 401 for `GET /session`, a wrong password one more, the wall display opened without a token
+one for `GET /display/e2e-wall`, and the wrong token entered on it one more for the same route;
+the run fails when an allowed one does not happen. The spec never passes the password or the
+display token to Playwright's `fill`, whose error log echoes the value; it sets the field's value
+with `evaluate`, which is not logged. `npm run check`
 does not run the smoke run. By hand, in `ui/`:
 
 ```sh
