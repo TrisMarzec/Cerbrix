@@ -8,7 +8,7 @@ import { usePolled } from '../lib/poll';
 import { Link } from '../lib/router';
 import { useServerNow } from '../lib/serverNow';
 import { DashboardView } from './DashboardView';
-import { useFailingFor } from './lost';
+import { useLostSince } from './lost';
 
 const POLL_MS = 5000;
 /** The wall's clock moves on this often; it shows minutes. */
@@ -30,9 +30,10 @@ export function WallPage({ id }: { id: string }) {
   const now = useServerNow(CLOCK_MS);
   const dashboard = usePolled((signal) => loadDashboard(id, signal), [id], POLL_MS);
   const status = usePolled((signal) => api.get<Status>('/status', undefined, signal), [], POLL_MS);
-  const lostSince = useFailingFor(dashboard.staleSince);
+  // One rule (R17): 15 s after the last successful answer of each poll.
+  const lostSince = useLostSince(dashboard.answeredAt);
   // A sync state that could not be asked for 15 seconds is not shown as current.
-  const statusFailing = useFailingFor(status.staleSince) !== undefined;
+  const statusFailing = useLostSince(status.answeredAt) !== undefined;
   const name = dashboard.data?.name;
 
   useEffect(() => {

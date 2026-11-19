@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { ApiError, isApiError, READ_LIMIT_MS, seg } from '../api/client';
 import type { DashboardDetail, DisplayState } from '../api/types';
+import { moment, type Moment } from '../lib/poll';
 import { displayGet, forgetToken, storedToken } from './displayClient';
 
 /** How often a wall asks the server (D3). */
@@ -14,8 +15,8 @@ export interface DisplayPoll {
   state: DisplayState | undefined;
   /** The error of the last poll; undefined after a success. */
   error: ApiError | undefined;
-  /** Since when the polls fail, on the browser's clock; undefined after a success. */
-  staleSince: Date | undefined;
+  /** When the last successful answer (the seed included) arrived; undefined before one. */
+  answeredAt: Moment | undefined;
   /** How many successful answers (the seed included) there have been: numbers the state answers. */
   answers: number;
   /** Whether the last successful answer was read with a display token; false: with a login. */
@@ -43,7 +44,7 @@ export function useDisplayState(
   const [poll, setPoll] = useState<DisplayPoll>({
     state: undefined,
     error: undefined,
-    staleSince: undefined,
+    answeredAt: undefined,
     answers: 0,
     withToken: false,
   });
@@ -72,7 +73,7 @@ export function useDisplayState(
           setPoll((previous) => ({
             state,
             error: undefined,
-            staleSince: undefined,
+            answeredAt: moment(),
             answers: previous.answers + 1,
             withToken: sent !== undefined,
           }));
@@ -91,7 +92,7 @@ export function useDisplayState(
           setPoll((previous) => ({
             state: previous.state,
             error,
-            staleSince: previous.staleSince ?? new Date(),
+            answeredAt: previous.answeredAt,
             answers: previous.answers,
             withToken: previous.withToken,
           }));
@@ -106,7 +107,7 @@ export function useDisplayState(
       setPoll((previous) => ({
         state: start,
         error: undefined,
-        staleSince: undefined,
+        answeredAt: moment(),
         answers: previous.answers + 1,
         withToken: true,
       }));
@@ -122,16 +123,6 @@ export function useDisplayState(
   }, [id, active]);
 
   return poll;
-}
-
-/** A moment on both clocks: the monotonic one to measure, the browser's one to show. */
-export interface Moment {
-  mono: number;
-  wall: number;
-}
-
-export function moment(): Moment {
-  return { mono: performance.now(), wall: Date.now() };
 }
 
 export interface DashboardPoll {

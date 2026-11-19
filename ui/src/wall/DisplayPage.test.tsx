@@ -947,6 +947,43 @@ describe('DisplayPage: the connection', () => {
     expect(dimmed()).toBe(false);
   });
 
+  it('dims exactly 15 s after the last answer while the requests hang (R17)', async () => {
+    await open({ [STATE]: { json: displayState() }, [dash('a')]: { json: alpha } });
+    mock.on(STATE, () => new Promise<Answer>(() => {}));
+    mock.on(dash('a'), () => new Promise<Answer>(() => {}));
+    await advance(14_999);
+    expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
+    expect(dimmed()).toBe(false);
+    await advance(1);
+    expect(screen.getByText(/No connection to the server since/)).toHaveTextContent(
+      'No connection to the server since 14:30',
+    );
+    expect(dimmed()).toBe(true);
+  });
+
+  it('says the state is lost 15 s after its last answer, also with the picture still answering', async () => {
+    await open({ [STATE]: { json: displayState() }, [dash('a')]: { json: alpha } });
+    mock.on(STATE, 'network');
+    // The state answered last at 0; its first failure is at 5 s.
+    await walk(14_000);
+    expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
+    await walk(1000);
+    expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
+  });
+
+  it('dims when the wall clock jumped by more than 15 s since the last answer (a machine that slept)', async () => {
+    await open({ [STATE]: { json: displayState() }, [dash('a')]: { json: alpha } });
+    mock.on(STATE, () => new Promise<Answer>(() => {}));
+    mock.on(dash('a'), () => new Promise<Answer>(() => {}));
+    await advance(1000);
+    vi.setSystemTime(Date.now() + 3_600_000);
+    await advance(4000);
+    expect(screen.getByText(/No connection to the server since/)).toHaveTextContent(
+      'No connection to the server since 14:30',
+    );
+    expect(dimmed()).toBe(true);
+  });
+
   it('says the connection is lost when only the state cannot be asked for 15 s', async () => {
     await open({ [STATE]: { json: displayState() }, [dash('a')]: { json: alpha } });
     mock.on(STATE, 'network');

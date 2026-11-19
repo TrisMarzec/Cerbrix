@@ -2,11 +2,12 @@ import './wall.css';
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
-import { ApiError, isApiError, serverSkewMs } from '../api/client';
+import { ApiError, isApiError } from '../api/client';
 import type { DashboardDetail, DisplayState } from '../api/types';
+import { moment, type Moment } from '../lib/poll';
 import { useServerNow } from '../lib/serverNow';
 import { DashboardGrid } from './DashboardView';
-import { LOST_MS, useFailingFor } from './lost';
+import { useLostSince } from './lost';
 import {
   followShow,
   missingDueAt,
@@ -20,7 +21,7 @@ import {
   type Shown,
 } from './show';
 import { TokenForm } from './TokenForm';
-import { moment, useDashboardPoll, useDisplayState, useNewVersion, type Moment } from './useDisplay';
+import { useDashboardPoll, useDisplayState, useNewVersion } from './useDisplay';
 import { WallFrame, type WallAlarm } from './WallFrame';
 
 /** The wall's clock moves on this often; it shows minutes. */
@@ -75,7 +76,7 @@ interface RunningProps {
   /** The number of the latest state answer. */
   answers: number;
   now: Date;
-  /** Since when the state poll fails, once it has failed for 15 s. */
+  /** The time of the state's last answer, once that is 15 s old (R17). */
   stateLost: Date | undefined;
   stateError: ApiError | undefined;
   /** The state was read with a login, not a display token: the header says so (R16). */
@@ -166,8 +167,8 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError, onLogi
   } else if (poll.answeredAt !== undefined && (current?.kind === 'grid' || isApiError(poll.error, 'forbidden'))) {
     answered.current = poll.answeredAt;
   }
-  const stale = nowMs - answered.current.mono >= LOST_MS;
-  const frontLost = stale ? new Date(answered.current.wall + serverSkewMs()) : undefined;
+  // The one rule (R17): lost 15 s after the last answer of the picture in front.
+  const frontLost = useLostSince(answered.current);
   const lostSince = earlier(stateLost, frontLost);
   // "The server reported an error" only when every failing source got an answer with an error; a
   // request still waiting counts as no answer.
@@ -177,12 +178,11 @@ function RunningDisplay({ id, state, answers, now, stateLost, stateError, onLogi
   const serverError = failing.length > 0 && failing.every((e) => e !== undefined && e.status !== 0);
 
   // Render again when the rotation moves on, a missing dashboard may be asked for again, the
-  // stand-in time is over or the picture in front gets too old.
+  // stand-in time is over (the picture in front getting too old is the lost rule's own timer).
   const due = [
     rotationDueAt(state.show, shown.rotation),
     missingDueAt(missing, state, nowMs, answers),
     handingOver ? poll.since.mono + HANDOVER_MS : undefined,
-    stale ? undefined : answered.current.mono + LOST_MS,
   ].filter((at): at is number => at !== undefined);
   const next = due.length === 0 ? undefined : Math.min(...due);
   useEffect(() => {
@@ -262,7 +262,7 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
   const poll = useDisplayState(id, form === undefined, seed, (withToken) => {
     setForm(withToken ? { message: 'The token of this display is no longer valid.' } : {});
   });
-  const stateLost = useFailingFor(poll.staleSince);
+  const stateLost = useLostSince(poll.answeredAt);
   useNewVersion(reload, form === undefined && poll.state !== undefined && poll.error === undefined);
 
   const name = poll.state?.name;

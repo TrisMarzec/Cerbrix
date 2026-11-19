@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen } from '@testing-library/preact';
 import type uPlot from 'uplot';
 import { vi } from 'vitest';
 
@@ -129,12 +129,13 @@ describe('WallPage', () => {
     const { container } = await open({ [DASHBOARD]: { json: kundeA } });
     mock.on(DASHBOARD, 'network');
     await advance(5000);
-    // The first failure at 14:30:05; the picture stays, without a notice.
+    // The last answer at 14:30:00, the first failure at 14:30:05; the picture stays, without a notice.
     expect(title()).toBe('Kunde A');
     expect(container.querySelectorAll('.wall-panel')).toHaveLength(4);
     expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
     expect(dimmed(container)).toBe(false);
-    await advance(14_999);
+    // 15 s after the last successful answer, not after the first failure (R17).
+    await advance(9_999);
     expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
     await advance(1);
     const lost = screen.getByText(/No connection to the server since/);
@@ -162,7 +163,7 @@ describe('WallPage', () => {
     const { container } = await open({ [DASHBOARD]: { json: kundeA } });
     mock.on(DASHBOARD, { status: 500, json: { error: 'internal', message: 'boom' } });
     await advance(5000);
-    await advance(14_999);
+    await advance(9_999);
     expect(screen.queryByText(/reported an error|No connection/)).not.toBeInTheDocument();
     expect(dimmed(container)).toBe(false);
     await advance(1);
@@ -190,6 +191,60 @@ describe('WallPage', () => {
     expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
   });
 
+  it('dims exactly 15 s after the last answer while the requests hang (R17)', async () => {
+    const { container } = await open({ [DASHBOARD]: { json: kundeA } });
+    mock.on(DASHBOARD, () => new Promise(() => {}));
+    await advance(14_999);
+    expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
+    expect(dimmed(container)).toBe(false);
+    await advance(1);
+    expect(screen.getByText(/No connection to the server since/)).toHaveTextContent(
+      'No connection to the server since 14:30',
+    );
+    expect(dimmed(container)).toBe(true);
+  });
+
+  it('dims at once when the wall clock jumped by more than 15 s since the last answer (a machine that slept)', async () => {
+    const { container } = await open({ [DASHBOARD]: { json: kundeA } });
+    mock.on(DASHBOARD, () => new Promise(() => {}));
+    await advance(1000);
+    // The machine slept for an hour: the monotonic clock did not move on, the wall clock did.
+    vi.setSystemTime(Date.now() + 3_600_000);
+    // The next render (the clock's tick) applies the rule.
+    await advance(4000);
+    expect(screen.getByText(/No connection to the server since/)).toHaveTextContent(
+      'No connection to the server since 14:30',
+    );
+    expect(dimmed(container)).toBe(true);
+  });
+
+  it('dims old data at once when a hidden tab becomes visible, before the first new answer', async () => {
+    let hidden = false;
+    const visibility = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    try {
+      const { container } = await open({ [DASHBOARD]: { json: kundeA } });
+      await act(async () => {
+        hidden = true;
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      // Hours later, with the hidden tab's timers held back by the browser.
+      vi.setSystemTime(Date.now() + 2 * 3_600_000);
+      mock.on(DASHBOARD, () => new Promise(() => {}));
+      await act(async () => {
+        hidden = false;
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      expect(dimmed(container)).toBe(true);
+      expect(screen.getByText(/No connection to the server since/)).toHaveTextContent(
+        'No connection to the server since 14:30',
+      );
+    } finally {
+      delete (document as { hidden?: boolean }).hidden;
+      if (visibility !== undefined) Object.defineProperty(Document.prototype, 'hidden', visibility);
+    }
+  });
+
   it('stops showing the sync state when the status cannot be asked for 15 s, and shows it again later', async () => {
     const outOfSync = { ...statusFixture().sync, status: 'out_of_sync' as const };
     await open({ [DASHBOARD]: { json: kundeA }, 'GET /status': { json: statusFixture({ sync: outOfSync }) } });
@@ -197,7 +252,7 @@ describe('WallPage', () => {
     expect(screen.getByText(/^Out of sync since/)).toBeInTheDocument();
     mock.on('GET /status', 'network');
     await advance(5000);
-    await advance(14_999);
+    await advance(9_999);
     // Failing for less than 15 s: the last state stays.
     expect(screen.getByText(/^Out of sync since/)).toBeInTheDocument();
     await advance(1);
