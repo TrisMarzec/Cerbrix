@@ -325,6 +325,25 @@ describe('wall displays', () => {
     expect(row).toHaveTextContent('Following its setting');
   });
 
+  it('links each display by its name to its wall page', async () => {
+    await open({
+      'GET /dashboards': { json: { items: two } },
+      'GET /displays': {
+        json: { items: [displayFixture({ name: 'Office' }), displayFixture({ id: 'hall 2/ü', name: 'Hall' })] },
+      },
+    });
+    const rows = within(displayTable()).getAllByRole('row');
+    const office = within(rows[1] as HTMLElement).getByRole('link', { name: 'Open the wall display Office' });
+    expect(office).toHaveAttribute('href', '/display/e2e-wall');
+    // The row shows the name only; the rest of the accessible name is for a screen reader.
+    const hidden = office.querySelector('.visually-hidden');
+    expect(hidden).toHaveTextContent('Open the wall display');
+    expect(office.textContent?.replace(hidden?.textContent ?? '', '').trim()).toBe('Office');
+    expect(
+      within(rows[2] as HTMLElement).getByRole('link', { name: 'Open the wall display Hall' }),
+    ).toHaveAttribute('href', '/display/hall%202%2F%C3%BC');
+  });
+
   it('describes a rotating display that switches on alarms', async () => {
     await open({
       'GET /dashboards': { json: { items: two } },

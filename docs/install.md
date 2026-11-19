@@ -70,6 +70,10 @@ Other commands: `admin user list`, `admin user set-role <name> <viewer|operator|
 disabling or deleting a user ends the user's sessions. The last enabled admin cannot be
 demoted, disabled or deleted.
 
+A monitor on the wall needs no user: it opens `https://<server>/display/<id>` for a display
+defined in the configuration repository and uses a token that an admin creates in the UI. See
+[Wall displays](web-ui.md#wall-displays) for setting one up and running its browser in kiosk mode.
+
 ### Plain HTTP is for testing only
 
 The quick start serves the UI over plain HTTP. That is fine at `http://127.0.0.1:8443/` on the

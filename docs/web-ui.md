@@ -7,7 +7,8 @@ default installation) and log in. There is nothing else to install.
 
 The UI uses the [JSON API](api.md) and nothing else; it makes no request to any other
 server, loads no font or script from the internet and stores nothing in the browser except the
-session cookie.
+session cookie and, on a wall monitor, the token of its display (see
+[Wall displays](#wall-displays)).
 
 ## First login
 
@@ -35,9 +36,10 @@ the link to a colleague.
 
 **Dashboards.** One row per dashboard of the configuration repository: its name and file, a
 strip of squares with one square for each host (up to 40), the open problems in words, and the
-priority. A click on the name opens the problems of that dashboard. Below, the wall displays
-are listed with what each one is set to show and what it shows now. A dashboard is not drawn as
-a panel grid yet; see [Wall displays](#wall-displays).
+priority. A click on the name opens the problems of that dashboard; "Open on this screen" shows
+the dashboard full screen, as a wall monitor would. Below, the wall displays are listed with
+what each one is set to show and what it shows now; a click on a display's name opens it. See
+[Wall displays](#wall-displays).
 
 **Hosts.** All hosts, with search by name or address and filters for the group and the state
 (with problems, no data, without problems). Each row shows the host, its groups, its state,
@@ -119,7 +121,8 @@ An enrolment key, a display token and a generated password are shown in a dialog
 they are created, with a Copy button. The server stores only a hash of a key or token, so
 it cannot show them again: close the dialog only after you have stored the value. The UI
 keeps the value only while the dialog is open; it is never written to the browser's storage or
-the address.
+the address. (The wall monitor keeps the token that is entered on it; see
+[Wall displays](#wall-displays).)
 
 ## Browsers and appearance
 
@@ -146,7 +149,106 @@ For anything else use HTTPS, for example behind a reverse proxy (see
 
 ## Wall displays
 
-Wall displays, the full-screen dashboards for a monitor on the wall, follow in the next
-release. This release lists them, shows what they are set to show and manages their tokens;
-the display itself, with the panel grid of a dashboard, is not part of it. A display token is created here now; the wall display page that uses it comes with the next
-release.
+A wall display is a monitor in an operations room that shows dashboards full screen, without
+menus, all day. Nobody logs in on it and nobody needs to touch it. Each display is a file under
+`displays/` in the configuration repository: it says which dashboard the display shows, or which
+dashboards it rotates through, and whether it switches to a dashboard with an alarm (see
+[Display files](configuration-repository.md#display-files-displays)). A display reads its
+dashboards with a token of its own, which works for that one display only.
+
+### Setting up a display
+
+1. Add the display file to the configuration repository, for example `displays/noc.json`, and
+   push it. Its id is the file name without `.json`, here `noc`. Once the configuration is in
+   sync, the display is listed on the Dashboards page under "Wall displays".
+2. As an admin, open Configuration → Display tokens and create the display's token. It is shown
+   once; copy it.
+3. On the monitor's computer open `https://<server>/display/<id>`, here
+   `https://<server>/display/noc`, in a browser (see [Kiosk mode](#kiosk-mode) below).
+4. Enter the token under "Display token" and press Start. The page checks the token with the
+   server; a wrong one is answered with "This token is not valid for this display." With a valid
+   token the display starts.
+
+The token is entered once. The browser keeps it in its storage for this one page; it is the only
+thing the UI stores besides the session cookie. Use a normal browser profile, not a private
+window, or the token is gone after the browser restarts. If the browser refuses to store it, the
+page says "This browser does not keep the token. It must be entered again after a restart." and
+starts the display after 10 seconds.
+
+To give a monitor a new token, open `https://<server>/display/<id>#token`: the token form is shown
+even though a token is kept, and the new token replaces the old one. Creating a new token under
+Configuration (Replace token) makes the old one stop working at once. Revoking a token, or
+removing the display from the repository, does the same: at its next request (they come every
+5 seconds) the monitor shows the token form again with "The token of this display is no longer valid." and forgets the old token.
+
+Someone who is logged in to the UI in the same browser needs no token: `/display/<id>` then
+opens with the session, which is what a click on a display's name on the Dashboards page does.
+
+### What the monitor shows
+
+At the top, the name of the dashboard, the state of the configuration ("In sync", "Out of sync"
+or "Not synchronised yet") and the clock; below, the dashboard's panels on its grid of 12 by 6
+cells, filling the screen. Nothing scrolls, nothing can be clicked, and the mouse pointer is
+hidden after 3 seconds without movement. The display asks the server every 5 seconds, so a new
+problem shows within a few seconds.
+
+- **Rotation.** A display set to `rotate` shows each of its dashboards for `every` and then the
+  next one, in the order of the file, starting again at the first. A dashboard of the list that
+  does not exist is skipped (and tried again after 5 minutes).
+- **Alarm.** A display with `switch_on_alarm` switches to a dashboard that has an alarm: an open,
+  unacknowledged problem of at least `min_severity` on one of its hosts. When several dashboards
+  have one, the one with the highest priority wins, then the one with the most severe and oldest
+  alarm. A band under the header says why, for example "Alarm: showing Production. Switched
+  from Lobby. 1 more dashboard waiting." The problems that caused the switch are highlighted in
+  the problems panel. When the alarm is acknowledged or resolved, the display goes on with the
+  next dashboard with an alarm, or back to its own setting; the interrupted dashboard of a
+  rotation gets its full time again.
+- **Out of sync.** While the last commit of the configuration repository is refused, a band
+  says "Out of sync since <time>, showing the configuration from commit <commit>", with the file
+  and the reason below it ("and N more" when more files were refused). The display goes on with
+  the configuration that is still active.
+- **No connection.** When no answer has come from the server for 15 seconds, the header says "No
+  connection to the server since <time>" and the content is dimmed: what is on the screen is old.
+  When the server answers, but with an error, it says "The server reported an error since
+  <time>" instead. The display keeps trying every 5 seconds and returns to normal by itself.
+- **Upgrades.** The page looks for a new version of the UI on the server every 60 seconds. After
+  a server upgrade it reloads itself once; the token is kept.
+
+The wall shows no user names and no comments: a problem that somebody acknowledged shows as
+"acknowledged", without who or why, because everyone in the room can read the wall. The token
+cannot read them either; the server leaves them out of its answers to a display.
+
+**Panels that are too small.** Every panel shows what fits and says what does not. A problems
+panel shows as many rows as fit and counts the rest as "and N more". If not even one row fits,
+it shows the count with the most urgent severity, for example "Critical · 12 open problems", or,
+smaller still, the same in its label ("Critical · 12 open"), so a small panel never hides that
+problems are open. Make the panel larger in the dashboard file to see the rows.
+
+**Trying a layout at a desk.** "Open on this screen" on the Dashboards page shows a dashboard
+exactly as a wall monitor would, at `/wall/<dashboard>`, for the logged-in user. Moving the mouse
+shows the link "Back to the desk" in the header. This is the quickest way to see a change of a
+dashboard file before a monitor shows it.
+
+### Kiosk mode
+
+Run the browser on the monitor's computer full screen, without its own bars, and start it with
+the computer. For Chromium or Google Chrome:
+
+```sh
+chromium --kiosk --app=https://monitoring.example.net/display/noc
+```
+
+For Firefox:
+
+```sh
+firefox --kiosk https://monitoring.example.net/display/noc
+```
+
+Enter the token once in the kiosk window. Turn off the screen saver, the screen lock and sleep on
+that computer, or the monitor goes dark after a while.
+
+### Screen sizes
+
+The wall is made for Full HD (1920 × 1080) and 4K (3840 × 2160) monitors. Every size, text
+included, scales with the width of the window, so a 4K monitor shows the same layout as a Full HD
+one, only sharper. Other sizes work as well; the panels always fill the height of the screen.

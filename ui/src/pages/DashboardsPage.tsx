@@ -195,7 +195,10 @@ function DisplayTable({ items, nameOf }: { items: Display[]; nameOf: (id: string
           {items.map((d) => (
             <tr key={d.id}>
               <th scope="row">
-                <span class="dashboard-name">{d.name}</span>
+                {/* The hidden words make the link's accessible name say where it leads. */}
+                <Link class="dashboard-name" href={`/display/${seg(d.id)}`}>
+                  <span class="visually-hidden">Open the wall display</span> {d.name}
+                </Link>
                 <small>{settingSentence(d, nameOf)}</small>
               </th>
               <td>

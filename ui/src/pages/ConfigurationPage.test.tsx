@@ -632,7 +632,7 @@ describe('display tokens', () => {
     expect(sent('POST', '/displays/e2e-wall/token')).toHaveLength(1);
     expect(screen.getByDisplayValue('cbx_dt_TOKENVALUE')).toBeInTheDocument();
     expect(
-      screen.getByText('Keep this token for the wall display E2E wall. The page that uses it comes with the next release.'),
+      screen.getByText('Open /display/e2e-wall on the wall monitor and enter this token.'),
     ).toBeInTheDocument();
     expect(sent('GET', '/displays')).toHaveLength(2);
     await u.click(screen.getByRole('button', { name: 'Close' }));

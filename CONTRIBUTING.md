@@ -86,7 +86,9 @@ Compose lower-cases it in the name of the network that the smoke run joins.
 ## Browser smoke run
 
 `ui/e2e/smoke.spec.ts` is one Playwright test (Chromium) that logs in, visits every page,
-acknowledges a problem, creates a display token and logs out. It fails on any console error,
+creates a display token, opens the dashboard `e2e` on the screen, starts the wall display with
+the token in a second browser context without a session (where it shows the alarm), then
+acknowledges the problem and logs out. It fails on any console error,
 failed request to the server, status 500 or higher and content security policy violation. It
 needs a running server in the state `scripts/e2e.sh` leaves before this step:
 

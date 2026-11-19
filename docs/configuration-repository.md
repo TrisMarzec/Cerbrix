@@ -240,6 +240,12 @@ A fixed display:
 }
 ```
 
+On the monitor, `every` is how long each dashboard of the rotation stays on the screen;
+`switch_on_alarm.min_severity` is the lowest severity of an unacknowledged problem that makes the
+display switch to the dashboard showing it, with a band that says "Alarm: showing <dashboard>.";
+and `dashboards` limits the dashboards it may switch to (without it, any dashboard). How to set
+up the monitor, its token and its browser: [Wall displays](web-ui.md#wall-displays).
+
 ## Names
 
 Group names, template names and the ids of dashboards and displays use 1 to 63 lowercase letters,
