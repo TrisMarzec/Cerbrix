@@ -176,14 +176,34 @@ test('the web UI works in a browser', async ({ page, baseURL, browser }) => {
     await page.getByRole('button', { name: 'Log in' }).click();
   }
 
-  /** Whether the page fits the window: the wall never scrolls. */
+  /**
+   * Whether the page fits the window: the wall never scrolls. The wall's root has `overflow:
+   * hidden`, so the root alone cannot show it; the content area and every panel must hold what
+   * they contain as well (one pixel for rounding).
+   */
   async function expectNoScrolling(on: Page): Promise<void> {
     const sizes = await on.evaluate(() => {
-      const root = document.documentElement;
-      return { height: [root.scrollHeight, root.clientHeight], width: [root.scrollWidth, root.clientWidth] };
+      const size = (box: Element) => ({
+        scrollHeight: box.scrollHeight,
+        clientHeight: box.clientHeight,
+        scrollWidth: box.scrollWidth,
+        clientWidth: box.clientWidth,
+      });
+      const boxes = [...document.querySelectorAll('.wall-content, .wall-panel')].map((box, index) => ({
+        name: `${box.className} (element ${String(index + 1)})`,
+        content: box.classList.contains('wall-content'),
+        ...size(box),
+      }));
+      return { root: size(document.documentElement), boxes };
     });
-    expect(sizes.height[0], 'the page scrolls vertically').toBe(sizes.height[1]);
-    expect(sizes.width[0], 'the page scrolls horizontally').toBe(sizes.width[1]);
+    const { root, boxes } = sizes;
+    expect(root.scrollHeight, 'the page scrolls vertically').toBe(root.clientHeight);
+    expect(root.scrollWidth, 'the page scrolls horizontally').toBe(root.clientWidth);
+    expect(boxes.some((box) => box.content), 'the page has a wall content area').toBe(true);
+    for (const box of boxes) {
+      expect(box.scrollHeight, `${box.name} is taller than its box`).toBeLessThanOrEqual(box.clientHeight + 1);
+      expect(box.scrollWidth, `${box.name} is wider than its box`).toBeLessThanOrEqual(box.clientWidth + 1);
+    }
   }
 
   /**
@@ -286,10 +306,13 @@ test('the web UI works in a browser', async ({ page, baseURL, browser }) => {
     await expect(row).not.toContainText('acknowledged');
     await expectGraph(page.locator('canvas'));
     await expectNoScrolling(page);
-    // The link shows while the mouse moves; a move wakes the frame.
+    // The link shows while the mouse moves; a move wakes the frame. Playwright clicks an element
+    // at opacity 0 as well, so that a person can see it is checked first.
     await page.mouse.move(40, 40);
     await page.mouse.move(400, 300);
-    await page.getByRole('link', { name: 'Back to the desk', exact: true }).click();
+    const back = page.getByRole('link', { name: 'Back to the desk', exact: true });
+    await expect(back).toHaveCSS('opacity', '1');
+    await back.click();
     await expect(heading('Dashboards')).toBeVisible();
     await expect(page).toHaveURL(/\/dashboards$/);
   });
@@ -328,7 +351,10 @@ test('the web UI works in a browser', async ({ page, baseURL, browser }) => {
     await expect(row).toHaveCount(1);
     await expect(row).toHaveClass(/(^|\s)is-cause(\s|$)/);
     await expect(row).not.toContainText('acknowledged');
-    // Once it runs, the display takes no input and does not scroll.
+    // It runs on the token: this context has no session, and the page says nothing about a login.
+    await expect(screen.getByRole('banner')).not.toContainText('Running on your login');
+    // Once it runs and has drawn its graph, the display takes no input and does not scroll.
+    await expectGraph(screen.locator('canvas'));
     await expect(field).toHaveCount(0);
     const focusable = await screen.evaluate(
       () => document.querySelectorAll('a[href], button, input, select, textarea, [tabindex]').length,
