@@ -592,10 +592,13 @@
 
 /* Display page */
 
-/* The layers of a display: the shown dashboard, and during a change (D13) the one before it, which
-   fades out while the new one fades in over it. Both are full frames, stacked. */
-.wall.wall-layers {
+/* The grid area of a display, inside its one frame (ruling R11): the shown dashboard, and during a
+   change (D13) the one before it underneath, at full strength, while the new one fades in over
+   it on the wall's background; then the old one is removed. Unchanged pixels never dip. */
+.wall .wall-layers {
   position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .wall .wall-layer {
@@ -604,7 +607,12 @@
   right: 0;
   bottom: 0;
   left: 0;
-  opacity: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.wall .wall-layer.is-entering {
   transition: opacity 400ms ease-in-out;
 }
 
@@ -612,10 +620,6 @@
   .wall .wall-layer.is-entering {
     opacity: 0;
   }
-}
-
-.wall .wall-layer.is-leaving {
-  opacity: 0;
 }
 
 /* "This display may not show ...": one dim line at the 38 size in the grid's place. */

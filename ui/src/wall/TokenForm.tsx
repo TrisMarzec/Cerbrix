@@ -38,9 +38,10 @@ export function TokenForm({ id, message, onStart }: Props) {
   const controller = useRef<AbortController | undefined>(undefined);
 
   useEffect(() => {
-    // As an attribute: Preact would only set the property, which not every engine has, and
-    // `false` would then remove the attribute instead of writing it.
+    // As attributes: Preact would set `spellcheck` as a property, which not every engine has (and
+    // `false` would then remove the attribute), and `autocorrect` is not in its types.
     input.current?.setAttribute('spellcheck', 'false');
+    input.current?.setAttribute('autocorrect', 'off');
     input.current?.focus();
     return () => controller.current?.abort();
   }, []);
@@ -91,8 +92,12 @@ export function TokenForm({ id, message, onStart }: Props) {
             ref={input}
             id="wall-display-token"
             class="wall-token-input"
-            type="password"
+            // Not a password field (ruling R13): a kiosk browser would offer to save it after the
+            // start, and that bubble would stay over the wall until someone clicks it.
+            type="text"
+            inputMode="text"
             autocomplete="off"
+            autocapitalize="off"
           />
           <button class="btn wall-token-button" type="submit" disabled={busy || unkept !== undefined}>
             Start

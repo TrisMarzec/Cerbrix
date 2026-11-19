@@ -103,3 +103,80 @@ export function whatToShow(
   }
   return { dashboard: list[index], rotation: { index, since } };
 }
+
+/** When the rotation moves on next (monotonic ms); undefined when it does not (fixed, or held). */
+export function rotationDueAt(show: DisplayShow, rotation: Rotation): number | undefined {
+  const every = rotationMs(show);
+  return every === undefined || !Number.isFinite(rotation.since) ? undefined : rotation.since + every;
+}
+
+/** The rotation to go on with: a changed `show` setting (a configuration change) starts it over. */
+export function followShow(previous: DisplayShow, show: DisplayShow, rotation: Rotation, nowMs: number): Rotation {
+  return JSON.stringify(previous) === JSON.stringify(show) ? rotation : { index: 0, since: nowMs };
+}
+
+/** A rotation entry that answered 404 is tried again after this long: it may come back. */
+export const MISSING_RETRY_MS = 5 * 60_000;
+
+/** A dashboard that answered 404: when (monotonic ms), and, for the alarm target, in which state answer. */
+export interface MissingEntry {
+  at: number;
+  /** Set for the alarm target: the number of the state answer in force when it answered 404. */
+  answer?: number;
+}
+
+/** The dashboards that answered 404, for the `allowed` list they were seen with. */
+export interface Missing {
+  allowed: readonly string[];
+  entries: ReadonlyMap<string, MissingEntry>;
+}
+
+export const NO_MISSING: Missing = { allowed: [], entries: new Map() };
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+/** The entries that still count for this state: a changed `allowed` list drops them all. */
+function entriesFor(missing: Missing, state: DisplayState): ReadonlyMap<string, MissingEntry> {
+  return sameList(missing.allowed, state.allowed) ? missing.entries : NO_MISSING.entries;
+}
+
+/**
+ * Notes that `dashboard` answered 404 at `nowMs`. `targetAnswer` is the number of the state answer
+ * in force when it was asked for as the alarm target; undefined for a rotation entry.
+ */
+export function noteMissing(
+  missing: Missing,
+  state: DisplayState,
+  dashboard: string,
+  nowMs: number,
+  targetAnswer: number | undefined,
+): Missing {
+  const entry: MissingEntry = targetAnswer === undefined ? { at: nowMs } : { at: nowMs, answer: targetAnswer };
+  return { allowed: state.allowed, entries: new Map(entriesFor(missing, state)).set(dashboard, entry) };
+}
+
+/**
+ * The dashboards held out now (ruling R10 amended): a rotation entry for `MISSING_RETRY_MS` after
+ * its 404; the alarm target only until the next state answer (`answer` is the number of the
+ * latest), so a target that came back is asked for again at once. A changed `allowed` list tries
+ * every dashboard again.
+ */
+export function stillMissing(missing: Missing, state: DisplayState, nowMs: number, answer: number): Set<string> {
+  const held = new Set<string>();
+  for (const [dashboard, entry] of entriesFor(missing, state)) {
+    const holds = entry.answer === undefined ? nowMs - entry.at < MISSING_RETRY_MS : answer <= entry.answer;
+    if (holds) held.add(dashboard);
+  }
+  return held;
+}
+
+/** When the next held-out rotation entry is due to be tried again (monotonic ms); undefined without one. */
+export function missingDueAt(missing: Missing, state: DisplayState, nowMs: number): number | undefined {
+  const due = [...entriesFor(missing, state).values()]
+    .filter((entry) => entry.answer === undefined)
+    .map((entry) => entry.at + MISSING_RETRY_MS)
+    .filter((at) => at > nowMs);
+  return due.length === 0 ? undefined : Math.min(...due);
+}

@@ -9,7 +9,6 @@ import { Link } from '../lib/router';
 import { useServerNow } from '../lib/serverNow';
 import { DashboardView } from './DashboardView';
 import { useFailingFor } from './lost';
-import { WallFrame } from './WallFrame';
 
 const POLL_MS = 5000;
 /** The wall's clock moves on this often; it shows minutes. */
@@ -59,16 +58,11 @@ export function WallPage({ id }: { id: string }) {
   const sync = !statusFailing && status.data?.gitops === true ? status.data.sync : undefined;
   // The server answered, with an error (status 0: it could not be reached).
   const serverError = dashboard.error !== undefined && dashboard.error.status !== 0;
-  if (dashboard.data === undefined) {
-    return (
-      <WallFrame title={id} sync={sync} now={now} lostSince={lostSince} serverError={serverError} back="/dashboards">
-        {null}
-      </WallFrame>
-    );
-  }
+  // One frame for the life of the page: before the first answer it has the id as title.
   return (
     <DashboardView
       dashboard={dashboard.data}
+      title={id}
       sync={sync}
       now={now}
       causes={NO_CAUSES}

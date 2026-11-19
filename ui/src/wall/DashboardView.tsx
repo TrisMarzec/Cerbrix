@@ -7,7 +7,10 @@ import { ValuePanel } from './panels/ValuePanel';
 import { WallFrame, type WallAlarm } from './WallFrame';
 
 interface Props {
-  dashboard: DashboardDetail;
+  /** Undefined before the first answer: the frame shows `title` and an empty grid area. */
+  dashboard: DashboardDetail | undefined;
+  /** The title while there is no dashboard answer yet. */
+  title?: string;
   sync?: SyncState;
   now: Date;
   alarm?: WallAlarm;
@@ -41,11 +44,22 @@ function PanelContent({ panel, now, causes }: { panel: Panel; now: Date; causes:
   }
 }
 
-/** One dashboard on the wall: the frame with its name, and its panels on the 12 by 6 grid. */
-export function DashboardView({ dashboard, sync, now, alarm, causes, lostSince, serverError, back }: Props) {
+/** The panels of one dashboard on the 12 by 6 grid, without a frame: what a dashboard change fades. */
+export function DashboardGrid({ dashboard, now, causes }: { dashboard: DashboardDetail; now: Date; causes: string[] }) {
+  if (dashboard.panels.length === 0) return <p class="wall-no-panels">This dashboard has no panels.</p>;
+  return (
+    <PanelGrid panels={dashboard.panels} render={(panel) => <PanelContent panel={panel} now={now} causes={causes} />} />
+  );
+}
+
+/**
+ * One dashboard on the wall: the frame with its name, and its panels on the 12 by 6 grid. The frame
+ * is the same element before and after the first answer (ruling R11).
+ */
+export function DashboardView({ dashboard, title, sync, now, alarm, causes, lostSince, serverError, back }: Props) {
   return (
     <WallFrame
-      title={dashboard.name}
+      title={dashboard?.name ?? title ?? ''}
       sync={sync}
       now={now}
       alarm={alarm}
@@ -53,14 +67,7 @@ export function DashboardView({ dashboard, sync, now, alarm, causes, lostSince, 
       serverError={serverError}
       back={back}
     >
-      {dashboard.panels.length === 0 ? (
-        <p class="wall-no-panels">This dashboard has no panels.</p>
-      ) : (
-        <PanelGrid
-          panels={dashboard.panels}
-          render={(panel) => <PanelContent panel={panel} now={now} causes={causes} />}
-        />
-      )}
+      {dashboard !== undefined && <DashboardGrid dashboard={dashboard} now={now} causes={causes} />}
     </WallFrame>
   );
 }

@@ -99,9 +99,17 @@ function displayState(overrides: Partial<DisplayState> = {}): DisplayState {
 }
 
 const ROTATING = displayState({ show: { rotate: ['a', 'b'], every: '30s' } });
-const alpha = dashboardDetailFixture({ id: 'a', name: 'Alpha' });
-const beta = dashboardDetailFixture({ id: 'b', name: 'Beta' });
-const gamma = dashboardDetailFixture({ id: 'c', name: 'Gamma' });
+
+/** A dashboard with the four panels of the fixture; its value panel shows `<word>.load`. */
+function board(id: string, name: string, word: string) {
+  const panels = dashboardDetailFixture().panels.map((p) => (p.type === 'value' ? { ...p, item: `${word}.load` } : p));
+  return dashboardDetailFixture({ id, name, panels });
+}
+
+const alpha = board('a', 'Alpha', 'alpha');
+const beta = board('b', 'Beta', 'beta');
+const gamma = board('c', 'Gamma', 'gamma');
+const xray = board('x', 'Xray', 'xray');
 
 /** An answer only for a request with the display's token, as the server gives it; 401 otherwise. */
 function withToken(answer: Answer, token = TOKEN): Responder {
@@ -132,21 +140,32 @@ async function open(routes: Record<string, Responder | Responder[]>, { token }: 
   return view;
 }
 
-/** The title of the dashboard in front (not the one fading out). */
+/** The title in the display's one frame. */
 function title(): string {
-  return document.querySelector('.wall-layer:not(.is-leaving) .wall-title')?.textContent ?? '';
+  return document.querySelector('.wall-title')?.textContent ?? '';
 }
 
 function layers(): Element[] {
   return [...document.querySelectorAll('.wall-layer')];
 }
 
+/** The panels of the picture in front (not of the one under it during a fade). */
+function frontPanels(): Element[] {
+  return [...document.querySelectorAll('.wall-layer:not(.is-leaving) .wall-panel')];
+}
+
+/** Whose panels are in front: each fixture dashboard's value panel names its own item. */
+function frontShows(): string | undefined {
+  const label = document.querySelector('.wall-layer:not(.is-leaving) .wall-value-body')?.closest('.wall-panel');
+  return /db-01 · (\w+)\.load/.exec(label?.textContent ?? '')?.[1];
+}
+
 function dimmed(): boolean {
-  return document.querySelector('.wall-layer:not(.is-leaving) .wall-body')?.classList.contains('is-lost') === true;
+  return document.querySelector('.wall-body')?.classList.contains('is-lost') === true;
 }
 
 function band(): string | null {
-  return document.querySelector('.wall-layer:not(.is-leaving) .wall-band.is-alarm')?.textContent ?? null;
+  return document.querySelector('.wall-band.is-alarm')?.textContent ?? null;
 }
 
 function tokenInput(): HTMLInputElement {
@@ -173,8 +192,12 @@ describe('DisplayPage: the token', () => {
     expect(asked[0]?.headers.has('Authorization')).toBe(false);
     expect(screen.getByRole('heading', { name: `Wall display ${ID}` })).toBeInTheDocument();
     const input = tokenInput();
-    expect(input).toHaveAttribute('type', 'password');
+    // A plain text field: a kiosk browser offers to save a password field after the start (R13).
+    expect(input).toHaveAttribute('type', 'text');
+    expect(input).toHaveAttribute('inputmode', 'text');
     expect(input).toHaveAttribute('autocomplete', 'off');
+    expect(input).toHaveAttribute('autocapitalize', 'off');
+    expect(input).toHaveAttribute('autocorrect', 'off');
     expect(input).toHaveAttribute('spellcheck', 'false');
     expect(screen.getByRole('button', { name: 'Start' })).toBeInTheDocument();
     expect(document.activeElement).toBe(input);
@@ -451,29 +474,112 @@ describe('DisplayPage: what it shows', () => {
     expect(title()).toBe('Alpha');
   });
 
-  it('keeps the old dashboard until the new one has answered', async () => {
+  it('names the new dashboard at once and lets the old grid stand in while the new one is slow (4 s)', async () => {
     await open({
       [STATE]: { json: ROTATING },
       [dash('a')]: { json: alpha },
-      [dash('b')]: () => new Promise(() => {}),
+      [dash('b')]: () => new Promise<Answer>((resolve) => setTimeout(() => resolve({ json: beta }), 4000)),
     });
     await advance(30_000);
+    await settle();
     expect(mock.count(dash('b'))).toBe(1);
-    expect(title()).toBe('Alpha');
+    // The title comes from the state's names, before the answer.
+    expect(title()).toBe('Beta');
+    expect(frontShows()).toBe('alpha');
     expect(layers()).toHaveLength(1);
+    await walk(3000);
+    expect(frontShows()).toBe('alpha');
+    expect(screen.queryByText('This dashboard could not be loaded.')).not.toBeInTheDocument();
+    await walk(1000);
+    expect(title()).toBe('Beta');
+    expect(frontShows()).toBe('beta');
+    expect(dimmed()).toBe(false);
   });
 
-  it('says after 15 s that the connection is lost when the new dashboard cannot be loaded, the old one dimmed', async () => {
-    await open({ [STATE]: { json: ROTATING }, [dash('a')]: { json: alpha }, [dash('b')]: 'network' });
+  it('stops standing in after 5 s without an answer and says the dashboard could not be loaded', async () => {
+    await open({
+      [STATE]: { json: ROTATING },
+      [dash('a')]: { json: alpha },
+      [dash('b')]: () => new Promise<Answer>(() => {}),
+    });
     await advance(30_000);
     await settle();
-    expect(title()).toBe('Alpha');
-    await advance(14_999);
+    await walk(4000);
+    expect(frontShows()).toBe('alpha');
+    await walk(1000);
+    await advance(400);
+    expect(title()).toBe('Beta');
+    expect(screen.getByText('This dashboard could not be loaded.')).toBeInTheDocument();
+    expect(document.querySelectorAll('.wall-panel')).toHaveLength(0);
+  });
+
+  it('never shows the old picture for a new dashboard that fails, and measures "lost" from the last answer', async () => {
+    await open({ [STATE]: { json: ROTATING }, [dash('a')]: { json: alpha }, [dash('b')]: 'network' });
+    // In steps, so the page renders each of Alpha's answers as a browser would.
+    await walk(30_000, 5000);
+    await advance(400);
+    // At once: the new name and the line, nothing of Alpha.
+    expect(title()).toBe('Beta');
+    expect(screen.getByText('This dashboard could not be loaded.')).toBeInTheDocument();
+    expect(document.querySelectorAll('.wall-panel')).toHaveLength(0);
+    expect(dimmed()).toBe(false);
+    // Alpha answered last at 25 s or 30 s; 15 s later the header says so, whichever dashboard is asked for.
+    await walk(9000);
     expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
-    await advance(1);
-    expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
-    expect(title()).toBe('Alpha');
+    await walk(6000);
+    expect(screen.getByText(/No connection to the server since/)).toHaveTextContent(
+      'No connection to the server since 14:30',
+    );
     expect(dimmed()).toBe(true);
+    // Recovery: Beta answers.
+    mock.on(dash('b'), { json: beta });
+    await walk(5000);
+    expect(frontShows()).toBe('beta');
+    expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
+    expect(dimmed()).toBe(false);
+  });
+
+  it('shows the alarm target by name with the band when its dashboard fails (500), not the previous picture', async () => {
+    await open({
+      [STATE]: { json: displayState() },
+      [dash('a')]: { json: alpha },
+      [dash('x')]: { status: 500, json: { error: 'internal', message: 'boom' } },
+    });
+    expect(frontShows()).toBe('alpha');
+    mock.on(STATE, { json: displayState({ target: 'x', causes: [criticalProblem.id] }) });
+    await advance(5000);
+    await settle();
+    await advance(400);
+    expect(title()).toBe('Xray');
+    expect(band()).toBe('Alarm: showing Xray. Switched from Alpha.');
+    expect(screen.getByText('This dashboard could not be loaded.')).toBeInTheDocument();
+    expect(document.querySelectorAll('.wall-panel')).toHaveLength(0);
+    // The server answers, with an error: after 15 s without a picture's answer the header says so.
+    await walk(15_000);
+    expect(screen.getByText(/^The server reported an error since/)).toBeInTheDocument();
+    expect(dimmed()).toBe(true);
+  });
+
+  it('asks for an alarm target that answered 404 again with the next state that still names it', async () => {
+    await open({
+      [STATE]: { json: displayState() },
+      [dash('a')]: { json: alpha },
+      [dash('x')]: [{ status: 404, json: { error: 'not_found', message: 'no such dashboard' } }, { json: xray }],
+    });
+    mock.on(STATE, { json: displayState({ target: 'x' }) });
+    await advance(5000);
+    await settle();
+    // Gone for now: the rotation is shown, without a band.
+    expect(mock.count(dash('x'))).toBe(1);
+    expect(title()).toBe('Alpha');
+    expect(band()).toBeNull();
+    // The next state still names it: asked for again (not after five minutes), and shown.
+    await walk(5000);
+    expect(mock.count(dash('x'))).toBe(2);
+    expect(title()).toBe('Xray');
+    expect(band()).toBe('Alarm: showing Xray. Switched from Alpha.');
+    await advance(400);
+    expect(frontShows()).toBe('xray');
   });
 
   it('says in the frame that the display may not show a dashboard (403), and moves on at its interval', async () => {
@@ -547,22 +653,76 @@ describe('DisplayPage: the dashboard change', () => {
     return ofAlpha;
   }
 
-  it('fades the old dashboard out and the new one in over 400 ms, then keeps only the new one', async () => {
-    const ofAlpha = await rotateToBeta();
+  it('fades the new grid in over the old one in 400 ms, in the same frame, then keeps only the new one', async () => {
+    await open({ [STATE]: { json: ROTATING }, [dash('a')]: { json: alpha }, [dash('b')]: { json: beta } });
+    const frame = document.querySelector('.wall');
+    const header = document.querySelector('.wall-header');
+    const alphaLayer = layers()[0];
+    const ofAlpha = measure.observers().filter((o) => !o.disconnected);
+    expect(ofAlpha.length).toBeGreaterThan(0);
+    const created = measure.observers().length;
+    await advance(30_000);
+    await settle();
+
     expect(layers()).toHaveLength(2);
     const [leaving, entering] = layers();
+    // The old grid is the same element as before, under the new one, kept at full strength.
+    expect(leaving).toBe(alphaLayer);
     expect(leaving).toHaveClass('is-leaving');
     expect(leaving).toHaveAttribute('aria-hidden', 'true');
-    expect(leaving?.querySelector('.wall-title')).toHaveTextContent('Alpha');
+    expect(leaving?.textContent).toContain('alpha.load');
     expect(entering).toHaveClass('is-entering');
-    expect(entering?.querySelector('.wall-title')).toHaveTextContent('Beta');
+    expect(entering?.textContent).toContain('beta.load');
+    // Alpha's panels were not mounted again: their observers live on, none were made for them.
+    expect(ofAlpha.every((o) => !o.disconnected)).toBe(true);
+    expect(measure.observers().length - created).toBe(ofAlpha.length);
+    // One frame: one header, one title, one band region, the same elements.
+    expect(document.querySelectorAll('.wall-header')).toHaveLength(1);
+    expect(document.querySelector('.wall')).toBe(frame);
+    expect(document.querySelector('.wall-header')).toBe(header);
+    expect(title()).toBe('Beta');
+
     await advance(400);
     expect(layers()).toHaveLength(1);
+    expect(layers()[0]).toBe(entering);
     expect(layers()[0]).not.toHaveClass('is-entering');
-    expect(title()).toBe('Beta');
     // The old dashboard's panels are gone, with their observers.
     expect(ofAlpha.every((o) => o.disconnected)).toBe(true);
     expect(document.querySelectorAll('.wall-panel')).toHaveLength(4);
+    expect(document.querySelector('.wall-header')).toBe(header);
+  });
+
+  it('stays idle across a dashboard change: the cursor does not come back', async () => {
+    await open({ [STATE]: { json: ROTATING }, [dash('a')]: { json: alpha }, [dash('b')]: { json: beta } });
+    await advance(3000);
+    expect(document.querySelector('.wall')).toHaveClass('is-idle');
+    await walk(27_000);
+    expect(frontShows()).toBe('beta');
+    expect(document.querySelector('.wall')).toHaveClass('is-idle');
+  });
+
+  it('keeps at most two layers when a second change comes during a fade', async () => {
+    // The state that brings an alarm arrives 200 ms after the rotation moved on to Beta.
+    const late = (answer: Answer): Responder => () =>
+      new Promise<Answer>((resolve) => setTimeout(() => resolve(answer), 200));
+    await open({
+      [STATE]: { json: ROTATING },
+      [dash('a')]: { json: alpha },
+      [dash('b')]: { json: beta },
+      [dash('x')]: { json: xray },
+    });
+    await walk(29_000, 5000);
+    mock.on(STATE, late({ json: { ...ROTATING, target: 'x' } }));
+    let most = 0;
+    for (let t = 0; t < 2000; t += 50) {
+      await advance(50);
+      await settle();
+      most = Math.max(most, layers().length);
+    }
+    expect(frontShows()).toBe('xray');
+    expect(most).toBe(2);
+    await advance(400);
+    expect(layers()).toHaveLength(1);
   });
 
   it('changes at once for reduced motion', async () => {
@@ -582,8 +742,9 @@ describe('DisplayPage: the connection', () => {
     await open({ [STATE]: { json: displayState() }, [dash('a')]: { json: alpha } });
     mock.on(STATE, 'network');
     mock.on(dash('a'), 'network');
+    // The last answer came at the start; 15 s later the picture is too old to pass as current.
     await advance(5000);
-    await advance(14_999);
+    await advance(9999);
     expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
     expect(dimmed()).toBe(false);
     await advance(1);

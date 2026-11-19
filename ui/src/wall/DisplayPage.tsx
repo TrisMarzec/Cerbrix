@@ -2,24 +2,33 @@ import './wall.css';
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
-import { ApiError, seg } from '../api/client';
+import { ApiError, serverSkewMs } from '../api/client';
 import type { DashboardDetail, DisplayState } from '../api/types';
-import { usePolled } from '../lib/poll';
 import { useServerNow } from '../lib/serverNow';
-import { DashboardView } from './DashboardView';
-import { displayGet } from './displayClient';
-import { useFailingFor } from './lost';
-import { rotationMs, whatToShow, type Rotation, type Shown } from './show';
+import { DashboardGrid } from './DashboardView';
+import { LOST_MS, useFailingFor } from './lost';
+import {
+  followShow,
+  missingDueAt,
+  NO_MISSING,
+  noteMissing,
+  rotationDueAt,
+  stillMissing,
+  whatToShow,
+  type Missing,
+  type Rotation,
+  type Shown,
+} from './show';
 import { TokenForm } from './TokenForm';
-import { POLL_MS, useDisplayState, useNewVersion } from './useDisplay';
+import { moment, useDashboardPoll, useDisplayState, useNewVersion, type Moment } from './useDisplay';
 import { WallFrame, type WallAlarm } from './WallFrame';
 
 /** The wall's clock moves on this often; it shows minutes. */
 const CLOCK_MS = 5000;
 /** The cross-fade of a dashboard change (D13). */
 const FADE_MS = 400;
-/** A dashboard that answered 404 is tried again after this long: it may come back. */
-const RETRY_MS = 5 * 60_000;
+/** How long the previous picture may stand in for a new dashboard that has not answered yet. */
+const HANDOVER_MS = 5000;
 const NO_CAUSES: string[] = [];
 
 function reloadPage(): void {
@@ -27,16 +36,8 @@ function reloadPage(): void {
 }
 
 function reducedMotion(): boolean {
-  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-}
-
-function loadDashboard(id: string, dashboard: string | undefined, signal: AbortSignal) {
-  if (dashboard === undefined) return Promise.resolve(undefined);
-  // `.` and `..` cannot be sent as a path segment, and no dashboard has such an id.
-  if (dashboard === '.' || dashboard === '..') {
-    return Promise.reject(new ApiError(404, 'not_found', 'no such dashboard'));
-  }
-  return displayGet<DashboardDetail>(id, `/dashboards/${seg(dashboard)}`, signal);
+  if (typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
 /** The earlier of two dates; undefined only when both are. */
@@ -56,28 +57,23 @@ function bandOf(state: DisplayState, shown: Shown): WallAlarm | undefined {
   return alarm;
 }
 
-/** What one layer of the display shows: a dashboard, or a sentence in the frame of the display. */
-type Content =
-  | { key: string; kind: 'dashboard'; id: string; data: DashboardDetail }
+/** What one layer of the grid area shows: a dashboard's panels, a sentence, or nothing yet. */
+type Layer =
+  | { key: string; kind: 'grid'; data: DashboardDetail; causes: string[] }
   | { key: string; kind: 'text'; text: string }
-  | { key: string; kind: 'empty' };
+  | { key: 'blank'; kind: 'blank' };
 
-/** A layer as it was drawn: its content and the band and causes it had. */
-interface Picture {
-  content: Content;
-  alarm: WallAlarm | undefined;
-  causes: string[];
-}
+const BLANK: Layer = { key: 'blank', kind: 'blank' };
 
-/** The dashboards that answered 404, with the monotonic time of the answer, for one `allowed` list. */
-interface Missing {
-  allowed: string;
-  at: ReadonlyMap<string, number>;
+function text(key: string, sentence: string): Layer {
+  return { key, kind: 'text', text: sentence };
 }
 
 interface RunningProps {
   id: string;
   state: DisplayState;
+  /** The number of the latest state answer. */
+  answers: number;
   now: Date;
   /** Since when the state poll fails, once it has failed for 15 s. */
   stateLost: Date | undefined;
@@ -85,79 +81,71 @@ interface RunningProps {
 }
 
 /**
- * A display that knows its state: which dashboard it shows (rotation and alarm, `whatToShow`), the
- * poll of that dashboard, and the cross-fade when it changes. Until a new dashboard's first answer
- * the old picture stays; during the fade both layers exist, afterwards only the new one.
+ * A display that knows its state, in one frame for the life of the page (ruling R11): which
+ * dashboard it shows (`whatToShow`), the poll of that dashboard, and the cross-fade of the grid
+ * area when it changes. The title and the band follow the state at once; the previous picture
+ * stands in for a new dashboard only briefly, and the header measures "lost" from the last answer
+ * of the picture in front (ruling R12).
  */
-function RunningDisplay({ id, state, now, stateLost, stateError }: RunningProps) {
+function RunningDisplay({ id, state, answers, now, stateLost, stateError }: RunningProps) {
   const [wake, setWake] = useState(0);
-  const allowedKey = JSON.stringify(state.allowed);
-  const [missing, setMissing] = useState<Missing>({ allowed: allowedKey, at: new Map() });
-
-  // The rotation lives in the page (D4), on the monotonic clock; a new `show` setting starts it over.
-  const showKey = JSON.stringify(state.show);
-  const rotation = useRef<{ show: string; at: Rotation }>({ show: showKey, at: { index: 0, since: performance.now() } });
   const nowMs = performance.now();
-  if (rotation.current.show !== showKey) rotation.current = { show: showKey, at: { index: 0, since: nowMs } };
-  // A changed `allowed` list tries every dashboard again; others are tried again after RETRY_MS.
-  const missingAt = missing.allowed === allowedKey ? missing.at : new Map<string, number>();
-  const absent = new Set([...missingAt].filter(([, at]) => nowMs - at < RETRY_MS).map(([d]) => d));
-  const shown = whatToShow(state, rotation.current.at, nowMs, absent);
-  rotation.current.at = shown.rotation;
+
+  // The rotation lives in the page (D4), on the monotonic clock.
+  const kept = useRef<{ show: DisplayState['show']; rotation: Rotation }>({
+    show: state.show,
+    rotation: { index: 0, since: nowMs },
+  });
+  const [missing, setMissing] = useState<Missing>(NO_MISSING);
+  const rotation = followShow(kept.current.show, state.show, kept.current.rotation, nowMs);
+  const shown = whatToShow(state, rotation, nowMs, stillMissing(missing, state, nowMs, answers));
+  kept.current = { show: state.show, rotation: shown.rotation };
   const dashboard = shown.dashboard;
+  const isTarget = shown.alarm !== undefined;
 
-  // Render again when the rotation moves on or a missing dashboard is due to be tried again.
-  const every = rotationMs(state.show);
-  const due = [...missingAt.values()].map((at) => at + RETRY_MS).filter((at) => at > nowMs);
-  if (every !== undefined && Number.isFinite(shown.rotation.since)) due.push(shown.rotation.since + every);
-  const next = due.length === 0 ? undefined : Math.min(...due);
-  useEffect(() => {
-    if (next === undefined) return undefined;
-    const timer = setTimeout(() => setWake((n) => n + 1), Math.max(0, next - performance.now()));
-    return () => clearTimeout(timer);
-  }, [next, wake]);
-
-  const polled = usePolled((signal) => loadDashboard(id, dashboard, signal), [id, dashboard], POLL_MS);
-  const answered = !polled.pending;
-  const notFound = answered && dashboard !== undefined && polled.error?.status === 404;
+  const poll = useDashboardPoll(id, dashboard);
+  const notFound = dashboard !== undefined && poll.error?.status === 404;
   useEffect(() => {
     if (!notFound || dashboard === undefined) return;
     const at = performance.now();
-    setMissing((previous) => {
-      const kept = previous.allowed === allowedKey ? previous.at : new Map<string, number>();
-      return { allowed: allowedKey, at: new Map(kept).set(dashboard, at) };
-    });
-  }, [notFound, dashboard, allowedKey]);
+    setMissing((previous) => noteMissing(previous, state, dashboard, at, isTarget ? answers : undefined));
+  }, [notFound, dashboard]);
 
-  // What is in front now. Without an answer for the shown dashboard yet, the last picture stays.
-  let content: Content | undefined;
+  // What the grid area should show now; undefined: the new dashboard has not answered yet.
+  let title = state.name;
+  let current: Layer | undefined;
+  let handingOver = false;
   if (dashboard === undefined) {
-    content = { key: 'none', kind: 'text', text: 'This display has no dashboard to show.' };
-  } else if (answered && polled.error?.status === 403) {
-    content = { key: `forbidden:${dashboard}`, kind: 'text', text: `This display may not show ${dashboard}.` };
-  } else if (answered && !notFound && polled.data !== undefined) {
-    content = { key: `dashboard:${dashboard}`, kind: 'dashboard', id: dashboard, data: polled.data };
+    current = text('none', 'This display has no dashboard to show.');
+  } else if (poll.error?.status === 403) {
+    current = text(`forbidden:${dashboard}`, `This display may not show ${dashboard}.`);
+  } else {
+    title = poll.data?.name ?? state.names[dashboard] ?? dashboard;
+    if (poll.data !== undefined) {
+      const causes = isTarget ? state.causes : NO_CAUSES;
+      current = { key: `grid:${dashboard}`, kind: 'grid', data: poll.data, causes };
+    } else if (!notFound && poll.error === undefined && nowMs - poll.since.mono < HANDOVER_MS) {
+      handingOver = true;
+    } else if (!notFound) {
+      current = text(`failed:${dashboard}`, 'This dashboard could not be loaded.');
+    }
   }
-  const last = useRef<Picture | undefined>(undefined);
-  const leaving = useRef<Picture | undefined>(undefined);
-  content = content ?? last.current?.content ?? { key: 'empty', kind: 'empty' };
-  // The band and the highlighted causes belong to the target only.
-  const isTarget = content.kind === 'dashboard' && shown.alarm !== undefined && content.id === dashboard;
-  const front: Picture = {
-    content,
-    alarm: isTarget ? bandOf(state, shown) : undefined,
-    causes: isTarget ? state.causes : NO_CAUSES,
-  };
+
+  // The picture in front and the one fading out under it; at most these two.
+  const last = useRef<Layer | undefined>(undefined);
+  const leaving = useRef<Layer | undefined>(undefined);
   const previous = last.current;
-  if (previous !== undefined && previous.content.key !== front.content.key) {
-    // Once per change: the old picture fades out over the new one fading in, or goes at once. The
-    // empty frame before the first answer just makes room.
-    leaving.current = previous.content.kind === 'empty' || reducedMotion() ? undefined : previous;
+  // Standing in, the previous picture marks no causes: they belong to the dashboard shown.
+  const standIn = previous?.kind === 'grid' ? { ...previous, causes: NO_CAUSES } : previous;
+  const front = current ?? standIn ?? BLANK;
+  if (previous !== undefined && previous.key !== front.key) {
+    // Once per change: the new picture fades in over the old one, which a newer change replaces.
+    leaving.current = previous.kind === 'blank' || reducedMotion() ? undefined : previous;
   }
   last.current = front;
 
   const [, setFaded] = useState(0);
-  const leavingKey = leaving.current?.content.key;
+  const leavingKey = leaving.current?.key;
   useLayoutEffect(() => {
     if (leavingKey === undefined) return undefined;
     const timer = setTimeout(() => {
@@ -165,57 +153,87 @@ function RunningDisplay({ id, state, now, stateLost, stateError }: RunningProps)
       setFaded((n) => n + 1);
     }, FADE_MS);
     return () => clearTimeout(timer);
-  }, [leavingKey, front.content.key]);
+  }, [leavingKey, front.key]);
 
-  // A dashboard that answers 403 or 404 has answered: that is not a lost connection.
-  const failing = answered && polled.error !== undefined && polled.error.status !== 403 && !notFound;
-  const dashboardLost = useFailingFor(failing ? polled.staleSince : undefined);
-  const lostSince = earlier(stateLost, dashboardLost);
-  const errors = [stateLost && stateError, dashboardLost && polled.error].filter((e) => e instanceof ApiError);
-  // The server answered, with an error (status 0: it could not be reached).
-  const serverError = errors.length > 0 && errors.every((e) => e.status !== 0);
+  // The last answer behind the picture in front. Standing in or saying that the dashboard could not
+  // be loaded, that is still the previous picture's; with nothing to show there is nothing to age.
+  const answered = useRef<Moment>(moment());
+  if (dashboard === undefined) {
+    answered.current = moment();
+  } else if (poll.answeredAt !== undefined && (current?.kind === 'grid' || poll.error?.status === 403)) {
+    answered.current = poll.answeredAt;
+  }
+  const stale = nowMs - answered.current.mono >= LOST_MS;
+  const frontLost = stale ? new Date(answered.current.wall + serverSkewMs()) : undefined;
+  const lostSince = earlier(stateLost, frontLost);
+  // "The server reported an error" only when every failing source got an answer with an error; a
+  // request still waiting counts as no answer.
+  const failing: (ApiError | undefined)[] = [];
+  if (stateLost !== undefined) failing.push(stateError);
+  if (frontLost !== undefined) failing.push(poll.error);
+  const serverError = failing.length > 0 && failing.every((e) => e !== undefined && e.status !== 0);
 
-  const draw = ({ content: c, alarm, causes }: Picture) =>
-    c.kind === 'dashboard' ? (
-      <DashboardView
-        dashboard={c.data}
-        sync={state.sync}
-        now={now}
-        alarm={alarm}
-        causes={causes}
-        lostSince={lostSince}
-        serverError={serverError}
-      />
-    ) : (
-      <WallFrame title={state.name} sync={state.sync} now={now} lostSince={lostSince} serverError={serverError}>
-        {c.kind === 'text' ? <p class="wall-display-text">{c.text}</p> : null}
-      </WallFrame>
-    );
+  // Render again when the rotation moves on, a missing dashboard may be asked for again, the
+  // stand-in time is over or the picture in front gets too old.
+  const due = [
+    rotationDueAt(state.show, shown.rotation),
+    missingDueAt(missing, state, nowMs),
+    handingOver ? poll.since.mono + HANDOVER_MS : undefined,
+    stale ? undefined : answered.current.mono + LOST_MS,
+  ].filter((at): at is number => at !== undefined);
+  const next = due.length === 0 ? undefined : Math.min(...due);
+  useEffect(() => {
+    if (next === undefined) return undefined;
+    const timer = setTimeout(() => setWake((n) => n + 1), Math.max(0, next - performance.now()));
+    return () => clearTimeout(timer);
+  }, [next, wake]);
+
+  const draw = (layer: Layer) => {
+    if (layer.kind === 'grid') return <DashboardGrid dashboard={layer.data} now={now} causes={layer.causes} />;
+    if (layer.kind === 'text') return <p class="wall-display-text">{layer.text}</p>;
+    return null;
+  };
 
   const old = leaving.current;
   return (
-    <div class="wall wall-layers">
-      {old !== undefined && (
-        <div key={old.content.key} class="wall-layer is-leaving" aria-hidden="true">
-          {draw(old)}
+    <WallFrame
+      title={title}
+      sync={state.sync}
+      now={now}
+      alarm={bandOf(state, shown)}
+      lostSince={lostSince}
+      serverError={serverError}
+    >
+      <div class="wall-layers">
+        {old !== undefined && (
+          <div key={old.key} class="wall-layer is-leaving" aria-hidden="true">
+            {draw(old)}
+          </div>
+        )}
+        <div key={front.key} class={old !== undefined ? 'wall-layer is-entering' : 'wall-layer'}>
+          {draw(front)}
         </div>
-      )}
-      <div key={front.content.key} class={old !== undefined ? 'wall-layer is-entering' : 'wall-layer'}>
-        {draw(front)}
       </div>
-    </div>
+    </WallFrame>
   );
 }
 
 /** A sentence on the wall's dark root, before a display can be shown. */
-function Notice({ text, warning = false }: { text: string; warning?: boolean }) {
+function Notice({ text: sentence, warning = false }: { text: string; warning?: boolean }) {
   return (
     <div class="wall">
       <main class={warning ? 'wall-notice is-warning' : 'wall-notice'}>
-        <p class="wall-notice-text">{text}</p>
+        <p class="wall-notice-text">{sentence}</p>
       </main>
     </div>
   );
+}
+
+/** Removes `#token` from the address once the display has started, so a reload does not ask again. */
+function dropHash(): void {
+  if (window.location.hash === '') return;
+  const { pathname, search } = window.location;
+  window.history.replaceState(window.history.state, '', pathname + search);
 }
 
 interface Props {
@@ -240,7 +258,8 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
   const poll = useDisplayState(id, form === undefined, seed, (withToken) => {
     setForm(withToken ? { message: 'The token of this display is no longer valid.' } : {});
   });
-  const stateLost = useFailingFor(poll.staleSince);  useNewVersion(reload, form === undefined && poll.state !== undefined && poll.error === undefined);
+  const stateLost = useFailingFor(poll.staleSince);
+  useNewVersion(reload, form === undefined && poll.state !== undefined && poll.error === undefined);
 
   const name = poll.state?.name;
   useEffect(() => {
@@ -253,10 +272,7 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
         id={id}
         message={form.message}
         onStart={(state) => {
-          // Started: a reload must not ask again.
-          if (window.location.hash !== '') {
-            window.history.replaceState(window.history.state, '', window.location.pathname + window.location.search);
-          }
+          dropHash();
           setSeed(state);
           setForm(undefined);
         }}
@@ -275,5 +291,14 @@ export function DisplayPage({ id, reload = reloadPage }: Props) {
       />
     );
   }
-  return <RunningDisplay id={id} state={poll.state} now={now} stateLost={stateLost} stateError={poll.error} />;
+  return (
+    <RunningDisplay
+      id={id}
+      state={poll.state}
+      answers={poll.answers}
+      now={now}
+      stateLost={stateLost}
+      stateError={poll.error}
+    />
+  );
 }

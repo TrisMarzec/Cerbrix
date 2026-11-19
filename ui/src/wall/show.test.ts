@@ -1,5 +1,17 @@
 import type { DisplayState } from '../api/types';
-import { everyParts, parseEvery, whatToShow, type Rotation } from './show';
+import {
+  everyParts,
+  followShow,
+  MISSING_RETRY_MS,
+  missingDueAt,
+  NO_MISSING,
+  noteMissing,
+  parseEvery,
+  rotationDueAt,
+  stillMissing,
+  whatToShow,
+  type Rotation,
+} from './show';
 
 const NOTHING = new Set<string>();
 
@@ -170,6 +182,11 @@ describe('whatToShow', () => {
     expect(whatToShow(shorter, { index: 2, since: 1000 }, 2000, NOTHING).dashboard).toBe('a');
   });
 
+  it('advances exactly one step when the clock jumps by hours (a sleeping tab, a suspended machine)', () => {
+    const later = whatToShow(state(), START, 1000 + 5 * 3_600_000, NOTHING);
+    expect(later).toEqual({ dashboard: 'b', rotation: { index: 1, since: 1000 + 5 * 3_600_000 } });
+  });
+
   it('gives the same answer for the same inputs and changes none of them', () => {
     const s = state({ target: 'x', waiting: ['y'] });
     const rotation = { index: 1, since: 1000 };
@@ -180,5 +197,72 @@ describe('whatToShow', () => {
     expect(JSON.stringify(s)).toBe(frozen);
     expect(rotation).toEqual({ index: 1, since: 1000 });
     expect([...missing]).toEqual(['c']);
+  });
+});
+
+describe('rotationDueAt', () => {
+  it('is the end of the current interval, and nothing for a fixed or held rotation', () => {
+    expect(rotationDueAt({ rotate: ['a', 'b'], every: '30s' }, { index: 0, since: 1000 })).toBe(31_000);
+    expect(rotationDueAt({ rotate: ['a', 'b'], every: '1s' }, { index: 0, since: 1000 })).toBe(6000);
+    expect(rotationDueAt({ dashboard: 'a' }, { index: 0, since: 1000 })).toBeUndefined();
+    const held = whatToShow(state({ target: 'x' }), START, 2000, NOTHING).rotation;
+    expect(rotationDueAt({ rotate: ['a', 'b'], every: '30s' }, held)).toBeUndefined();
+  });
+});
+
+describe('followShow', () => {
+  const rotation = { index: 2, since: 1000 };
+
+  it('keeps the rotation while the setting stays the same', () => {
+    const show = { rotate: ['a', 'b', 'c'], every: '30s' };
+    expect(followShow(show, { rotate: ['a', 'b', 'c'], every: '30s' }, rotation, 9000)).toBe(rotation);
+  });
+
+  it.each([
+    ['another interval', { rotate: ['a', 'b', 'c'], every: '1m' }],
+    ['another list', { rotate: ['a', 'c'], every: '30s' }],
+    ['a fixed dashboard', { dashboard: 'a' }],
+  ])('starts over at the first dashboard for %s', (_, show) => {
+    const next = followShow({ rotate: ['a', 'b', 'c'], every: '30s' }, show, rotation, 9000);
+    expect(next).toEqual({ index: 0, since: 9000 });
+  });
+});
+
+describe('the missing dashboards', () => {
+  const s = state();
+
+  it('holds a rotation entry out for five minutes after its 404', () => {
+    const missing = noteMissing(NO_MISSING, s, 'b', 1000, undefined);
+    expect([...stillMissing(missing, s, 1000, 1)]).toEqual(['b']);
+    expect([...stillMissing(missing, s, 1000 + MISSING_RETRY_MS - 1, 50)]).toEqual(['b']);
+    expect([...stillMissing(missing, s, 1000 + MISSING_RETRY_MS, 50)]).toEqual([]);
+    expect(missingDueAt(missing, s, 2000)).toBe(1000 + MISSING_RETRY_MS);
+    expect(missingDueAt(missing, s, 1000 + MISSING_RETRY_MS)).toBeUndefined();
+  });
+
+  it('holds the alarm target out only until the next state answer', () => {
+    // Asked for as the target in state answer 7.
+    const missing = noteMissing(NO_MISSING, s, 'x', 1000, 7);
+    expect([...stillMissing(missing, s, 1000, 7)]).toEqual(['x']);
+    expect([...stillMissing(missing, s, 2000, 8)]).toEqual([]);
+    // No timer for it: the next state answer decides.
+    expect(missingDueAt(missing, s, 2000)).toBeUndefined();
+  });
+
+  it('tries every dashboard again when the allowed list changes', () => {
+    const missing = noteMissing(noteMissing(NO_MISSING, s, 'b', 1000, undefined), s, 'x', 1000, 3);
+    expect(stillMissing(missing, s, 2000, 3).size).toBe(2);
+    const changed = state({ allowed: ['a', 'b', 'c'] });
+    expect(stillMissing(missing, changed, 2000, 3).size).toBe(0);
+    expect(missingDueAt(missing, changed, 2000)).toBeUndefined();
+    // A 404 under the new list starts a new set.
+    expect([...stillMissing(noteMissing(missing, changed, 'c', 2000, undefined), changed, 2000, 3)]).toEqual(['c']);
+  });
+
+  it('changes nothing it is given', () => {
+    const missing = noteMissing(NO_MISSING, s, 'b', 1000, undefined);
+    noteMissing(missing, s, 'c', 2000, undefined);
+    expect([...missing.entries.keys()]).toEqual(['b']);
+    expect(NO_MISSING.entries.size).toBe(0);
   });
 });

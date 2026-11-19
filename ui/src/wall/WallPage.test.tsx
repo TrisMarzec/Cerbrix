@@ -90,6 +90,22 @@ describe('WallPage', () => {
     expect(document.title).toBe('kunde-a · Cerbrix');
   });
 
+  it('keeps one frame from before the first answer to the dashboard, idle state included', async () => {
+    let answer: (a: { json: unknown }) => void = () => {};
+    await open({ [DASHBOARD]: () => new Promise((resolve) => (answer = resolve)) });
+    const frame = document.querySelector('.wall');
+    const header = document.querySelector('.wall-header');
+    await advance(3000);
+    expect(frame).toHaveClass('is-idle');
+    answer({ json: kundeA });
+    await advance(0);
+    await advance(0);
+    expect(title()).toBe('Kunde A');
+    expect(document.querySelector('.wall')).toBe(frame);
+    expect(document.querySelector('.wall-header')).toBe(header);
+    expect(frame).toHaveClass('is-idle');
+  });
+
   it('asks for the dashboard and the status every 5 seconds', async () => {
     await open({ [DASHBOARD]: { json: kundeA } });
     expect(mock.count(DASHBOARD)).toBe(1);
