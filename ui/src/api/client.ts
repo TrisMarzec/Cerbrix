@@ -102,25 +102,33 @@ function dateOf(response: Response): Date | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
+/**
+ * The `Date` header has a resolution of one second: a difference that moves by this much or less
+ * is the same clock, and keeping it keeps the server-corrected time from wobbling on every answer.
+ */
+const SKEW_TOLERANCE_MS = 2000;
+
 let skewMs = 0;
 
 /**
  * Records the server's clock from the `Date` header of an answer: how far it is ahead of the
- * browser's. Every answer through `api` records it; code that fetches by itself calls this.
+ * browser's. Every answer through `api` records it; code that fetches by itself calls this. The
+ * recorded difference changes only when the new one differs from it by more than two seconds.
  */
 export function recordServerDate(date: Date | undefined): void {
-  if (date !== undefined) skewMs = date.getTime() - Date.now();
+  if (date === undefined) return;
+  const next = date.getTime() - Date.now();
+  if (Math.abs(next - skewMs) > SKEW_TOLERANCE_MS) skewMs = next;
 }
 
-/** How far the server's clock is ahead of the browser's, in ms, from the last dated answer; 0 before one. */
+/** How far the server's clock is ahead of the browser's, in ms, from the dated answers; 0 before one. */
 export function serverSkewMs(): number {
   return skewMs;
 }
 
-interface Dated<T> {
-  data: T;
-  /** The `Date` header of the answer; undefined when it is missing or not a date. */
-  serverDate: Date | undefined;
+/** Forgets the recorded difference, as before the first answer; for tests. */
+export function resetServerSkew(): void {
+  skewMs = 0;
 }
 
 interface Options {
@@ -137,7 +145,7 @@ async function exchange<T>(
   signal: AbortSignal,
   options: Options,
   started: number,
-): Promise<Dated<T>> {
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
@@ -150,6 +158,7 @@ async function exchange<T>(
   } catch {
     throw networkError();
   }
+  recordServerDate(dateOf(response));
   if (!response.ok) {
     const current = started === generation && options.signal?.aborted !== true;
     // The login request answers 401 for a wrong password: that is not a lost session.
@@ -160,11 +169,9 @@ async function exchange<T>(
     }
     throw await errorFrom(response);
   }
-  const serverDate = dateOf(response);
-  recordServerDate(serverDate);
-  if (response.status === 204) return { data: undefined as T, serverDate };
+  if (response.status === 204) return undefined as T;
   try {
-    return { data: (await response.json()) as T, serverDate };
+    return (await response.json()) as T;
   } catch {
     if (signal.aborted) throw networkError();
     throw new ApiError(response.status, 'internal', 'The server sent an answer that is not JSON');
@@ -175,10 +182,10 @@ async function exchange<T>(
  * One request with a time limit: the caller's signal and the limit both abort it, and either ends
  * the promise at once with a network error, also when fetch or the body does not react to the abort.
  */
-function request<T>(method: string, path: string, init: RequestInit, options: Options): Promise<Dated<T>> {
+function request<T>(method: string, path: string, init: RequestInit, options: Options): Promise<T> {
   const started = generation;
   const controller = new AbortController();
-  return new Promise<Dated<T>>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     const stop = () => {
       controller.abort();
       reject(networkError());
@@ -206,21 +213,12 @@ function request<T>(method: string, path: string, init: RequestInit, options: Op
 
 export const api = {
   get<T>(path: string, query?: Query, signal?: AbortSignal): Promise<T> {
-    return request<T>('GET', withQuery(path, query), {}, { signal, notify: true, limitMs: READ_LIMIT_MS }).then(
-      (answer) => answer.data,
-    );
-  },
-
-  /** Like `get`, and also gives the `Date` header of the answer (the server's clock). */
-  getDated<T>(path: string, query?: Query, signal?: AbortSignal): Promise<Dated<T>> {
     return request<T>('GET', withQuery(path, query), {}, { signal, notify: true, limitMs: READ_LIMIT_MS });
   },
 
   /** Like `get`, but a 401 or 403 is not reported to the handlers (the session check itself). */
   probe<T>(path: string): Promise<T> {
-    return request<T>('GET', BASE + path, {}, { notify: false, limitMs: READ_LIMIT_MS }).then(
-      (answer) => answer.data,
-    );
+    return request<T>('GET', BASE + path, {}, { notify: false, limitMs: READ_LIMIT_MS });
   },
 
   send<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
@@ -229,6 +227,6 @@ export const api = {
       body === undefined && method === 'DELETE'
         ? {}
         : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) };
-    return request<T>(method, BASE + path, init, options).then((answer) => answer.data);
+    return request<T>(method, BASE + path, init, options);
   },
 };

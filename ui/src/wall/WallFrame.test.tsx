@@ -29,6 +29,7 @@ interface Props {
   sync?: SyncState;
   alarm?: WallAlarm;
   lostSince?: Date;
+  serverError?: boolean;
   back?: string;
   children?: ComponentChildren;
 }
@@ -199,6 +200,15 @@ describe('WallFrame without connection', () => {
     expect(lost).toHaveClass('is-lost');
     expect(screen.queryByText('In sync')).toBeNull();
     expect(lost.closest('[role="status"]')).not.toBeNull();
+    expect(container.querySelector('.wall-body')).toHaveClass('is-lost');
+  });
+
+  it('says that the server reported an error, with the same warning and dimming, for an answered error', () => {
+    const { container } = show({ sync: sync(), lostSince: LOST, serverError: true });
+    const lost = screen.getByText(/^The server reported an error since/);
+    expect(lost).toHaveTextContent('The server reported an error since 14:29');
+    expect(lost).toHaveClass('is-lost');
+    expect(screen.queryByText(/No connection/)).toBeNull();
     expect(container.querySelector('.wall-body')).toHaveClass('is-lost');
   });
 

@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/preact';
 import type uPlot from 'uplot';
 import { vi } from 'vitest';
 
-import { recordServerDate } from '../api/client';
+import { resetServerSkew } from '../api/client';
 import { App } from '../app';
 import { navigate } from '../lib/router';
 import { NOW, dashboardDetailFixture, statusFixture } from '../test/fixtures';
@@ -48,7 +48,7 @@ beforeEach(() => {
 afterEach(() => {
   mock.restore();
   releaseMeasure();
-  recordServerDate(new Date());
+  resetServerSkew();
   if (innerWidth !== undefined) Object.defineProperty(window, 'innerWidth', innerWidth);
   vi.useRealTimers();
   window.history.replaceState(null, '', '/');
@@ -134,12 +134,77 @@ describe('WallPage', () => {
   });
 
   it('shows the frame with the id and, after 15 s, the lost connection when the first load fails', async () => {
-    const { container } = await open({ [DASHBOARD]: { status: 500, json: { error: 'internal', message: 'boom' } } });
+    const { container } = await open({ [DASHBOARD]: 'network' });
     expect(title()).toBe('kunde-a');
     expect(container.querySelector('.wall')).not.toBeNull();
     expect(screen.queryByText(/No connection to the server/)).not.toBeInTheDocument();
     await advance(15_000);
     expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
+  });
+
+  it('says that the server reported an error, not that the connection is lost, for answered errors', async () => {
+    const { container } = await open({ [DASHBOARD]: { json: kundeA } });
+    mock.on(DASHBOARD, { status: 500, json: { error: 'internal', message: 'boom' } });
+    await advance(5000);
+    await advance(14_999);
+    expect(screen.queryByText(/reported an error|No connection/)).not.toBeInTheDocument();
+    expect(dimmed(container)).toBe(false);
+    await advance(1);
+    expect(screen.getByText(/^The server reported an error since/)).toHaveTextContent(
+      'The server reported an error since 14:30',
+    );
+    expect(screen.queryByText(/No connection/)).not.toBeInTheDocument();
+    expect(dimmed(container)).toBe(true);
+    // The picture stays, dimmed.
+    expect(title()).toBe('Kunde A');
+    expect(container.querySelectorAll('.wall-panel')).toHaveLength(4);
+    mock.on(DASHBOARD, { json: kundeA });
+    await advance(5000);
+    expect(screen.queryByText(/reported an error/)).not.toBeInTheDocument();
+    expect(dimmed(container)).toBe(false);
+  });
+
+  it('measures the 15 s on a monotonic clock, so a browser clock jump cannot delay the notice', async () => {
+    await open({ [DASHBOARD]: { json: kundeA } });
+    mock.on(DASHBOARD, 'network');
+    await advance(5000);
+    // The browser clock jumps an hour back right after the first failure.
+    vi.setSystemTime(Date.now() - 3_600_000);
+    await advance(15_000);
+    expect(screen.getByText(/No connection to the server since/)).toBeInTheDocument();
+  });
+
+  it('stops showing the sync state when the status cannot be asked for 15 s, and shows it again later', async () => {
+    const outOfSync = { ...statusFixture().sync, status: 'out_of_sync' as const };
+    await open({ [DASHBOARD]: { json: kundeA }, 'GET /status': { json: statusFixture({ sync: outOfSync }) } });
+    expect(screen.getByText('Out of sync')).toBeInTheDocument();
+    expect(screen.getByText(/^Out of sync since/)).toBeInTheDocument();
+    mock.on('GET /status', 'network');
+    await advance(5000);
+    await advance(14_999);
+    // Failing for less than 15 s: the last state stays.
+    expect(screen.getByText(/^Out of sync since/)).toBeInTheDocument();
+    await advance(1);
+    expect(screen.queryByText(/Out of sync/)).not.toBeInTheDocument();
+    expect(screen.queryByText('In sync')).not.toBeInTheDocument();
+    // The dashboard still answers: no lost connection, nothing dimmed.
+    expect(screen.queryByText(/No connection|reported an error/)).not.toBeInTheDocument();
+    expect(title()).toBe('Kunde A');
+    mock.on('GET /status', { json: statusFixture() });
+    await advance(5000);
+    expect(screen.getByText('In sync')).toBeInTheDocument();
+  });
+
+  it('shows the not-found page for a 404 after the dashboard was shown, and the dashboard when it is back', async () => {
+    const { container } = await open({ [DASHBOARD]: { json: kundeA } });
+    mock.on(DASHBOARD, { status: 404, json: { error: 'not_found', message: 'no such dashboard' } });
+    await advance(5000);
+    expect(screen.getByText('There is no dashboard named kunde-a.')).toBeInTheDocument();
+    expect(container.querySelector('.wall-panel')).toBeNull();
+    mock.on(DASHBOARD, { json: kundeA });
+    await advance(5000);
+    expect(title()).toBe('Kunde A');
+    expect(container.querySelectorAll('.wall-panel')).toHaveLength(4);
   });
 
   it('says that there is no such dashboard for 404, with a link back to the dashboards', async () => {

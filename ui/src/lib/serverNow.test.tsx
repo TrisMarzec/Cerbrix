@@ -1,12 +1,12 @@
 import { act, render } from '@testing-library/preact';
 
-import { recordServerDate } from '../api/client';
+import { recordServerDate, resetServerSkew } from '../api/client';
 import { NOW } from '../test/fixtures';
 import { advance } from '../test/timers';
-import { useWallNow } from './clock';
+import { useServerNow } from './serverNow';
 
-function Clock({ everyMs }: { everyMs?: number }) {
-  const now = useWallNow(everyMs);
+function Clock({ everyMs }: { everyMs: number }) {
+  const now = useServerNow(everyMs);
   return <p>{now.toISOString()}</p>;
 }
 
@@ -25,20 +25,20 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  recordServerDate(new Date());
+  resetServerSkew();
   Reflect.deleteProperty(document, 'hidden');
   vi.useRealTimers();
 });
 
-describe('useWallNow', () => {
+describe('useServerNow', () => {
   it('is the browser time corrected by the recorded server clock difference', () => {
     recordServerDate(new Date(NOW.getTime() + 90_000));
-    const { container } = render(<Clock />);
+    const { container } = render(<Clock everyMs={5000} />);
     expect(shown(container)).toBe(new Date(NOW.getTime() + 90_000).toISOString());
   });
 
-  it('moves on every 5 seconds by default, and at the given interval', async () => {
-    const { container, unmount } = render(<Clock />);
+  it('moves on at the given interval', async () => {
+    const { container, unmount } = render(<Clock everyMs={5000} />);
     await advance(4999);
     expect(shown(container)).toBe(NOW.toISOString());
     await advance(1);
@@ -59,7 +59,7 @@ describe('useWallNow', () => {
 
   it('leaves no timer and no listener after unmount', async () => {
     const remove = vi.spyOn(document, 'removeEventListener');
-    const { unmount } = render(<Clock />);
+    const { unmount } = render(<Clock everyMs={5000} />);
     // Preact runs effects after its next frame (a 35 ms timer) and cleanups likewise.
     await advance(100);
     expect(vi.getTimerCount()).toBe(1);

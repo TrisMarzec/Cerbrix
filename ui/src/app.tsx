@@ -16,7 +16,7 @@ export function App() {
   if (display?.id !== undefined) return <DisplayPage key={display.id} id={display.id} />;
   const wall = match('/wall/:id', path);
   return (
-    <SessionProvider>
+    <SessionProvider wall={wall?.id !== undefined}>
       {wall?.id !== undefined ? <WallPage key={wall.id} id={wall.id} /> : <Shell />}
     </SessionProvider>
   );

@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/preact';
 
+import { resetServerSkew } from '../api/client';
 import type { Role, Status } from '../api/types';
 import { App } from '../app';
 import { NOW, statusFixture } from '../test/fixtures';
@@ -14,6 +15,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // The clock difference is recorded once per module: the next test starts without it.
+  resetServerSkew();
   mock.restore();
   vi.useRealTimers();
   window.history.replaceState(null, '', '/');

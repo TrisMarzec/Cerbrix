@@ -14,6 +14,8 @@ interface Props {
   /** The ids of the alarms that caused a switch to this dashboard; every problems panel marks them. */
   causes: string[];
   lostSince?: Date;
+  /** With `lostSince`: the server answers, but with an error. */
+  serverError?: boolean;
   back?: string;
 }
 
@@ -40,13 +42,25 @@ function PanelContent({ panel, now, causes }: { panel: Panel; now: Date; causes:
 }
 
 /** One dashboard on the wall: the frame with its name, and its panels on the 12 by 6 grid. */
-export function DashboardView({ dashboard, sync, now, alarm, causes, lostSince, back }: Props) {
+export function DashboardView({ dashboard, sync, now, alarm, causes, lostSince, serverError, back }: Props) {
   return (
-    <WallFrame title={dashboard.name} sync={sync} now={now} alarm={alarm} lostSince={lostSince} back={back}>
-      <PanelGrid
-        panels={dashboard.panels}
-        render={(panel) => <PanelContent panel={panel} now={now} causes={causes} />}
-      />
+    <WallFrame
+      title={dashboard.name}
+      sync={sync}
+      now={now}
+      alarm={alarm}
+      lostSince={lostSince}
+      serverError={serverError}
+      back={back}
+    >
+      {dashboard.panels.length === 0 ? (
+        <p class="wall-no-panels">This dashboard has no panels.</p>
+      ) : (
+        <PanelGrid
+          panels={dashboard.panels}
+          render={(panel) => <PanelContent panel={panel} now={now} causes={causes} />}
+        />
+      )}
     </WallFrame>
   );
 }

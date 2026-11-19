@@ -30,6 +30,8 @@ interface Props {
   alarm?: WallAlarm;
   /** Since when no answer came from the server: the header says so and the content dims. */
   lostSince?: Date;
+  /** With `lostSince`: the server answered, but with an error, so the header says that instead. */
+  serverError?: boolean;
   /** Where "Back to the desk" leads; a display has none. */
   back?: string;
   children: ComponentChildren;
@@ -133,7 +135,7 @@ function useIdle(): boolean {
  * state and the clock, the switch band and the Out Of Sync band, then the content, filling the
  * screen exactly. It takes no input; only "Back to the desk" can be focused, and only with `back`.
  */
-export function WallFrame({ title, sync, now, alarm, lostSince, back, children }: Props) {
+export function WallFrame({ title, sync, now, alarm, lostSince, serverError = false, back, children }: Props) {
   const idle = useIdle();
   const nowIso = now.toISOString();
   return (
@@ -148,7 +150,8 @@ export function WallFrame({ title, sync, now, alarm, lostSince, back, children }
           <span class="wall-state" role="status">
             {lostSince !== undefined ? (
               <span class="wall-sync is-lost">
-                No connection to the server since <TimeText iso={lostSince.toISOString()} now={now} />
+                {serverError ? 'The server reported an error since ' : 'No connection to the server since '}
+                <TimeText iso={lostSince.toISOString()} now={now} />
               </span>
             ) : (
               <SyncText sync={sync} />

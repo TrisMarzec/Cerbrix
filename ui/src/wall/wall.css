@@ -551,3 +551,41 @@
   max-width: 100%;
   overflow-wrap: anywhere;
 }
+
+/* "This dashboard has no panels." in the grid's place. */
+.wall .wall-no-panels {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--u) * 42);
+  font-size: var(--wall-text);
+  color: var(--dim);
+  text-align: center;
+}
+
+/* The session gate on a wall path: the desk's gate, at a wall size on the wall's background. */
+.wall .wall-gate {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: none;
+  gap: calc(var(--u) * 26);
+  padding: calc(var(--u) * 42);
+  font-size: var(--wall-text);
+}
+
+.wall .wall-gate .btn {
+  font-size: var(--wall-meta);
+  padding: calc(var(--u) * 8) calc(var(--u) * 20);
+}
+
+/* Links inside the wall root look and focus as on the desk. */
+.wall a {
+  color: var(--git);
+  text-decoration: underline;
+}
+
+.wall a:focus-visible {
+  outline: calc(var(--u) * 3) solid var(--git);
+  outline-offset: calc(var(--u) * 3);
+}

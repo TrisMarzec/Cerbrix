@@ -3,11 +3,12 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 import { serverSkewMs } from '../api/client';
 
 /**
- * The wall's clock: the browser's time corrected by the server's clock (the `Date` header of the
- * last answer), so the clock and every "since" compare with the server's timestamps. It moves on
- * every `everyMs` and at once when the tab becomes visible (a hidden tab's timers are slowed).
+ * The one clock of the UI: the browser's time corrected by the server's clock (the difference the
+ * API client records from the `Date` header of its answers), so durations and "x ago" compare
+ * server timestamps with the server's time. It moves on every `everyMs` and at once when the tab
+ * becomes visible (a hidden tab's timers are slowed down); the interval ends on unmount.
  */
-export function useWallNow(everyMs = 5000): Date {
+export function useServerNow(everyMs: number): Date {
   const [tick, setTick] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => {
@@ -22,7 +23,7 @@ export function useWallNow(everyMs = 5000): Date {
       document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [everyMs]);
-  // A newer difference applies at the next render, without waiting for the next tick.
+  // A newly recorded difference applies at the next render, without waiting for the next tick.
   const skew = serverSkewMs();
   return useMemo(() => new Date(tick + skew), [tick, skew]);
 }

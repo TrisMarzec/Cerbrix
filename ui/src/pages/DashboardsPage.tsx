@@ -137,7 +137,10 @@ function DashboardTable({ items }: { items: DashboardSummary[] }) {
               </td>
               <td class="right num">{d.priority}</td>
               <td>
-                <Link href={`/wall/${seg(d.id)}`}>Open on this screen</Link>
+                {/* The hidden name makes each link's accessible name unique; the row shows it. Two spaces collapse into one. */}
+                <Link href={`/wall/${seg(d.id)}`}>
+                  Open <span class="visually-hidden">{d.name}</span> on this screen
+                </Link>
               </td>
             </tr>
           ))}

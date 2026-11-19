@@ -5,6 +5,7 @@ import {
   onSessionDoubt,
   onUnauthorized,
   recordServerDate,
+  resetServerSkew,
   seg,
   serverSkewMs,
 } from './client';
@@ -227,22 +228,11 @@ describe('time limit', () => {
 });
 
 describe('server date', () => {
-  it('gives the Date header of the answer with the data', async () => {
-    mock = mockFetch({
-      'GET /status': { json: { ok: 1 }, headers: { Date: 'Tue, 17 Nov 2026 13:30:00 GMT' } },
-    });
-    const answer = await api.getDated<{ ok: number }>('/status');
-    expect(answer.data).toEqual({ ok: 1 });
-    expect(answer.serverDate?.toISOString()).toBe('2026-11-17T13:30:00.000Z');
+  afterEach(() => {
+    resetServerSkew();
   });
 
-  it('gives no date when the header is missing or not a date', async () => {
-    mock = mockFetch({ 'GET /status': [{ json: {} }, { json: {}, headers: { Date: 'soon' } }] });
-    expect((await api.getDated('/status')).serverDate).toBeUndefined();
-    expect((await api.getDated('/status')).serverDate).toBeUndefined();
-  });
-
-  it('records how far the server clock is ahead from the last answer with a date, of any request', async () => {
+  it('records how far the server clock is ahead from the answers with a date, of any request', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-11-17T13:30:00.000Z'));
     mock = mockFetch({
@@ -250,6 +240,7 @@ describe('server date', () => {
       'GET /hosts': [{ json: {} }, { json: {}, headers: { Date: 'soon' } }],
       'GET /status': { json: {}, headers: { Date: 'Tue, 17 Nov 2026 13:29:58 GMT' } },
     });
+    expect(serverSkewMs()).toBe(0);
     await api.get('/dashboards/a');
     expect(serverSkewMs()).toBe(7000);
     // An answer without a usable date keeps the last difference.
@@ -258,7 +249,25 @@ describe('server date', () => {
     expect(serverSkewMs()).toBe(7000);
     await api.get('/status');
     expect(serverSkewMs()).toBe(-2000);
-    recordServerDate(new Date());
-    expect(serverSkewMs()).toBe(0);
+  });
+
+  it('records the date of an error answer too', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T13:30:00.000Z'));
+    mock = mockFetch({ 'GET /hosts': { status: 500, json: {}, headers: { Date: 'Tue, 17 Nov 2026 13:31:00 GMT' } } });
+    await api.get('/hosts').catch(() => undefined);
+    expect(serverSkewMs()).toBe(60_000);
+  });
+
+  it('keeps the difference while it moves by two seconds or less, the resolution of the header', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T13:30:00.400Z'));
+    recordServerDate(new Date('2026-11-17T13:30:10.000Z'));
+    expect(serverSkewMs()).toBe(9600);
+    recordServerDate(new Date('2026-11-17T13:30:11.000Z'));
+    recordServerDate(new Date('2026-11-17T13:30:08.000Z'));
+    expect(serverSkewMs()).toBe(9600);
+    recordServerDate(new Date('2026-11-17T13:30:07.000Z'));
+    expect(serverSkewMs()).toBe(6600);
   });
 });

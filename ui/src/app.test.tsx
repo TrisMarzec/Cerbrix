@@ -142,10 +142,85 @@ describe('App paths', () => {
   it('shows the display placeholder at /display/<id> without asking for the session', async () => {
     window.history.replaceState(null, '', '/display/x');
     mock = mockFetch({ 'GET /session': { json: { name: 'anna', role: 'viewer' } } });
+    vi.useFakeTimers();
     const { container } = render(<App />);
     expect(container).toHaveTextContent('Wall display x');
-    await Promise.resolve();
+    await advance(100);
     expect(mock.requests).toHaveLength(0);
+  });
+
+  it.each([
+    ['a path below a wall', '/wall/a/b'],
+    ['a malformed escape', '/wall/%E0%A4%A'],
+  ])('shows the desk not-found page for %s', async (_, path) => {
+    window.history.replaceState(null, '', path);
+    mock = mockFetch({
+      'GET /session': { json: { name: 'anna', role: 'viewer' } },
+      'GET /status': { json: statusFixture() },
+    });
+    render(<App />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Page not found' })).toBeInTheDocument();
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument();
+    expect(mock.requests.filter((r) => r.path.startsWith('/dashboards/'))).toHaveLength(0);
+  });
+
+  it('shows the login page in place when a wall poll is answered 401, and the wall again after the login', async () => {
+    window.history.replaceState(null, '', '/wall/kunde-a');
+    vi.useFakeTimers();
+    const kundeA = dashboardDetailFixture({ id: 'kunde-a', name: 'Kunde A' });
+    mock = mockFetch({
+      'GET /session': [{ json: { name: 'anna', role: 'viewer' } }, UNAUTHORIZED],
+      'GET /status': { json: statusFixture() },
+      'GET /dashboards/kunde-a': [{ json: kundeA }, UNAUTHORIZED],
+      'POST /session': { json: { name: 'anna', role: 'viewer' } },
+    });
+    render(<App />);
+    await advance(0);
+    await advance(0);
+    expect(screen.getByRole('heading', { level: 1, name: 'Kunde A' })).toBeInTheDocument();
+    await advance(5000);
+    expect(screen.getByText('Your session has ended. Log in again.')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/wall/kunde-a');
+
+    vi.useRealTimers();
+    mock.on('GET /dashboards/kunde-a', { json: kundeA });
+    const user = userEvent.setup();
+    await logIn(user);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Kunde A' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/wall/kunde-a');
+  });
+
+  it('shows the unreachable server on the dark wall background, and the wall without a click once it answers', async () => {
+    window.history.replaceState(null, '', '/wall/kunde-a');
+    vi.useFakeTimers();
+    mock = mockFetch({
+      'GET /session': ['network', { json: { name: 'anna', role: 'viewer' } }],
+      'GET /status': { json: statusFixture() },
+      'GET /dashboards/kunde-a': { json: dashboardDetailFixture({ id: 'kunde-a', name: 'Kunde A' }) },
+    });
+    const { container } = render(<App />);
+    // Before the session is known: the wall's background, nothing else.
+    expect(container.firstElementChild).toHaveClass('wall');
+    expect(container.firstElementChild).toBeEmptyDOMElement();
+    await advance(0);
+    const gate = screen.getByText('Could not reach the server');
+    expect(gate.closest('.wall')).toBe(container.firstElementChild);
+    expect(gate.closest('main')).toHaveClass('wall-gate');
+    await advance(4999);
+    expect(mock.count('GET /session')).toBe(1);
+    await advance(1);
+    await advance(0);
+    expect(mock.count('GET /session')).toBe(2);
+    expect(screen.getByRole('heading', { level: 1, name: 'Kunde A' })).toBeInTheDocument();
+    expect(screen.queryByText('Could not reach the server')).not.toBeInTheDocument();
+  });
+
+  it('shows the desk gate without the wall background on other paths', async () => {
+    window.history.replaceState(null, '', '/hosts');
+    mock = mockFetch({ 'GET /session': 'network' });
+    const { container } = render(<App />);
+    expect(await screen.findByText('Could not reach the server')).toBeInTheDocument();
+    expect(container.querySelector('.wall')).toBeNull();
   });
 
   it('still shows the shell for the desk pages', async () => {
@@ -170,7 +245,7 @@ describe('App paths', () => {
     });
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole('link', { name: 'Open on this screen' }));
+    await user.click(await screen.findByRole('link', { name: 'Open Kunde A on this screen' }));
     expect(await screen.findByRole('heading', { level: 1, name: 'Kunde A' })).toBeInTheDocument();
     expect(window.location.pathname).toBe('/wall/kunde-a');
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument();

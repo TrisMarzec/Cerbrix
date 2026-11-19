@@ -130,8 +130,27 @@ describe('DashboardView', () => {
     expect(screen.getByRole('link', { name: 'Back to the desk' })).toHaveAttribute('href', '/dashboards');
   });
 
-  it('shows an empty grid for a dashboard without panels', () => {
+  it('says that a dashboard without panels has none, in place of the grid', () => {
     const { container } = show({ dashboard: dashboardDetailFixture({ panels: [] }) });
-    expect(container.querySelector('.wall-grid')).toBeEmptyDOMElement();
+    expect(container.querySelector('.wall-grid')).toBeNull();
+    expect(container.querySelector('.wall-content > .wall-no-panels')).toHaveTextContent(
+      'This dashboard has no panels.',
+    );
+  });
+
+  it('says that the server reported an error when told so', () => {
+    render(
+      <DashboardView
+        dashboard={dashboardDetailFixture()}
+        now={NOW}
+        causes={[]}
+        lostSince={new Date(NOW.getTime() - 60_000)}
+        serverError
+      />,
+    );
+    expect(screen.getByText(/^The server reported an error since/)).toHaveTextContent(
+      'The server reported an error since 14:29',
+    );
+    expect(screen.queryByText(/No connection/)).not.toBeInTheDocument();
   });
 });
