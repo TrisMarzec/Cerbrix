@@ -2,9 +2,9 @@ import './wall.css';
 
 import type { ComponentChildren } from 'preact';
 
-import type { SyncIssue, SyncState } from '../api/types';
+import type { Severity, SyncIssue, SyncState } from '../api/types';
 import { TimeText } from '../components/TimeText';
-import { clock } from '../lib/format';
+import { clock, severityWord } from '../lib/format';
 import { Link } from '../lib/router';
 import { WallRoot } from './WallRoot';
 
@@ -16,6 +16,8 @@ export interface WallAlarm {
   switchedFrom?: string;
   /** How many more dashboards have an alarm. */
   waiting: number;
+  /** The most urgent alarm of the dashboard shown, and how many more it has (#99). */
+  problem?: { severity: Severity; host: string; summary: string; more: number };
 }
 
 interface Props {
@@ -68,9 +70,14 @@ function SyncText({ sync }: { sync: SyncState | undefined }) {
   }
 }
 
-/** The switch band (D10). The names take the ellipsis; the count after them never shrinks. */
+/**
+ * The switch band (D10) and, on its second line, the most urgent problem (D6): whether or not the
+ * dashboard has a problems panel, it says which host has which problem. The names take the
+ * ellipsis; the counts after them never shrink.
+ */
 function AlarmBand({ alarm }: { alarm: WallAlarm }) {
   const waiting = waitingSentence(alarm.waiting);
+  const problem = alarm.problem;
   return (
     <div class="wall-band is-alarm" role="status">
       <p class="wall-band-line">
@@ -82,6 +89,12 @@ function AlarmBand({ alarm }: { alarm: WallAlarm }) {
           </>
         )}
       </p>
+      {problem !== undefined && (
+        <p class="wall-band-line wall-band-detail">
+          <span class="wall-band-text">{`${severityWord(problem.severity)}: ${problem.host} – ${problem.summary}`}</span>
+          {problem.more > 0 && <span class="wall-band-more">+{problem.more} more</span>}
+        </p>
+      )}
     </div>
   );
 }

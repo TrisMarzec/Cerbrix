@@ -346,6 +346,8 @@ test('the web UI works in a browser', async ({ page, baseURL, browser }) => {
     await expect(screen.getByRole('status').filter({ hasText: /^Alarm: showing/ })).toHaveText(
       new RegExp(`^Alarm: showing ${DASHBOARD}\\.`),
     );
+    // The band names the most urgent problem: which host has it (#99).
+    await expect(screen.locator('.wall-band.is-alarm .wall-band-detail')).toContainText(`: ${HOST} – `);
     // The problem that caused the switch is highlighted (the panel's class for a cause).
     const row = wallProblem(screen);
     await expect(row).toHaveCount(1);

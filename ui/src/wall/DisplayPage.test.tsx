@@ -93,6 +93,7 @@ function displayState(overrides: Partial<DisplayState> = {}): DisplayState {
     target: null,
     causes: [],
     waiting: [],
+    worst: null,
     sync: statusFixture().sync,
     ...overrides,
   };
@@ -164,8 +165,14 @@ function dimmed(): boolean {
   return document.querySelector('.wall-body')?.classList.contains('is-lost') === true;
 }
 
+/** The first line of the alarm band: what is shown and why; `null` without a band. */
 function band(): string | null {
-  return document.querySelector('.wall-band.is-alarm')?.textContent ?? null;
+  return document.querySelector('.wall-band.is-alarm .wall-band-line')?.textContent ?? null;
+}
+
+/** The second line of the alarm band: the most urgent problem; `null` without one. */
+function bandProblem(): string | null {
+  return document.querySelector('.wall-band.is-alarm .wall-band-detail')?.textContent ?? null;
 }
 
 function tokenInput(): HTMLInputElement {
@@ -554,6 +561,24 @@ describe('DisplayPage: what it shows', () => {
     expect(band()).toBeNull();
     await advance(400);
     expect(container.querySelector('.wall-problem.is-cause')).toBeNull();
+  });
+
+  it('names the most urgent problem in the band, with the number of further alarms', async () => {
+    const worst = { host: 'web-01', summary: 'Disk almost full', severity: 'critical', started_at: '2026-11-17T13:00:00Z' } as const;
+    await open({
+      [STATE]: { json: displayState({ target: 'b', causes: [criticalProblem.id], worst }) },
+      [dash('b')]: { json: beta },
+    });
+    expect(band()).toBe('Alarm: showing Beta. Switched from Alpha.');
+    expect(bandProblem()).toBe('Critical: web-01 – Disk almost full');
+
+    mock.on(STATE, { json: displayState({ target: 'b', causes: [criticalProblem.id, 'p2', 'p3'], worst }) });
+    await advance(5000);
+    await settle();
+    expect(bandProblem()).toBe('Critical: web-01 – Disk almost full+2 more');
+    expect(document.querySelector('.wall-band.is-alarm .wall-band-detail .wall-band-more')).toHaveTextContent(
+      /^\+2 more$/,
+    );
   });
 
   it('uses the id in the band for a dashboard without a name, and says nothing of a switch to the shown one', async () => {

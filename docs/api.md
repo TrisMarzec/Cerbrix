@@ -504,11 +504,11 @@ All wall displays, for the desk (not for the monitors). Not paged. `show` is wha
 when nothing is wrong: `{"dashboard": "<id>"}` or `{"rotate": [...], "every": "30s"}`.
 `switch_on_alarm` is `null` or `{"min_severity": ...}`; `dashboards` limits which dashboards an
 alarm may switch to (`null`: all). `token_created_at` says when the display's token was created,
-`null` if it has none; the token itself is never shown again. `target`, `causes` and `waiting` are
-what the display shows because of an alarm right now (see the next route).
+`null` if it has none; the token itself is never shown again. `target`, `causes`, `waiting` and
+`worst` are what the display shows because of an alarm right now (see the next route).
 
 ```json
-{"items":[{"id":"e2e-wall","name":"E2E wall","file":"displays/e2e-wall.json","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"dashboards":["e2e"],"token_created_at":null,"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[]}]}
+{"items":[{"id":"e2e-wall","name":"E2E wall","file":"displays/e2e-wall.json","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"dashboards":["e2e"],"token_created_at":null,"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"worst":{"host":"e2e-host","summary":"no data for 3m","severity":"critical","started_at":"2026-11-16T21:52:10.418204Z"}}]}
 ```
 
 ### `POST /api/v1/displays/{id}/token` (admin)
@@ -544,6 +544,7 @@ this display in `Authorization: Bearer <token>`.
 | `target` | The dashboard to show because of an alarm, or `null` to follow `show`. An alarm is an open problem nobody has acknowledged, at or above `min_severity`, on a host of the dashboard. The dashboard with the highest `priority` wins, then the most urgent alarm. |
 | `causes` | The ids of the alarms of `target`, most urgent first. |
 | `waiting` | The other dashboards that have an alarm, in the order the display would take them. |
+| `worst` | The most urgent alarm of `target`, the one of `causes[0]`: `host` (the host's name), `summary`, `severity` and `started_at`; `null` exactly when `target` is `null`. It holds no user names or comments. The alarm band of the wall shows it. |
 | `sync` | The sync state of the configuration, the same object as `sync` of [`/api/v1/status`](#get-apiv1status-viewer): `status` (`never`, `in_sync` or `out_of_sync`), `active_commit` (the commit whose configuration is in use), `last_success_at`, `last_attempt_at` and `issues`, the list of what the last synchronisation found wrong (`file`, `line`, `column`, `reason`). The wall shows "out of sync since ..., showing the configuration from commit ..." with them. |
 
 ```sh
@@ -551,7 +552,7 @@ curl -sS -H @display.header http://127.0.0.1:18443/api/v1/display/e2e-wall
 ```
 
 ```json
-{"id":"e2e-wall","name":"E2E wall","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"allowed":["e2e"],"names":{"e2e":"E2E"},"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"sync":{"status":"in_sync","active_commit":"253a2994b13aca387e272ff08db9eb858b436b66","last_success_at":"2026-11-16T21:54:32.810398Z","last_attempt_at":"2026-11-16T21:54:50.503921Z","issues":[]}}
+{"id":"e2e-wall","name":"E2E wall","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"allowed":["e2e"],"names":{"e2e":"E2E"},"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"worst":{"host":"e2e-host","summary":"no data for 3m","severity":"critical","started_at":"2026-11-16T21:52:10.418204Z"},"sync":{"status":"in_sync","active_commit":"253a2994b13aca387e272ff08db9eb858b436b66","last_success_at":"2026-11-16T21:54:32.810398Z","last_attempt_at":"2026-11-16T21:54:50.503921Z","issues":[]}}
 ```
 
 (`display.header` is a file with the one line `Authorization: Bearer <token>`.) Poll every 5 to

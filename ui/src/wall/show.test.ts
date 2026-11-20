@@ -25,6 +25,7 @@ function state(overrides: Partial<DisplayState> = {}): DisplayState {
     target: null,
     causes: [],
     waiting: [],
+    worst: null,
     sync: { status: 'in_sync', active_commit: null, last_success_at: null, last_attempt_at: null, issues: [] },
     ...overrides,
   };

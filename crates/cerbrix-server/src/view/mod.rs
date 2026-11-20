@@ -93,6 +93,11 @@ impl From<SyncState> for SyncView {
     }
 }
 
+/// `OffsetDateTime` as an RFC 3339 string in UTC.
+pub fn serialize_time<S: Serializer>(t: &OffsetDateTime, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&rfc3339(*t))
+}
+
 /// `Option<OffsetDateTime>` as an RFC 3339 string or `null`.
 pub fn serialize_time_opt<S: Serializer>(
     t: &Option<OffsetDateTime>,

@@ -236,6 +236,7 @@ export function displayFixture(overrides: Partial<Display> = {}): Display {
     target: null,
     causes: [],
     waiting: [],
+    worst: null,
     ...overrides,
   };
 }
