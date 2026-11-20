@@ -104,6 +104,7 @@ pub async fn serve(
             shutdown_token.clone(),
         ))
     });
+    let client_address_header = config.auth.client_address_header_name()?;
     let state = AppState {
         store,
         metrics: Arc::new(metrics),
@@ -112,6 +113,7 @@ pub async fn serve(
         queue_mail,
         passwords: PasswordGate::default(),
         logins: Arc::default(),
+        client_address_header,
     };
     let app = router(state).layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,

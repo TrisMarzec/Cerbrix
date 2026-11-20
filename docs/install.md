@@ -115,7 +115,8 @@ refusing an address. The count is kept in memory and starts afresh when the serv
 This limits how fast one address can guess passwords, and how many users it can keep locked. It
 does not prevent somebody who knows a user name from keeping that user locked: five wrong
 passwords lock a user, fewer than the ten an address may try in 5 minutes, so one address is
-still enough for one user.
+still enough for one user. And it offers little against somebody with many addresses, such as a
+large IPv6 range, who gets ten tries for each address (for IPv6, each /64).
 
 ### Behind a reverse proxy
 

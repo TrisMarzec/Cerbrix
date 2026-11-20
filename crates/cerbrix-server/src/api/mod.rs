@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::http::StatusCode;
+use axum::http::{HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use cerbrix_common::ErrorBody;
@@ -36,6 +36,8 @@ pub struct AppState {
     pub passwords: PasswordGate,
     /// Failed logins per client address; one for the whole process.
     pub logins: Arc<LoginThrottle>,
+    /// `auth.client_address_header`, parsed once at start.
+    pub client_address_header: Option<HeaderName>,
 }
 
 /// Lets a warning through at most once per hour per host. Process-local and bounded: it

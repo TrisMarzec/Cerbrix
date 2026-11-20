@@ -356,6 +356,16 @@ fn passwords_busy() -> ApiError {
     )
 }
 
+/// The answer to a login from a client address with too many failed logins (see
+/// `LoginThrottle`). The same for every user name; nothing was checked.
+fn logins_refused() -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too_many_attempts",
+        "too many failed logins from this address; try again in a few minutes",
+    )
+}
+
 /// The answer to a failed hash through the gate.
 fn hash_failed(e: crate::auth::HashError) -> ApiError {
     match e {
@@ -712,6 +722,7 @@ pub(crate) mod testing {
             let app = crate::api::AppState {
                 store: store.clone(),
                 metrics: metrics.clone(),
+                client_address_header: config.auth.client_address_header_name().unwrap(),
                 config,
                 warnings: Arc::default(),
                 queue_mail,
@@ -749,6 +760,7 @@ pub(crate) mod testing {
                 queue_mail: false,
                 passwords: crate::auth::PasswordGate::default(),
                 logins: Arc::default(),
+                client_address_header: None,
             };
             Self {
                 router: crate::api::router(app.clone()),

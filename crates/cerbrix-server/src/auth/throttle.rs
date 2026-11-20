@@ -7,7 +7,7 @@
 //! [`MAX_ENTRIES`] addresses.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -112,6 +112,10 @@ impl LoginThrottle {
 /// The address a request comes from: the right-most address in the last `header` line when
 /// the setting names a header, otherwise (and when that header is missing or holds no
 /// address) the peer address of the connection.
+///
+/// The line is split on its bytes, so that what a client wrote to the left of the part the
+/// proxy appended cannot make the line unreadable. The right-most part may carry a port or
+/// brackets: `1.2.3.4:5678`, `[2001:db8::1]`, `[2001:db8::1]:443`.
 pub fn client_address(peer: IpAddr, headers: &HeaderMap, header: Option<&HeaderName>) -> IpAddr {
     let Some(header) = header else {
         return peer;
@@ -120,10 +124,22 @@ pub fn client_address(peer: IpAddr, headers: &HeaderMap, header: Option<&HeaderN
         .get_all(header)
         .iter()
         .next_back()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit(',').next())
-        .and_then(|last| last.trim().parse().ok())
+        .and_then(|value| value.as_bytes().rsplit(|&b| b == b',').next())
+        .and_then(|last| std::str::from_utf8(last).ok())
+        .and_then(|last| parse_address(last.trim()))
         .unwrap_or(peer)
+}
+
+/// An address alone, with a port, or an IPv6 address in brackets.
+fn parse_address(s: &str) -> Option<IpAddr> {
+    if let Ok(addr) = s.parse::<IpAddr>() {
+        return Some(addr);
+    }
+    if let Ok(addr) = s.parse::<SocketAddr>() {
+        return Some(addr.ip());
+    }
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?;
+    inner.parse::<Ipv6Addr>().ok().map(IpAddr::V6)
 }
 
 #[cfg(test)]
@@ -257,5 +273,50 @@ mod tests {
             ),
             "2001:db8::5".parse::<IpAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn a_client_supplied_left_part_does_not_choose_the_counter() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let xff = HeaderName::from_static("x-forwarded-for");
+        let mut headers = HeaderMap::new();
+        // Not visible ASCII, written by the client; the proxy appended its address.
+        headers.insert(&xff, HeaderValue::from_bytes(b"\xff, 10.0.0.7").unwrap());
+        assert_eq!(
+            super::client_address(peer, &headers, Some(&xff)),
+            "10.0.0.7".parse::<IpAddr>().unwrap()
+        );
+        // A right-most part that is not UTF-8 holds no address.
+        headers.insert(&xff, HeaderValue::from_bytes(b"10.0.0.7, \xff").unwrap());
+        assert_eq!(super::client_address(peer, &headers, Some(&xff)), peer);
+    }
+
+    #[test]
+    fn an_address_with_port_or_brackets_is_read() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let xff = HeaderName::from_static("x-forwarded-for");
+        for (value, expected) in [
+            ("1.2.3.4:5678", "1.2.3.4"),
+            ("[2001:db8::1]", "2001:db8::1"),
+            ("[2001:db8::1]:443", "2001:db8::1"),
+            ("10.9.9.9, 2001:db8::1", "2001:db8::1"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(&xff, HeaderValue::from_static(value));
+            assert_eq!(
+                super::client_address(peer, &headers, Some(&xff)),
+                expected.parse::<IpAddr>().unwrap(),
+                "{value}"
+            );
+        }
+        for unreadable in ["[1.2.3.4]", "[2001:db8::1", "1.2.3.4:", "[]:80"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(&xff, HeaderValue::from_static(unreadable));
+            assert_eq!(
+                super::client_address(peer, &headers, Some(&xff)),
+                peer,
+                "{unreadable}"
+            );
+        }
     }
 }

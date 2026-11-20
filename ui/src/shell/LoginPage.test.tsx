@@ -55,15 +55,22 @@ describe('LoginPage', () => {
     expect(onLoggedIn).not.toHaveBeenCalled();
   });
 
-  it('says the server is busy for 429', async () => {
+  // A 429 at the login is a busy server or an address with too many failed logins: one
+  // sentence that is true for both.
+  it.each([
+    'the server is busy checking passwords, try again shortly',
+    'too many failed logins from this address; try again in a few minutes',
+  ])('says to wait a few minutes for 429 (%s)', async (message) => {
     mock = mockFetch({
-      'POST /session': { status: 429, json: { error: 'too_many_attempts', message: 'busy' } },
+      'POST /session': { status: 429, json: { error: 'too_many_attempts', message } },
     });
     const user = userEvent.setup();
     render(<LoginPage expired={false} onLoggedIn={() => {}} />);
     await fill(user);
     await user.click(screen.getByRole('button', { name: 'Log in' }));
-    expect(await screen.findByText('The server is busy, try again in a moment.')).toBeInTheDocument();
+    expect(
+      await screen.findByText('Too many attempts. Try again in a few minutes.'),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText('Password')).toHaveValue('');
   });
 

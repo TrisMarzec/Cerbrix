@@ -114,7 +114,8 @@ password at the login.
 Failed logins are also counted per client address: after 10 failed logins from one address
 within 5 minutes (an IPv6 address counts as its /64), the login answers
 `429 too_many_attempts` to that address until the 5 minutes from its first failure are over,
-with the message of a busy server, whatever the name and password. Nothing is checked then,
+with the message `too many failed logins from this address; try again in a few minutes`,
+whatever the name and password. Nothing is checked then,
 and it does not count against the user. A successful login and a busy server do not count.
 Which address counts behind a reverse proxy is a setting, see
 [Login settings](install.md#login-settings).
@@ -126,7 +127,8 @@ answered `429 too_many_attempts` with the message
 `the server is busy checking passwords, try again shortly`. The answer is the same whatever the
 user name, an existing, unknown or locked one; nothing was checked, so it does not count as a
 failed login. This concerns the login, the password change, creating a user and resetting a
-password.
+password. The login also answers `429 too_many_attempts` to a client address with too many
+failed logins, with a message of its own, see *Failed logins*.
 
 **Same-origin rule.** Requests that change something (every method except `GET` and `HEAD`) are
 checked against cross-site requests. If the request has an `Origin` header, its host and port must

@@ -143,12 +143,25 @@ impl AuthConfig {
         if self.session_max_secs > 2_592_000 {
             return bad("auth.session_max_secs must be at most 2592000");
         }
-        if let Some(name) = &self.client_address_header
-            && axum::http::HeaderName::from_bytes(name.as_bytes()).is_err()
-        {
-            return bad("auth.client_address_header must be a header name such as X-Forwarded-For");
-        }
+        self.client_address_header_name()?;
         Ok(())
+    }
+
+    /// `client_address_header` as a header name, or the validation error.
+    pub fn client_address_header_name(
+        &self,
+    ) -> Result<Option<axum::http::HeaderName>, ConfigError> {
+        self.client_address_header
+            .as_deref()
+            .map(|name| {
+                axum::http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    ConfigError::Invalid(
+                        "auth.client_address_header must be a header name such as X-Forwarded-For"
+                            .to_owned(),
+                    )
+                })
+            })
+            .transpose()
     }
 }
 

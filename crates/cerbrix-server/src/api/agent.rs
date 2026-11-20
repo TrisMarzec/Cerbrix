@@ -406,6 +406,7 @@ mod tests {
             queue_mail: false,
             passwords: Default::default(),
             logins: Arc::default(),
+            client_address_header: None,
         });
         (router, metrics, store)
     }
@@ -1082,6 +1083,7 @@ mod tests {
             queue_mail,
             passwords: Default::default(),
             logins: Arc::default(),
+            client_address_header: None,
         });
         (router, store)
     }

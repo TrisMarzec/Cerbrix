@@ -5,12 +5,14 @@ use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{ConnectInfo, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{ApiError, ApiJson, Entry, hash_failed, invalid, passwords_busy, store_failed};
+use super::{
+    ApiError, ApiJson, Entry, hash_failed, invalid, logins_refused, passwords_busy, store_failed,
+};
 use crate::api::AppState;
 use crate::auth::throttle::client_address;
 use crate::auth::{Viewer, clear_cookie, session_cookie, session_token, validate_password};
@@ -60,18 +62,11 @@ async fn login(
     headers: HeaderMap,
     ApiJson(body): ApiJson<LoginBody>,
 ) -> Result<Response, ApiError> {
-    // Validated at start: a header name or nothing.
-    let header = app
-        .config
-        .auth
-        .client_address_header
-        .as_deref()
-        .and_then(|name| HeaderName::from_bytes(name.as_bytes()).ok());
-    let client = client_address(peer.ip(), &headers, header.as_ref());
+    let client = client_address(peer.ip(), &headers, app.client_address_header.as_ref());
     // Before any password work and before the account's own counter, and the same for
     // every name.
     if app.logins.refused(client, Instant::now()) {
-        return Err(passwords_busy());
+        return Err(logins_refused());
     }
     // A failed login, counted against the client address.
     let wrong = || {
@@ -680,10 +675,20 @@ mod tests {
         .await
     }
 
-    fn assert_refused(reply: &Reply) {
+    /// A 429 `too_many_attempts` with `message` and no cookie.
+    fn assert_429(reply: &Reply, message: &str) {
         assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(reply.error_code(), "too_many_attempts");
+        assert_eq!(reply.json()["message"], message);
         assert!(reply.header("set-cookie").is_none());
+    }
+
+    /// The answer to a refused client address.
+    fn assert_refused(reply: &Reply) {
+        assert_429(
+            reply,
+            "too many failed logins from this address; try again in a few minutes",
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -745,11 +750,9 @@ mod tests {
         let gate = gate(&mut fx, std::time::Duration::from_millis(20));
         let held = gate.occupy();
         for _ in 0..12 {
-            let reply = login(&fx, "nobody", PASSWORD).await;
-            assert_refused(&reply);
-            assert_eq!(
-                reply.json()["message"],
-                "the server is busy checking passwords, try again shortly"
+            assert_429(
+                &login(&fx, "nobody", PASSWORD).await,
+                "the server is busy checking passwords, try again shortly",
             );
         }
         drop(held);
