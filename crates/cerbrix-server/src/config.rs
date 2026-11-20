@@ -115,6 +115,9 @@ pub struct AuthConfig {
     /// Whether the session cookie carries `Secure`. Unset: on, unless `server.insecure_http`.
     /// Behind a TLS-terminating reverse proxy, set it to true.
     pub secure_cookie: Option<bool>,
+    /// The request header whose right-most address is the client address for counting failed
+    /// logins, such as `X-Forwarded-For` behind a reverse proxy. Unset: the peer address.
+    pub client_address_header: Option<String>,
 }
 
 impl Default for AuthConfig {
@@ -123,6 +126,7 @@ impl Default for AuthConfig {
             session_idle_secs: 43_200,
             session_max_secs: 604_800,
             secure_cookie: None,
+            client_address_header: None,
         }
     }
 }
@@ -138,6 +142,11 @@ impl AuthConfig {
         }
         if self.session_max_secs > 2_592_000 {
             return bad("auth.session_max_secs must be at most 2592000");
+        }
+        if let Some(name) = &self.client_address_header
+            && axum::http::HeaderName::from_bytes(name.as_bytes()).is_err()
+        {
+            return bad("auth.client_address_header must be a header name such as X-Forwarded-For");
         }
         Ok(())
     }
@@ -1011,6 +1020,29 @@ mod tests {
             assert!(secure_by_default.secure_cookie());
             let off = load_gitops(&format!("{tls_toml}[auth]\nsecure_cookie = false\n")).unwrap();
             assert!(!off.secure_cookie());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn client_address_header_is_off_by_default_and_must_be_a_header_name() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let load = || Config::load(Some(Path::new("cerbrix.toml")));
+            assert_eq!(load().unwrap().auth.client_address_header, None);
+            jail.set_env("CERBRIX_AUTH__CLIENT_ADDRESS_HEADER", "X-Forwarded-For");
+            assert_eq!(
+                load().unwrap().auth.client_address_header.as_deref(),
+                Some("X-Forwarded-For")
+            );
+            for bad in ["", "X Forwarded For", "x-forwarded-for:"] {
+                jail.set_env("CERBRIX_AUTH__CLIENT_ADDRESS_HEADER", bad);
+                assert_eq!(
+                    invalid(load()),
+                    "auth.client_address_header must be a header name such as X-Forwarded-For",
+                    "{bad:?}"
+                );
+            }
             Ok(())
         });
     }

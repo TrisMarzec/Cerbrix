@@ -91,19 +91,31 @@ real use (see [Behind a reverse proxy](#behind-a-reverse-proxy) and
 
 ### Login settings
 
-Sessions are kept in PostgreSQL, so they survive a restart of the server. Three settings
-(in `deploy/server.env`, a commented block is in the example file) control them:
+Sessions are kept in PostgreSQL, so they survive a restart of the server. These settings
+(in `deploy/server.env`, a commented block is in the example file) control them and the
+counting of failed logins:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CERBRIX_AUTH__SESSION_IDLE_SECS` | `43200` (12 hours) | A session that was not used for this long ends. 300 to 604800. |
 | `CERBRIX_AUTH__SESSION_MAX_SECS` | `604800` (7 days) | A session ends this long after the login, however active it is. Not smaller than the idle time, at most 2592000 (30 days). |
 | `CERBRIX_AUTH__SECURE_COOKIE` | unset | Whether the session cookie carries the `Secure` attribute, so that a browser sends it only over HTTPS. Unset means on, unless `CERBRIX_SERVER__INSECURE_HTTP=true`. Set it to `true` when a reverse proxy terminates TLS. |
+| `CERBRIX_AUTH__CLIENT_ADDRESS_HEADER` | unset | The request header that names the client address for counting failed logins, such as `X-Forwarded-For`; the right-most address in it is used. Unset means the address of the connection. Set it only behind a reverse proxy, see [Behind a reverse proxy](#behind-a-reverse-proxy). |
 
 An invalid value stops the server at start. After five wrong passwords in a row a user is
 locked for five minutes; the lock ends by itself and a login with the right password resets
 the count. The login answer is the same for a wrong password, an unknown name and a locked
 user. The [API reference](api.md) describes the login and the roles.
+
+Failed logins are also counted per client address (an IPv6 address counts as its /64): after
+10 failed logins within 5 minutes, counted from the first of them, further logins from that
+address are answered `429 too_many_attempts` until the 5 minutes are over, without checking
+the password and without counting against the user. The server logs a warning when it starts
+refusing an address. The count is kept in memory and starts afresh when the server restarts.
+This limits how fast one address can guess passwords, and how many users it can keep locked. It
+does not prevent somebody who knows a user name from keeping that user locked: five wrong
+passwords lock a user, fewer than the ten an address may try in 5 minutes, so one address is
+still enough for one user.
 
 ### Behind a reverse proxy
 
@@ -124,6 +136,17 @@ When the proxy terminates TLS and talks plain HTTP to the server, as in
 without the setting it sends the cookie without `Secure`. Do not publish the plain HTTP port
 of the server to a network; the session cookie and the passwords of a login would cross it
 unencrypted.
+
+Failed logins are counted per client address (see [Login settings](#login-settings)). Behind a
+proxy, the address of every connection is that of the proxy, so all users share one counter:
+10 failed logins by anybody within 5 minutes refuse the logins of everybody until they are
+over. To count per browser instead, set `CERBRIX_AUTH__CLIENT_ADDRESS_HEADER=X-Forwarded-For`,
+but only when every request reaches the server through the proxy and the proxy appends the
+client address to that header or sets it (nginx: `proxy_set_header X-Forwarded-For
+$proxy_add_x_forwarded_for;`, Caddy does it by default). The server uses the right-most address
+in the header, the one the proxy added; a client that can reach the server directly could
+write any address there itself. When the header is missing or holds no address, the address of
+the connection counts.
 
 ## 4. Create a host and an enrolment key
 

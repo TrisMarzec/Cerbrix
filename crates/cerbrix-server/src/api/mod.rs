@@ -12,6 +12,7 @@ use cerbrix_common::ErrorBody;
 use uuid::Uuid;
 
 use crate::auth::PasswordGate;
+use crate::auth::throttle::LoginThrottle;
 use crate::config::Config;
 use crate::metrics::MetricsStore;
 use crate::state::StateStore;
@@ -20,8 +21,9 @@ mod agent;
 pub mod ui;
 
 /// Shared handles of the API. Everything in it is a connection handle or read-only
-/// configuration; no request data is kept here. The one exception is `warnings`, which
-/// only limits how often a log line is written; no decision depends on it.
+/// configuration; no request data is kept here. There are two exceptions: `warnings`, which
+/// only limits how often a log line is written (no decision depends on it), and `logins`, the
+/// failed logins per client address.
 #[derive(Clone)]
 pub struct AppState {
     pub store: StateStore,
@@ -32,6 +34,8 @@ pub struct AppState {
     pub queue_mail: bool,
     /// The limit on password hashing and checking; one for the whole process.
     pub passwords: PasswordGate,
+    /// Failed logins per client address; one for the whole process.
+    pub logins: Arc<LoginThrottle>,
 }
 
 /// Lets a warning through at most once per hour per host. Process-local and bounded: it

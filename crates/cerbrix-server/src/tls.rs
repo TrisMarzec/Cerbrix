@@ -2,7 +2,7 @@
 //! (operator-supplied certificate) or, for development, plain HTTP.
 
 use std::future::Future;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,6 +111,7 @@ pub async fn serve(
         warnings: Arc::default(),
         queue_mail,
         passwords: PasswordGate::default(),
+        logins: Arc::default(),
     };
     let app = router(state).layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
@@ -135,14 +136,14 @@ pub async fn serve(
                 tracing::info!(%addr, "listening (HTTPS)");
                 axum_server::from_tcp_rustls(listener, tls)?
                     .handle(handle)
-                    .serve(app.into_make_service())
+                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                     .await?;
             }
             None => {
                 tracing::info!(%addr, "listening (HTTP)");
                 axum_server::from_tcp(listener)?
                     .handle(handle)
-                    .serve(app.into_make_service())
+                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                     .await?;
             }
         }

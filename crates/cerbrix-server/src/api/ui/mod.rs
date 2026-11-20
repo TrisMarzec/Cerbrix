@@ -536,7 +536,7 @@ pub(crate) mod testing {
     //! A fixture for the tests of the UI routes. Later tasks add path parameters to
     //! `Fixture::fill` and, when a route needs more data, to `Fixture::new`.
 
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, SocketAddr};
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -567,6 +567,15 @@ pub(crate) mod testing {
 
     /// The id of the display `ensure_display` stores.
     pub const FIXTURE_DISPLAY: &str = "fixture-wall";
+
+    /// The client address of a request the fixture sends, unless `call_from` names another.
+    pub const PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    /// The connection data of a request from `peer`, for a request sent to the router
+    /// directly.
+    pub fn connect_info(peer: IpAddr) -> axum::extract::ConnectInfo<SocketAddr> {
+        axum::extract::ConnectInfo(SocketAddr::new(peer, 50_000))
+    }
 
     pub fn config(insecure_http: bool, secure_cookie: Option<bool>) -> Arc<Config> {
         Arc::new(Config {
@@ -707,6 +716,7 @@ pub(crate) mod testing {
                 warnings: Arc::default(),
                 queue_mail,
                 passwords: crate::auth::PasswordGate::default(),
+                logins: Arc::default(),
             };
             Self {
                 router: crate::api::router(app.clone()),
@@ -738,6 +748,7 @@ pub(crate) mod testing {
                 warnings: Arc::default(),
                 queue_mail: false,
                 passwords: crate::auth::PasswordGate::default(),
+                logins: Arc::default(),
             };
             Self {
                 router: crate::api::router(app.clone()),
@@ -945,6 +956,27 @@ pub(crate) mod testing {
             .await
         }
 
+        /// Sends a request without a session from the client address `peer`; `call` and
+        /// `call_bytes` send from [`PEER`].
+        pub async fn call_from(
+            &self,
+            peer: IpAddr,
+            method: &str,
+            uri: &str,
+            headers: &[(&str, &str)],
+            body: Option<&str>,
+        ) -> Reply {
+            self.send(
+                peer,
+                method,
+                uri,
+                None,
+                headers,
+                body.map(|b| b.as_bytes().to_vec()),
+            )
+            .await
+        }
+
         pub async fn call_bytes(
             &self,
             method: &str,
@@ -953,7 +985,23 @@ pub(crate) mod testing {
             headers: &[(&str, &str)],
             body: Option<Vec<u8>>,
         ) -> Reply {
-            let mut req = Request::builder().method(method).uri(uri);
+            self.send(PEER, method, uri, cookie, headers, body).await
+        }
+
+        async fn send(
+            &self,
+            peer: IpAddr,
+            method: &str,
+            uri: &str,
+            cookie: Option<&str>,
+            headers: &[(&str, &str)],
+            body: Option<Vec<u8>>,
+        ) -> Reply {
+            // What `into_make_service_with_connect_info` puts into a request of a connection.
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .extension(connect_info(peer));
             if let Some(token) = cookie {
                 req = req.header(header::COOKIE, format!("cerbrix_session={token}"));
             }
@@ -1502,7 +1550,8 @@ mod tests {
         ] {
             let mut req = axum::http::Request::builder()
                 .method("POST")
-                .uri("/api/v1/session");
+                .uri("/api/v1/session")
+                .extension(connect_info(PEER));
             if let Some(ct) = content_type {
                 req = req.header("content-type", ct);
             }
@@ -1518,6 +1567,7 @@ mod tests {
         let req = axum::http::Request::builder()
             .method("POST")
             .uri("/api/v1/session")
+            .extension(connect_info(PEER))
             .header("content-type", "application/json; charset=utf-8")
             .body(axum::body::Body::from(body))
             .unwrap();

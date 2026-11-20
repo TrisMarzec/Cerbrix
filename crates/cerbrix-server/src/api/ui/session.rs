@@ -1,14 +1,18 @@
 //! Login, logout and the session of the logged-in user.
 
+use std::net::SocketAddr;
+use std::time::Instant;
+
 use axum::Json;
-use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{ApiError, ApiJson, Entry, hash_failed, invalid, passwords_busy, store_failed};
 use crate::api::AppState;
+use crate::auth::throttle::client_address;
 use crate::auth::{Viewer, clear_cookie, session_cookie, session_token, validate_password};
 use crate::state::{LoginOutcome, PasswordCheck, StateError, User};
 
@@ -52,16 +56,34 @@ fn with_cookie(mut response: Response, cookie: &str) -> Response {
 
 async fn login(
     State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     ApiJson(body): ApiJson<LoginBody>,
 ) -> Result<Response, ApiError> {
+    // Validated at start: a header name or nothing.
+    let header = app
+        .config
+        .auth
+        .client_address_header
+        .as_deref()
+        .and_then(|name| HeaderName::from_bytes(name.as_bytes()).ok());
+    let client = client_address(peer.ip(), &headers, header.as_ref());
+    // Before any password work and before the account's own counter, and the same for
+    // every name.
+    if app.logins.refused(client, Instant::now()) {
+        return Err(passwords_busy());
+    }
+    // A failed login, counted against the client address.
     let wrong = || {
+        app.logins.failed(client, Instant::now());
         ApiError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "wrong user name or password, or the account is temporarily locked",
         )
     };
-    // No user name contains NUL, and PostgreSQL cannot compare with one.
+    // No user name contains NUL, and PostgreSQL cannot compare with one. Counted like an
+    // unknown name.
     if body.name.contains('\0') {
         return Err(wrong());
     }
@@ -83,7 +105,7 @@ async fn login(
             &token,
         )),
         // A locked account answers exactly like a wrong password: nobody learns which
-        // names exist.
+        // names exist. Both count against the client address.
         LoginOutcome::Wrong | LoginOutcome::Locked => Err(wrong()),
         // The same for every name, and nothing was counted.
         LoginOutcome::Busy => Err(passwords_busy()),
@@ -638,6 +660,123 @@ mod tests {
             StatusCode::OK
         );
         assert_eq!(login(&fx, "subject", PASSWORD).await.status, StatusCode::OK);
+    }
+
+    /// A login from the client address `peer` with extra request `headers`.
+    async fn login_from(
+        fx: &Fixture,
+        peer: &str,
+        headers: &[(&str, &str)],
+        name: &str,
+        password: &str,
+    ) -> Reply {
+        fx.call_from(
+            peer.parse().unwrap(),
+            "POST",
+            "/api/v1/session",
+            headers,
+            Some(&login_body(name, password)),
+        )
+        .await
+    }
+
+    fn assert_refused(reply: &Reply) {
+        assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(reply.error_code(), "too_many_attempts");
+        assert!(reply.header("set-cookie").is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn eleventh_failed_login_from_an_address_is_429(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        for n in 1..=10 {
+            let reply = login(&fx, "nobody", PASSWORD).await;
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "attempt {n}");
+        }
+        assert_refused(&login(&fx, "nobody", PASSWORD).await);
+        // A right password is refused too: nothing is checked.
+        assert_refused(&login(&fx, "viewer", PASSWORD).await);
+        let other = login_from(&fx, "192.0.2.7", &[], "nobody", PASSWORD).await;
+        assert_eq!(other.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_refused_address_does_not_count_against_the_account(pool: PgPool) {
+        let fx = Fixture::new(pool.clone()).await;
+        let a = "198.51.100.1";
+        for _ in 0..4 {
+            let reply = login_from(&fx, a, &[], "admin", "wrong").await;
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(failed_logins(&pool, "admin").await, 4);
+        for _ in 4..10 {
+            let reply = login_from(&fx, a, &[], "nobody", "wrong").await;
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+        }
+        // Refused before the account's own counter: the admin is not locked by them.
+        for _ in 0..3 {
+            assert_refused(&login_from(&fx, a, &[], "admin", "wrong").await);
+        }
+        assert_eq!(failed_logins(&pool, "admin").await, 4);
+        let b = login_from(&fx, "198.51.100.2", &[], "admin", PASSWORD).await;
+        assert_eq!(b.status, StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_successful_login_is_not_counted(pool: PgPool) {
+        let fx = Fixture::new(pool).await;
+        for _ in 0..9 {
+            login(&fx, "nobody", PASSWORD).await;
+        }
+        for _ in 0..3 {
+            assert_eq!(login(&fx, "viewer", PASSWORD).await.status, StatusCode::OK);
+        }
+        // The tenth failure is still answered, the eleventh attempt is refused.
+        assert_eq!(
+            login(&fx, "nobody", PASSWORD).await.status,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_refused(&login(&fx, "viewer", PASSWORD).await);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_busy_server_is_not_counted(pool: PgPool) {
+        let mut fx = Fixture::new(pool).await;
+        let gate = gate(&mut fx, std::time::Duration::from_millis(20));
+        let held = gate.occupy();
+        for _ in 0..12 {
+            let reply = login(&fx, "nobody", PASSWORD).await;
+            assert_refused(&reply);
+            assert_eq!(
+                reply.json()["message"],
+                "the server is busy checking passwords, try again shortly"
+            );
+        }
+        drop(held);
+        for n in 1..=10 {
+            let reply = login(&fx, "nobody", PASSWORD).await;
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "attempt {n}");
+        }
+        assert_refused(&login(&fx, "nobody", PASSWORD).await);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_configured_header_chooses_the_address(pool: PgPool) {
+        let mut config = (*config(true, None)).clone();
+        config.auth.client_address_header = Some("x-forwarded-for".to_owned());
+        let fx = Fixture::with_config(pool, std::sync::Arc::new(config)).await;
+        let proxy = "10.0.0.2";
+        let from = |addr: &'static str| [("x-forwarded-for", addr)];
+        for _ in 0..10 {
+            let reply = login_from(&fx, proxy, &from("203.0.113.5"), "nobody", PASSWORD).await;
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+        }
+        assert_refused(&login_from(&fx, proxy, &from("203.0.113.5"), "nobody", PASSWORD).await);
+        // Another client behind the same proxy, and the proxy itself, are not refused.
+        let other = login_from(&fx, proxy, &from("203.0.113.6"), "nobody", PASSWORD).await;
+        assert_eq!(other.status, StatusCode::UNAUTHORIZED);
+        let direct = login_from(&fx, proxy, &[], "nobody", PASSWORD).await;
+        assert_eq!(direct.status, StatusCode::UNAUTHORIZED);
     }
 
     #[test]

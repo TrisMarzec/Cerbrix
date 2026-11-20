@@ -969,6 +969,7 @@ mod login_tests {
             session_idle_secs: 600,
             session_max_secs: 3600,
             secure_cookie: None,
+            client_address_header: None,
         }
     }
 

@@ -56,7 +56,7 @@ for people. Test the code, not the message.
 | `forbidden` | 403 | The role is too low, the request comes from another origin, a display may not show a dashboard, or the current password given on a password change is wrong. |
 | `not_found` | 404 | The thing does not exist, or its identifier cannot be one. Also an unknown path. |
 | `conflict` | 409 | The change clashes with the state: a user name is taken, a problem is already resolved, or the last enabled admin would be lost. |
-| `too_many_attempts` | 429 | The server is busy checking passwords: too many logins, password changes or user creations at once. Nothing was checked or changed, and it does not count as a failed login. Try again shortly. See *Busy server* under [Login and sessions](#login-and-sessions). |
+| `too_many_attempts` | 429 | The server is busy checking passwords: too many logins, password changes or user creations at once. For a login it also means that the client address had too many failed logins. Nothing was checked or changed, and it does not count as a failed login. Try again shortly. See *Busy server* and *Failed logins* under [Login and sessions](#login-and-sessions). |
 | `metrics_unavailable` | 503 | The metrics store did not answer. Only the [series of a host](#get-apiv1hostsnameseries-viewer) uses it. |
 | `database_unavailable` | 503 | PostgreSQL cannot be reached. Any route can answer it, the login and the check of a session or display token included. See *Database down* below. |
 | `timeout` | 503 | The request was not answered within 25 seconds. Nothing tells whether a change it asked for was made; read the state again before repeating it. |
@@ -110,6 +110,14 @@ the same `401` with the same message. After five wrong passwords in a row a user
 five minutes; the lock ends by itself, a right password after that resets the count, and so does
 a password reset by an admin. A wrong current password on a password change counts like a wrong
 password at the login.
+
+Failed logins are also counted per client address: after 10 failed logins from one address
+within 5 minutes (an IPv6 address counts as its /64), the login answers
+`429 too_many_attempts` to that address until the 5 minutes from its first failure are over,
+with the message of a busy server, whatever the name and password. Nothing is checked then,
+and it does not count against the user. A successful login and a busy server do not count.
+Which address counts behind a reverse proxy is a setting, see
+[Login settings](install.md#login-settings).
 
 **Busy server.** Checking and storing a password (Argon2id) takes a lot of memory and CPU, so the
 server runs only a few of these at once (one per processor core, at least 2 and at most 8). A
@@ -225,7 +233,8 @@ x-content-type-options: nosniff
 A wrong password, an unknown name, a disabled user and a locked user are all
 `401 unauthorized` with the message `wrong user name or password, or the account is temporarily locked`.
 A server that is too busy checking passwords answers `429 too_many_attempts`, the same for every
-name, see *Busy server* under [Login and sessions](#login-and-sessions).
+name, see *Busy server* under [Login and sessions](#login-and-sessions). So does a login from a
+client address with 10 failed logins in the last 5 minutes, see *Failed logins* there.
 
 ### `GET /api/v1/session` (viewer)
 

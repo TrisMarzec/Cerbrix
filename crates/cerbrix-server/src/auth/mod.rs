@@ -3,6 +3,8 @@
 //! Passwords are stored only as Argon2id PHC strings; hashing and verifying run on blocking
 //! threads because they take tens of milliseconds of CPU and a lot of memory.
 
+pub mod throttle;
+
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
