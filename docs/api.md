@@ -248,7 +248,10 @@ counting as a failed attempt. On success the answer is `204`, every session of t
 current one included, and the answer sets the cookie of a new session (`Set-Cookie`, as at the
 login): keep using the new cookie, the old one is `401`. A wrong `current`
 is `403 forbidden` and counts as a failed attempt for the lock; a locked user gets the same
-answer. A busy server answers `429 too_many_attempts` and changes nothing, see
+answer. When the password was changed in the meantime, for example reset by an admin while
+the request was being processed, the answer is `409 conflict` ("the password was changed in the
+meantime") and nothing changes: the password and the sessions stay as that other change left
+them. A busy server answers `429 too_many_attempts` and changes nothing, see
 *Busy server* under [Login and sessions](#login-and-sessions).
 
 ```sh

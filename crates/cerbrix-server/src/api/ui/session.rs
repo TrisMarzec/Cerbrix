@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use super::{ApiError, ApiJson, Entry, hash_failed, invalid, passwords_busy, store_failed};
 use crate::api::AppState;
 use crate::auth::{Viewer, clear_cookie, session_cookie, session_token, validate_password};
-use crate::state::{LoginOutcome, PasswordCheck, User};
+use crate::state::{LoginOutcome, PasswordCheck, StateError, User};
 
 pub(super) fn entries() -> Vec<Entry> {
     vec![
@@ -141,13 +141,13 @@ async fn change_password(
     validate_password(&body.new)
         .map_err(|_| invalid("the new password must have 12 to 256 characters and no NUL"))?;
     let now = OffsetDateTime::now_utc();
-    match app
+    let verified = match app
         .store
         .check_password(user.id, &body.current, now, &app.passwords)
         .await
         .map_err(|e| store_failed("password check failed", &e))?
     {
-        PasswordCheck::Right => {}
+        PasswordCheck::Right { hash } => hash,
         // A wrong password and a locked account answer alike.
         PasswordCheck::Wrong | PasswordCheck::Locked => {
             return Err(ApiError::new(
@@ -157,18 +157,32 @@ async fn change_password(
             ));
         }
         PasswordCheck::Busy => return Err(passwords_busy()),
-    }
+    };
     let hash = app.passwords.hash(body.new).await.map_err(hash_failed)?;
+    // Stored only while the password is still the verified one: a reset by an admin while
+    // this request waited for the hashing wins.
     let token = app
         .store
-        .set_user_password_renewing_session(user.id, &hash, now, &app.config.auth)
+        .set_user_password_renewing_session(user.id, &verified, &hash, now, &app.config.auth)
         .await
-        .map_err(|e| store_failed("changing the password failed", &e))?;
+        .map_err(|e| change_error(&e))?;
     Ok(with_session(
         &app,
         StatusCode::NO_CONTENT.into_response(),
         &token,
     ))
+}
+
+/// The answer when storing a changed password failed.
+fn change_error(e: &StateError) -> ApiError {
+    match e {
+        StateError::Conflict(_) => ApiError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            "the password was changed in the meantime",
+        ),
+        _ => store_failed("changing the password failed", e),
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +192,7 @@ mod tests {
 
     use crate::api::ui::testing::*;
     use crate::auth::{PasswordGate, Role};
+    use crate::state::StateError;
 
     fn login_body(name: &str, password: &str) -> String {
         serde_json::json!({ "name": name, "password": password }).to_string()
@@ -623,6 +638,29 @@ mod tests {
             StatusCode::OK
         );
         assert_eq!(login(&fx, "subject", PASSWORD).await.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn a_password_changed_in_the_meantime_is_409() {
+        let e = super::change_error(&StateError::Conflict(
+            "the password was changed in the meantime".to_owned(),
+        ));
+        assert_eq!(
+            (e.status, e.code, &*e.message),
+            (
+                StatusCode::CONFLICT,
+                "conflict",
+                "the password was changed in the meantime"
+            )
+        );
+        // Other failures answer like every failed store call.
+        let e = super::change_error(&StateError::NotFound);
+        assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let e = super::change_error(&StateError::Db(sqlx::Error::PoolTimedOut));
+        assert_eq!(
+            (e.status, e.code),
+            (StatusCode::SERVICE_UNAVAILABLE, "database_unavailable")
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
