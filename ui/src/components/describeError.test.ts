@@ -22,6 +22,20 @@ describe('describeError', () => {
     );
   });
 
+  it('has a sentence for a server without its database and for a server that took too long', () => {
+    const down = new ApiError(503, 'database_unavailable', 'the database is not reachable');
+    const slow = new ApiError(503, 'timeout', 'the request took too long');
+    expect(describeError(down)).toBe('The server cannot reach its database.');
+    expect(describeError(slow)).toBe('The server took too long to answer.');
+    // These say more than a caller's sentence for 503, which is about something else.
+    expect(describeError(down, { 503: 'The metrics store did not answer.' })).toBe(
+      'The server cannot reach its database.',
+    );
+    expect(describeError(slow, { 503: 'The metrics store did not answer.' })).toBe(
+      'The server took too long to answer.',
+    );
+  });
+
   it('takes a sentence per status from the caller first', () => {
     const overrides = { 409: 'This problem is already resolved.', 403: 'The current password is wrong.' };
     expect(describeError(new ApiError(409, 'conflict', 'x'), overrides)).toBe('This problem is already resolved.');

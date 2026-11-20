@@ -7,10 +7,10 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{ApiError, ApiJson, Entry, hash_failed, invalid, passwords_busy};
+use super::{ApiError, ApiJson, Entry, hash_failed, invalid, passwords_busy, store_failed};
 use crate::api::AppState;
 use crate::auth::{Viewer, clear_cookie, session_cookie, session_token, validate_password};
-use crate::state::{LoginOutcome, PasswordCheck, StateError, User};
+use crate::state::{LoginOutcome, PasswordCheck, User};
 
 pub(super) fn entries() -> Vec<Entry> {
     vec![
@@ -40,11 +40,6 @@ impl From<&User> for Me {
             role: user.role.as_str(),
         }
     }
-}
-
-fn store_failed(what: &str, e: &StateError) -> ApiError {
-    tracing::error!(error = %e, "{what}");
-    ApiError::internal()
 }
 
 fn with_cookie(mut response: Response, cookie: &str) -> Response {

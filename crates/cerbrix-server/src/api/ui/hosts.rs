@@ -14,12 +14,12 @@ use cerbrix_common::{
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::{ApiError, Entry, Page, invalid, query_text};
+use super::{ApiError, Entry, Page, invalid, query_text, store_failed};
 use crate::api::AppState;
 use crate::auth::Viewer;
 use crate::gitops::{EffectiveHost, EffectiveItem, EffectiveTrigger};
 use crate::metrics::{LatestQuery, MetricsError, MetricsStore};
-use crate::state::{HostDetail, HostQuery, HostStateFilter, Problem, StateError};
+use crate::state::{HostDetail, HostQuery, HostStateFilter, Problem};
 use crate::view::dashboard::{DashboardRef, dashboards_of_hosts};
 use crate::view::series::{
     CURRENT_VALUE_MAX_AGE_SECS, Threshold, bounded, log_metrics_failure, ms_to_rfc3339,
@@ -54,11 +54,6 @@ const LIST_MAX_AGE_SECS: u32 = 600;
 
 /// The longest parameter value taken in a series request.
 const MAX_PARAM_VALUE_CHARS: usize = 256;
-
-fn store_failed(what: &str, e: &StateError) -> ApiError {
-    tracing::error!(error = %e, "{what}");
-    ApiError::internal()
-}
 
 /// A host of the list.
 #[derive(Serialize)]

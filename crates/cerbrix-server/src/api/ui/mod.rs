@@ -7,6 +7,8 @@
 //! need the user take one of the extractors `Viewer`, `Operator` or `Admin`, which check
 //! the role again; the `access_matrix` test fails when the two disagree.
 
+use std::time::Duration;
+
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{
@@ -23,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{ApiError, AppState};
 use crate::auth::{AuthError, AuthedUser, Role, authenticate, authenticate_display, require};
+use crate::state::StateError;
 
 mod config;
 mod dashboards;
@@ -229,13 +232,20 @@ const PREFIX: &str = "/api/v1";
 /// Everything under `/api/v1`. Merged into `api::router`, so one server serves both APIs.
 ///
 /// All routes sit in one router that is nested under the prefix and carries the guards,
-/// the same-origin check, the body limit and the response headers (`no-store`, `nosniff`)
-/// for everything below it, its own fallback included. Nothing can be registered beside it.
+/// the same-origin check, the body limit, the time limit ([`UI_REQUEST_TIMEOUT`]) and the
+/// response headers (`no-store`, `nosniff`) for everything below it, its own fallback
+/// included. Nothing can be registered beside it.
 ///
 /// # Panics
 ///
 /// When a handler is registered for a route that is not in `ROUTES`.
 pub fn router(state: AppState) -> Router {
+    let routes = routes(&state);
+    layered(routes, state, UI_REQUEST_TIMEOUT)
+}
+
+/// The guarded routes of `entries`, relative to the prefix.
+fn routes(state: &AppState) -> Router<AppState> {
     let mut inner = Router::new();
     for entry in entries() {
         let access = access_of(&entry);
@@ -252,13 +262,20 @@ pub fn router(state: AppState) -> Router {
             .unwrap_or_else(|| panic!("route {} is not under {PREFIX}", entry.path));
         inner = inner.route(relative, guarded);
     }
+    inner
+}
+
+/// `routes` nested under the prefix with the fallback and the layers every answer of the
+/// UI API goes through; a request that takes longer than `limit` is answered `503 timeout`.
+fn layered(routes: Router<AppState>, state: AppState, limit: Duration) -> Router {
     // `/api/v1` and `/api/v1/` themselves are not routes either.
-    let inner = inner
+    let inner = routes
         .route("/", axum::routing::any(not_found))
         .fallback(not_found)
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(from_fn(request_checks))
+        .layer(from_fn_with_state(limit, time_limit))
         .layer(from_fn(response_headers));
     // The bare prefix with a trailing slash is not part of the nest: answer it alike.
     let root = axum::routing::any(not_found)
@@ -269,6 +286,43 @@ pub fn router(state: AppState) -> Router {
 
 async fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such endpoint")
+}
+
+/// The time limit of a UI request. Below the outer limit of the server (a bare `408`), so a
+/// UI request that takes too long is answered in the error format with the usual headers.
+pub(crate) const UI_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Answers `503 timeout` when the request is not answered within `limit`.
+async fn time_limit(State(limit): State<Duration>, req: Request, next: Next) -> Response {
+    match tokio::time::timeout(limit, next.run(req)).await {
+        Ok(response) => response,
+        Err(_) => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "timeout",
+            "the request took too long",
+        )
+        .into_response(),
+    }
+}
+
+/// The answer to a failed store call: `503 database_unavailable` when the database cannot
+/// be reached, otherwise a 500. The cause is logged with `what`, never sent.
+pub(crate) fn store_failed(what: &str, e: &StateError) -> ApiError {
+    tracing::error!(error = %e, "{what}");
+    if e.is_unavailable() {
+        database_unavailable()
+    } else {
+        ApiError::internal()
+    }
+}
+
+/// The answer when the database cannot be reached.
+pub(crate) fn database_unavailable() -> ApiError {
+    ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
+        "the database is not reachable",
+    )
 }
 
 /// Answers must not be cached: they depend on the session. And a browser must not guess
@@ -670,6 +724,42 @@ pub(crate) mod testing {
                 dashboard: FIXTURE_DASHBOARD,
                 display: FIXTURE_DISPLAY,
             }
+        }
+
+        /// A fixture on a pool whose database is not reachable: nothing is stored, the user
+        /// and object ids are made up. For the tests of a database that is down.
+        pub fn offline(pool: PgPool) -> Self {
+            let metrics = Arc::new(MemoryMetrics::new());
+            let store = StateStore::from_pool(pool.clone());
+            let app = crate::api::AppState {
+                store: store.clone(),
+                metrics: metrics.clone(),
+                config: config(true, None),
+                warnings: Arc::default(),
+                queue_mail: false,
+                passwords: crate::auth::PasswordGate::default(),
+            };
+            Self {
+                router: crate::api::router(app.clone()),
+                app,
+                store,
+                pool,
+                metrics,
+                viewer: Uuid::new_v4(),
+                operator: Uuid::new_v4(),
+                admin: Uuid::new_v4(),
+                subject: Uuid::new_v4(),
+                host: FIXTURE_HOST,
+                problem: Uuid::new_v4(),
+                key: Uuid::new_v4(),
+                dashboard: FIXTURE_DASHBOARD,
+                display: FIXTURE_DISPLAY,
+            }
+        }
+
+        /// What `router` was built from.
+        pub fn app(&self) -> crate::api::AppState {
+            self.app.clone()
         }
 
         /// A new session of the fixture user with `role`; returns its token.
@@ -1547,5 +1637,54 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
             assert!(body.contains("\"invalid\""), "{bad}: {body}");
         }
+    }
+
+    /// A fixture whose pool points at a port nobody listens on and gives up after 200 ms.
+    fn database_down() -> Fixture {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://cerbrix@127.0.0.1:1/cerbrix")
+            .unwrap();
+        Fixture::offline(pool)
+    }
+
+    #[tokio::test]
+    async fn database_down_is_503_on_a_guarded_route() {
+        let fx = database_down();
+        let reply = fx
+            .call("GET", "/api/v1/status", Some("cbx_se_any"), &[], None)
+            .await;
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.error_code(), "database_unavailable");
+        assert_eq!(reply.header("cache-control"), Some("no-store"));
+    }
+
+    #[tokio::test]
+    async fn database_down_is_503_on_login() {
+        let fx = database_down();
+        let body = format!(r#"{{"name":"viewer","password":"{PASSWORD}"}}"#);
+        let reply = fx
+            .call("POST", "/api/v1/session", None, &[], Some(&body))
+            .await;
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.error_code(), "database_unavailable");
+    }
+
+    #[tokio::test]
+    async fn slow_request_is_503_timeout() {
+        let mut fx = database_down();
+        let slow = Router::new().route(
+            "/slow",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                "late"
+            }),
+        );
+        fx.router = layered(slow, fx.app(), std::time::Duration::from_millis(50));
+        let reply = fx.call("GET", "/api/v1/slow", None, &[], None).await;
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.error_code(), "timeout");
+        assert_eq!(reply.header("cache-control"), Some("no-store"));
+        assert_eq!(reply.header("content-type"), Some("application/json"));
     }
 }

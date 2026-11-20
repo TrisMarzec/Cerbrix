@@ -18,12 +18,12 @@ use futures::future::join_all;
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use super::{ApiError, Entry};
+use super::{ApiError, Entry, store_failed};
 use crate::api::AppState;
 use crate::auth::Viewer;
 use crate::gitops::EffectiveHost;
 use crate::metrics::{LatestQuery, MetricsStore};
-use crate::state::{HostRow, Problem, StateError};
+use crate::state::{HostRow, Problem};
 use crate::view::dashboard::{
     DashboardSummary, HostEntry, PROBLEMS_PANEL_LIMIT, host_entries, open_problems, summaries,
 };
@@ -41,11 +41,6 @@ pub(super) fn entries() -> Vec<Entry> {
 
 /// How long one graph or value panel waits for the metrics store.
 const PANEL_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn store_failed(what: &str, e: &StateError) -> ApiError {
-    tracing::error!(error = %e, "{what}");
-    ApiError::internal()
-}
 
 fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such dashboard")

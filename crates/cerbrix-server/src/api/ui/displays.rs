@@ -15,7 +15,7 @@ use cerbrix_common::{DisplayFile, Show, SwitchOnAlarm, validate_name};
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use super::{ApiError, Entry, dashboards, forbidden};
+use super::{ApiError, Entry, dashboards, forbidden, store_failed};
 use crate::api::AppState;
 use crate::auth::{Admin, DisplayAccess, Viewer};
 use crate::state::StateError;
@@ -34,11 +34,6 @@ pub(super) fn entries() -> Vec<Entry> {
             dashboard,
         ),
     ]
-}
-
-fn store_failed(what: &str, e: &StateError) -> ApiError {
-    tracing::error!(error = %e, "{what}");
-    ApiError::internal()
 }
 
 fn not_found() -> ApiError {

@@ -58,6 +58,8 @@ for people. Test the code, not the message.
 | `conflict` | 409 | The change clashes with the state: a user name is taken, a problem is already resolved, or the last enabled admin would be lost. |
 | `too_many_attempts` | 429 | The server is busy checking passwords: too many logins, password changes or user creations at once. Nothing was checked or changed, and it does not count as a failed login. Try again shortly. See *Busy server* under [Login and sessions](#login-and-sessions). |
 | `metrics_unavailable` | 503 | The metrics store did not answer. Only the [series of a host](#get-apiv1hostsnameseries-viewer) uses it. |
+| `database_unavailable` | 503 | PostgreSQL cannot be reached. Any route can answer it, the login and the check of a session or display token included. See *Database down* below. |
+| `timeout` | 503 | The request was not answered within 25 seconds. Nothing tells whether a change it asked for was made; read the state again before repeating it. |
 | `internal` | 500 | A fault of the server; the cause is in the server log, not in the answer. |
 
 **Lists.** A list that can be long takes `limit` (1 to 500, default 50) and `offset` (from 0,
@@ -74,6 +76,12 @@ and their states do not lag: the server evaluates triggers when the values arriv
 the metrics store cannot be read. The data that could not be read is `null` (or an empty list),
 and `metrics_available` is `false`. The rest of the answer, which comes from PostgreSQL, is
 complete.
+
+**Database down.** When PostgreSQL cannot be reached, a request is answered within about 5
+seconds (the time the server waits for a database connection) with `503 database_unavailable`,
+in the error format and with the usual headers. A session is not ended by it: the check of the
+session itself answers 503, not 401. The web UI shows that the server cannot be reached and
+asks again by itself until the database is back.
 
 ## Login and sessions
 
