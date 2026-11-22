@@ -13,8 +13,6 @@ What is not there yet, so that you do not look for it:
 - E-mails are **plain text in English**, with times in **UTC**.
 - A host whose clock is badly wrong is not alarmed about; the server only writes a warning to
   its log (see [Values must be recent](#values-must-be-recent)).
-- A mail relay whose certificate was issued by your own (internal) certificate authority cannot
-  be used with `starttls` or `tls` yet (see [SMTP settings](#smtp-settings)).
 
 ## Contents
 
@@ -341,6 +339,8 @@ configured is never mailed, not even after you configure it later. Put the setti
 | `CERBRIX_SMTP__USERNAME` | none | User name for the mail server. Set together with the password, or not at all. |
 | `CERBRIX_SMTP__PASSWORD` | none | Password. Never written to the log or the database. |
 | `CERBRIX_SMTP__TIMEOUT_SECS` | `15` | Seconds allowed for sending one message, 1 to 120. |
+| `CERBRIX_SMTP__CA_FILE` | none | Path inside the container of a PEM file with one or more certificate authorities to trust for `starttls` and `tls`, **in addition to** the public ones. For a mail relay whose certificate was issued by your own (internal) CA. Not allowed with `none`. |
+| `CERBRIX_SMTP__HELLO_NAME` | the domain of `CERBRIX_SMTP__FROM` | The name the server gives in `EHLO`. A host name: letters, digits, `-` and `.`, at most 253 characters. When the sender's domain is not such a name (an address literal such as `[192.0.2.1]`), the address `[127.0.0.1]` is sent. |
 
 Example for a mail server with a login:
 
@@ -358,14 +358,30 @@ for example `smtp.from is required when smtp.host is set`, `smtp.username requir
 smtp.password` or `smtp.port must not be 0`. Leave a setting out instead of leaving it empty:
 an empty user name or password is rejected.
 
-Two limitations:
+**Credentials are refused with `encryption = "none"`.** The server does not start with
+`smtp.encryption = "none" would send the password unencrypted`, because that would send the
+password over the network in plain text.
 
-- **Only the public certificate authorities are trusted** for the TLS connection to the mail
-  server. A relay with a certificate from an internal CA cannot be used with `starttls` or `tls`
-  yet. (A relay on a trusted network can use `none`.)
-- **Credentials are refused with `encryption = "none"`.** The server does not start with
-  `smtp.encryption = "none" would send the password unencrypted`, because that would send the
-  password over the network in plain text.
+**A relay with a certificate from an internal CA.** Put the certificate of your internal CA (more than
+one if several authorities are to be trusted) into a PEM file,
+mount it read-only into the `server` container (for example `./smtp-ca:/etc/cerbrix/smtp-ca:ro`
+in the `volumes` of the `server` service) and set:
+
+```
+CERBRIX_SMTP__HOST=relay.internal.example.com
+CERBRIX_SMTP__ENCRYPTION=starttls
+CERBRIX_SMTP__CA_FILE=/etc/cerbrix/smtp-ca/ca.pem
+```
+
+The public authorities stay trusted, so the same setting works if the relay later gets a
+public certificate. The relay's name in `CERBRIX_SMTP__HOST` must be one its certificate is
+issued for. A file that cannot be read or holds no certificate stops the server at start with a
+message naming the file, for example `smtp.ca_file /etc/cerbrix/smtp-ca/ca.pem contains no
+certificate`.
+
+**The EHLO name.** The server introduces itself with the domain of the sender
+(`cerbrix@example.com` gives `EHLO example.com`). Set `CERBRIX_SMTP__HELLO_NAME` when the relay
+expects another name, for example the server's own host name.
 
 ## Testing the mail setup
 

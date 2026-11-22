@@ -357,6 +357,8 @@ The server sends an e-mail when a problem starts and another when it ends (see
 | `CERBRIX_SMTP__FROM` | none | The sender, for example `Cerbrix <cerbrix@example.com>`. Required when a host is set. |
 | `CERBRIX_SMTP__USERNAME`, `CERBRIX_SMTP__PASSWORD` | none | Login; set both or neither. |
 | `CERBRIX_SMTP__TIMEOUT_SECS` | `15` | Seconds allowed for one message, 1 to 120. |
+| `CERBRIX_SMTP__CA_FILE` | none | Path inside the container of a PEM file with certificate authorities trusted for `starttls` and `tls` in addition to the public ones, for a relay with a certificate from an internal CA. Not allowed with `none`. See [SMTP settings](alerting.md#smtp-settings). |
+| `CERBRIX_SMTP__HELLO_NAME` | the domain of `CERBRIX_SMTP__FROM` | The host name sent with `EHLO`. |
 
 Apply the settings with `docker compose up -d` and send a test message:
 
@@ -364,8 +366,7 @@ Apply the settings with `docker compose up -d` and send a test message:
 docker compose exec server cerbrix-server admin notify test you@example.com
 ```
 
-Only the public certificate authorities are trusted for `starttls` and `tls`; a mail relay with a
-certificate from an internal CA cannot be used with them yet. Who receives which problem is set by
+Who receives which problem is set by
 the notification files in the configuration repository, see
 [Who is told](alerting.md#who-is-told-notification-rules). Two further settings, the age limit
 for values and the interval of the no-data check, are in

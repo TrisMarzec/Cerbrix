@@ -1,17 +1,20 @@
 //! Notification channels. The first one sends e-mail over SMTP.
 
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use lettre::message::header::{ContentType, Header, HeaderName, HeaderValue};
 use lettre::message::{Mailbox, MessageBuilder};
-use lettre::transport::smtp::client::{Tls, TlsParameters};
+use lettre::transport::smtp::client::{Certificate, Tls, TlsParameters};
+use lettre::transport::smtp::extension::ClientId;
 use lettre::transport::smtp::{AsyncSmtpTransport, authentication::Credentials};
 use lettre::{AsyncTransport, Tokio1Executor};
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 
 use super::message::Notification;
-use crate::config::{SmtpConfig, SmtpEncryption};
+use crate::config::{SmtpConfig, SmtpEncryption, is_host_name};
 
 /// Longest error text, in characters.
 const MAX_ERROR_CHARS: usize = 300;
@@ -95,9 +98,26 @@ impl SmtpChannel {
         if credentials.is_some() && cfg.encryption == SmtpEncryption::None {
             anyhow::bail!("smtp.encryption = \"none\" would send the password unencrypted");
         }
+        let roots = match &cfg.ca_file {
+            Some(path) => root_certificates(path)?,
+            None => Vec::new(),
+        };
         let tls = || {
-            TlsParameters::new(host.to_owned())
-                .map_err(|_| anyhow::anyhow!("smtp.host cannot be used for TLS"))
+            // The default store holds the public (webpki) roots; `ca_file` adds to them.
+            roots
+                .iter()
+                .cloned()
+                .fold(TlsParameters::builder(host.to_owned()), |b, cert| {
+                    b.add_root_certificate(cert)
+                })
+                .build()
+                .map_err(|_| match &cfg.ca_file {
+                    Some(path) => anyhow::anyhow!(
+                        "smtp.ca_file {} holds a certificate that cannot be used",
+                        path.display()
+                    ),
+                    None => anyhow::anyhow!("smtp.host cannot be used for TLS"),
+                })
         };
         let tls = match cfg.encryption {
             // `Required`: the dialogue stops before AUTH and MAIL if STARTTLS is not offered.
@@ -110,6 +130,9 @@ impl SmtpChannel {
             .port(cfg.port)
             .tls(tls)
             .timeout(Some(timeout));
+        if let Some(name) = hello_name(cfg) {
+            builder = builder.hello_name(ClientId::Domain(name));
+        }
         let mut secrets = Vec::new();
         if let Some(credentials) = credentials {
             builder = builder.credentials(credentials);
@@ -185,6 +208,38 @@ impl Channel for SmtpChannel {
             }
         }
     }
+}
+
+/// The name sent with EHLO: `smtp.hello_name`, else the domain of `smtp.from` when it is
+/// a host name, else `None` (lettre's default, an address literal).
+pub(crate) fn hello_name(cfg: &SmtpConfig) -> Option<String> {
+    if let Some(name) = &cfg.hello_name {
+        return Some(name.clone());
+    }
+    let from: Mailbox = cfg.from.as_deref()?.parse().ok()?;
+    let domain = from.email.domain();
+    is_host_name(domain).then(|| domain.to_owned())
+}
+
+/// Every certificate in the PEM file `path`. Error texts name the file, never its content.
+fn root_certificates(path: &Path) -> anyhow::Result<Vec<Certificate>> {
+    let shown = path.display();
+    let pem = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("smtp.ca_file {shown} cannot be read: {}", e.kind()))?;
+    let certs = CertificateDer::pem_slice_iter(&pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| anyhow::anyhow!("smtp.ca_file {shown} is not a valid PEM file"))?;
+    if certs.is_empty() {
+        anyhow::bail!("smtp.ca_file {shown} contains no certificate");
+    }
+    certs
+        .into_iter()
+        .map(|der| {
+            Certificate::from_der(der.to_vec()).map_err(|_| {
+                anyhow::anyhow!("smtp.ca_file {shown} holds a certificate that cannot be used")
+            })
+        })
+        .collect()
 }
 
 /// Whether a failed send is permanent: a 5xx answer, except the authentication answers
@@ -272,9 +327,82 @@ mod tests {
         (addr, handle)
     }
 
-    async fn serve(stream: tokio::net::TcpStream, script: Script) -> Captured {
+    /// Like `smtp_server`, but every connection speaks TLS from the first byte with
+    /// `tls`. A connection whose handshake fails is recorded as an empty `Captured`.
+    async fn smtps_server(
+        scripts: Vec<Script>,
+        tls: rustls::ServerConfig,
+    ) -> (SocketAddr, JoinHandle<Vec<Captured>>) {
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut all = Vec::new();
+            for script in scripts {
+                let (stream, _) = listener.accept().await.unwrap();
+                match acceptor.accept(stream).await {
+                    Ok(stream) => all.push(serve(stream, script).await),
+                    Err(_) => all.push(Captured::default()),
+                }
+            }
+            all
+        });
+        (addr, handle)
+    }
+
+    /// A certificate authority of its own, as a PEM file, and a server configuration
+    /// with a certificate for `localhost` issued by it.
+    struct InternalCa {
+        dir: tempfile::TempDir,
+        server: rustls::ServerConfig,
+    }
+
+    impl InternalCa {
+        fn new() -> Self {
+            use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+            let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            let ca_key = KeyPair::generate().unwrap();
+            let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+            let issuer = Issuer::new(ca_params, ca_key);
+            let leaf_key = KeyPair::generate().unwrap();
+            let leaf = CertificateParams::new(vec!["localhost".to_owned()])
+                .unwrap()
+                .signed_by(&leaf_key, &issuer)
+                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("ca.pem"), ca_cert.pem()).unwrap();
+            let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let key = rustls::pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into());
+            let server = rustls::ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![leaf.der().clone()], key)
+                .unwrap();
+            InternalCa { dir, server }
+        }
+
+        fn ca_file(&self) -> std::path::PathBuf {
+            self.dir.path().join("ca.pem")
+        }
+    }
+
+    /// Implicit TLS to `localhost`, where the test server listens.
+    fn tls_config(addr: SocketAddr) -> SmtpConfig {
+        SmtpConfig {
+            host: Some("localhost".to_owned()),
+            encryption: SmtpEncryption::Tls,
+            ..config(addr)
+        }
+    }
+
+    async fn serve<S>(stream: S, script: Script) -> Captured
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let mut captured = Captured::default();
-        let (read, mut write) = stream.into_split();
+        let (read, mut write) = tokio::io::split(stream);
         let mut read = BufReader::new(read);
         let Some(greeting) = script.greeting else {
             // Never answer; wait until the client gives up and closes.
@@ -643,5 +771,115 @@ mod tests {
             "{result:?}"
         );
         finished(server).await;
+    }
+
+    fn ehlo_of(captured: &Captured) -> &str {
+        captured
+            .commands
+            .iter()
+            .find(|c| c.to_ascii_uppercase().starts_with("EHLO"))
+            .expect("an EHLO command")
+    }
+
+    #[tokio::test]
+    async fn ehlo_uses_the_domain_of_from() {
+        let (addr, server) = smtp_server(vec![Script::default()]).await;
+        let cfg = SmtpConfig {
+            from: Some("Cerbrix <alerts@example.net>".to_owned()),
+            ..config(addr)
+        };
+        assert_eq!(hello_name(&cfg).as_deref(), Some("example.net"));
+        SmtpChannel::new(&cfg)
+            .unwrap()
+            .send(TO, &notification())
+            .await
+            .unwrap();
+        let captured = finished(server).await;
+        assert_eq!(ehlo_of(&captured[0]), "EHLO example.net");
+    }
+
+    #[tokio::test]
+    async fn ehlo_uses_the_configured_name() {
+        let (addr, server) = smtp_server(vec![Script::default()]).await;
+        let cfg = SmtpConfig {
+            from: Some("Cerbrix <alerts@example.net>".to_owned()),
+            hello_name: Some("mon.example.net".to_owned()),
+            ..config(addr)
+        };
+        SmtpChannel::new(&cfg)
+            .unwrap()
+            .send(TO, &notification())
+            .await
+            .unwrap();
+        let captured = finished(server).await;
+        assert_eq!(ehlo_of(&captured[0]), "EHLO mon.example.net");
+    }
+
+    #[test]
+    fn hello_name_falls_back_to_the_default_for_an_address_literal() {
+        let cfg = SmtpConfig {
+            from: Some("cerbrix@[192.0.2.1]".to_owned()),
+            ..SmtpConfig::default()
+        };
+        assert_eq!(hello_name(&cfg), None);
+        assert_eq!(hello_name(&SmtpConfig::default()), None);
+    }
+
+    #[tokio::test]
+    async fn a_relay_with_an_internal_ca_is_trusted_with_ca_file() {
+        let ca = InternalCa::new();
+        let (addr, server) = smtps_server(vec![Script::default()], ca.server.clone()).await;
+        let cfg = SmtpConfig {
+            ca_file: Some(ca.ca_file()),
+            ..tls_config(addr)
+        };
+        SmtpChannel::new(&cfg)
+            .unwrap()
+            .send(TO, &notification())
+            .await
+            .unwrap();
+        let captured = finished(server).await;
+        assert!(captured[0].data.contains("Host: db-02"), "{captured:?}");
+    }
+
+    #[tokio::test]
+    async fn a_relay_with_an_internal_ca_is_refused_without_ca_file() {
+        let ca = InternalCa::new();
+        let (addr, server) = smtps_server(vec![Script::default()], ca.server.clone()).await;
+        let result = SmtpChannel::new(&tls_config(addr))
+            .unwrap()
+            .send(TO, &notification())
+            .await;
+        assert!(
+            matches!(result, Err(ChannelError::Retryable(_))),
+            "{result:?}"
+        );
+        let captured = finished(server).await;
+        assert!(captured[0].commands.is_empty(), "{captured:?}");
+    }
+
+    #[test]
+    fn an_unreadable_ca_file_fails_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.pem");
+        let not_pem = dir.path().join("not-pem.pem");
+        std::fs::write(&not_pem, "CONTENT-MARKER no certificate in here\n").unwrap();
+        let broken = dir.path().join("broken.pem");
+        std::fs::write(
+            &broken,
+            "-----BEGIN CERTIFICATE-----\nCONTENT-MARKER!!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        for path in [missing, not_pem, broken] {
+            let cfg = SmtpConfig {
+                host: Some("mail.example.com".to_owned()),
+                from: Some("cerbrix@example.com".to_owned()),
+                ca_file: Some(path.clone()),
+                ..SmtpConfig::default()
+            };
+            let msg = SmtpChannel::new(&cfg).unwrap_err().to_string();
+            assert!(msg.contains(&path.display().to_string()), "{msg}");
+            assert!(!msg.contains("CONTENT-MARKER"), "{msg}");
+        }
     }
 }

@@ -227,6 +227,10 @@ pub struct SmtpConfig {
     pub from: Option<String>,
     /// Total time allowed for one message, in seconds.
     pub timeout_secs: u64,
+    /// PEM file with certificate authorities trusted in addition to the public ones.
+    pub ca_file: Option<PathBuf>,
+    /// The name sent with EHLO; the domain of `from` when unset.
+    pub hello_name: Option<String>,
 }
 
 impl Default for SmtpConfig {
@@ -239,6 +243,8 @@ impl Default for SmtpConfig {
             password: None,
             from: None,
             timeout_secs: 15,
+            ca_file: None,
+            hello_name: None,
         }
     }
 }
@@ -253,6 +259,8 @@ impl fmt::Debug for SmtpConfig {
             .field("password", &Redacted(self.password.is_some()))
             .field("from", &self.from)
             .field("timeout_secs", &self.timeout_secs)
+            .field("ca_file", &self.ca_file)
+            .field("hello_name", &self.hello_name)
             .finish()
     }
 }
@@ -273,6 +281,14 @@ impl SmtpConfig {
             return bad(&format!(
                 "smtp.timeout_secs must be between 1 and {MAX_SMTP_TIMEOUT_SECS}"
             ));
+        }
+        if let Some(name) = &self.hello_name
+            && !is_host_name(name)
+        {
+            return bad("smtp.hello_name must be a host name");
+        }
+        if self.ca_file.is_some() && self.encryption == SmtpEncryption::None {
+            return bad("smtp.ca_file needs starttls or tls");
         }
         let Some(host) = &self.host else {
             return Ok(());
@@ -304,6 +320,14 @@ impl SmtpConfig {
         }
         Ok(())
     }
+}
+
+/// A host name for EHLO: 1 to 253 ASCII letters, digits, `-` and `.`.
+pub(crate) fn is_host_name(name: &str) -> bool {
+    (1..=253).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
 
 /// Settings for configuration from a Git repository.
@@ -1485,6 +1509,60 @@ mod tests {
                 let toml = smtp_toml(&format!("timeout_secs = {value}\n"));
                 assert_eq!(load_gitops(&toml).is_ok(), ok, "timeout {value}");
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_hello_name_must_be_a_host_name() {
+        Jail::expect_with(|jail| {
+            let cfg = load_gitops(&smtp_toml("")).unwrap();
+            assert!(cfg.smtp.hello_name.is_none() && cfg.smtp.ca_file.is_none());
+            let cfg = load_gitops(&smtp_toml("hello_name = \"mon-1.example.net\"\n")).unwrap();
+            assert_eq!(cfg.smtp.hello_name.as_deref(), Some("mon-1.example.net"));
+            let long = "a".repeat(254);
+            for bad in [
+                "",
+                "[127.0.0.1]",
+                "mon example",
+                "mon_1.example",
+                "mön.example",
+                &long,
+            ] {
+                let toml = smtp_toml(&format!("hello_name = \"{bad}\"\n"));
+                let msg = invalid(load_gitops(&toml));
+                assert_eq!(msg, "smtp.hello_name must be a host name", "{bad:?}");
+            }
+            assert!(load_gitops(&smtp_toml(&format!("hello_name = \"{}\"\n", &long[1..]))).is_ok());
+            jail.create_file("cerbrix.toml", &smtp_toml(""))?;
+            jail.set_env("CERBRIX_SMTP__HELLO_NAME", "mon.example.net");
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert_eq!(cfg.smtp.hello_name.as_deref(), Some("mon.example.net"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_ca_file_needs_tls() {
+        Jail::expect_with(|jail| {
+            let ca = format!("ca_file = \"{ABS_KEY}\"\n");
+            for (encryption, ok) in [("starttls", true), ("tls", true), ("none", false)] {
+                let toml = smtp_toml(&format!("encryption = \"{encryption}\"\n{ca}"));
+                match load_gitops(&toml) {
+                    Ok(cfg) => {
+                        assert!(ok, "{encryption}");
+                        assert_eq!(cfg.smtp.ca_file, Some(PathBuf::from(ABS_KEY)));
+                    }
+                    Err(e) => {
+                        assert!(!ok, "{encryption}: {e}");
+                        assert_eq!(invalid(Err(e)), "smtp.ca_file needs starttls or tls");
+                    }
+                }
+            }
+            jail.create_file("cerbrix.toml", &smtp_toml(""))?;
+            jail.set_env("CERBRIX_SMTP__CA_FILE", ABS_KEY);
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert_eq!(cfg.smtp.ca_file, Some(PathBuf::from(ABS_KEY)));
             Ok(())
         });
     }
