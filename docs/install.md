@@ -192,6 +192,8 @@ The settings go into `deploy/server.env` (a commented block is in the example fi
 | `CERBRIX_GITOPS__TOKEN` | none | Access token for an `https://` URL. Not allowed together with an SSH key. |
 | `CERBRIX_GITOPS__SSH_KEY_FILE` | none | Absolute path of a private key inside the container, for an `ssh://` or `user@host:path` URL. |
 | `CERBRIX_GITOPS__KNOWN_HOSTS_FILE` | none | Absolute path of a `known_hosts` file inside the container. |
+| `CERBRIX_GITOPS__PROXY` | none | Proxy for an `https://` URL: `http://`, `https://`, `socks5://` or `socks5h://`, optionally with `user:password@`. See [Behind a proxy or with a private CA](#behind-a-proxy-or-with-a-private-ca). |
+| `CERBRIX_GITOPS__CA_FILE` | none | Absolute path inside the container of a PEM file with the certificate authorities to trust for an `https://` URL. It replaces the default bundle. |
 | `CERBRIX_GITOPS__CACHE_DIR` | `/var/lib/cerbrix/git` | Where the server keeps its checkout. The Compose file mounts a volume here. |
 | `CERBRIX_GITOPS__MAX_HOST_REMOVAL_PERCENT` | `50` | Mass-removal guard, see [the repository guide](configuration-repository.md#mass-removal-guard). |
 
@@ -257,6 +259,35 @@ installation that matters.
 
 Apply the settings with `docker compose up -d`.
 
+### Behind a proxy or with a private CA
+
+The server runs `git` with a cleared environment, so `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`
+and `GIT_SSL_CAINFO` never reach it. Use two settings instead. They apply to `https://`
+repositories only; with another URL the server does not start. SSH repositories are not
+affected by them: SSH connections do not go through the proxy.
+
+- `CERBRIX_GITOPS__PROXY` is the proxy for every fetch (`NO_PROXY` has no counterpart: set
+  the proxy only when the repository is reached through it). `http://` and `https://` name an
+  HTTP proxy, `socks5://` a SOCKS proxy that receives an address, `socks5h://` one that
+  resolves the host name itself. Credentials go into the URL, percent-encoded where needed
+  (`http://user:p%40ss@proxy.example.com:3128`). The password is a secret like the token: it
+  is masked where the settings are printed and removed from error messages. Keep `deploy/server.env` private.
+- `CERBRIX_GITOPS__CA_FILE` is a PEM file with the certificate authorities git trusts for the
+  fetch. It replaces git's default bundle instead of adding to it, so it must contain the
+  authority that signed the Git server's certificate (behind a proxy that inspects TLS traffic,
+  the authority the proxy signs with).
+
+Mount the file read-only, as with the SSH key (for example `./git-ca:/etc/cerbrix/git-ca:ro`
+in the `volumes` of the `server` service), and set:
+
+```
+CERBRIX_GITOPS__ENABLED=true
+CERBRIX_GITOPS__URL=https://git.internal.example.com/ops/monitoring-config.git
+CERBRIX_GITOPS__TOKEN=the-token
+CERBRIX_GITOPS__PROXY=http://proxy.example.com:3128
+CERBRIX_GITOPS__CA_FILE=/etc/cerbrix/git-ca/ca.pem
+```
+
 ### Checking and operating it
 
 ```sh
@@ -285,9 +316,9 @@ the server and need no editing; if the checkout is damaged the server rebuilds i
 
 ### Limits to know
 
-- The server runs `git` with a cleared environment. Proxy settings (`HTTPS_PROXY`) and custom CA
-  certificate variables are not passed on, so the repository must be reachable directly and with
-  a certificate that the system trusts. This is a known limitation.
+- The server runs `git` with a cleared environment: proxy and CA variables such as
+  `HTTPS_PROXY` or `SSL_CERT_FILE` are not passed on. Use `CERBRIX_GITOPS__PROXY` and
+  `CERBRIX_GITOPS__CA_FILE`, see [Behind a proxy or with a private CA](#behind-a-proxy-or-with-a-private-ca).
 - HTTP redirects are not followed, so the token is never sent to another address. The
   configured URL must be the final one: after a repository was renamed or moved, set the new
   URL instead of relying on the provider's redirect.

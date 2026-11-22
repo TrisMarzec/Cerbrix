@@ -318,6 +318,11 @@ pub struct GitopsConfig {
     pub token: Option<String>,
     pub ssh_key_file: Option<PathBuf>,
     pub known_hosts_file: Option<PathBuf>,
+    /// Proxy for an `https://` repository: `http://`, `https://`, `socks5://` or
+    /// `socks5h://`. Its password is a secret.
+    pub proxy: Option<String>,
+    /// Certificate authorities for an `https://` repository, in place of git's bundle.
+    pub ca_file: Option<PathBuf>,
     pub cache_dir: PathBuf,
     pub max_host_removal_percent: u8,
 }
@@ -332,6 +337,8 @@ impl Default for GitopsConfig {
             token: None,
             ssh_key_file: None,
             known_hosts_file: None,
+            proxy: None,
+            ca_file: None,
             cache_dir: PathBuf::from("/var/lib/cerbrix/git"),
             max_host_removal_percent: 50,
         }
@@ -367,6 +374,35 @@ fn url_without_userinfo(raw: &str) -> String {
     }
 }
 
+/// The URL for display, with `***` in place of a user name and password.
+fn url_with_masked_userinfo(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut u) => {
+            if !u.username().is_empty() || u.password().is_some() {
+                let _ = u.set_password(None);
+                let _ = u.set_username("***");
+            }
+            u.to_string()
+        }
+        Err(_) => "<unparseable>".to_owned(),
+    }
+}
+
+/// A proxy URL git can use: `http`, `https`, `socks5` or `socks5h` with a host.
+fn valid_proxy(raw: &str) -> bool {
+    // `Url::parse` would silently trim surrounding spaces and control characters.
+    if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    match url::Url::parse(raw) {
+        Ok(u) => {
+            matches!(u.scheme(), "http" | "https" | "socks5" | "socks5h")
+                && u.host_str().is_some_and(|h| !h.is_empty())
+        }
+        Err(_) => false,
+    }
+}
+
 impl fmt::Debug for GitopsConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GitopsConfig")
@@ -377,6 +413,11 @@ impl fmt::Debug for GitopsConfig {
             .field("token", &Redacted(self.token.is_some()))
             .field("ssh_key_file", &self.ssh_key_file)
             .field("known_hosts_file", &self.known_hosts_file)
+            .field(
+                "proxy",
+                &self.proxy.as_deref().map(url_with_masked_userinfo),
+            )
+            .field("ca_file", &self.ca_file)
             .field("cache_dir", &self.cache_dir)
             .field("max_host_removal_percent", &self.max_host_removal_percent)
             .finish()
@@ -497,9 +538,18 @@ impl GitopsConfig {
         if self.ssh_key_file.is_some() && !matches!(kind, GitUrlKind::Ssh | GitUrlKind::ScpLike) {
             return bad("gitops.ssh_key_file requires an ssh:// or user@host:path gitops.url");
         }
+        if let Some(proxy) = &self.proxy
+            && !valid_proxy(proxy)
+        {
+            return bad("gitops.proxy must be an http, https or socks5 URL");
+        }
+        if (self.proxy.is_some() || self.ca_file.is_some()) && kind != GitUrlKind::Https {
+            return bad("gitops.proxy and gitops.ca_file need an https repository URL");
+        }
         for (key, path) in [
             ("gitops.ssh_key_file", &self.ssh_key_file),
             ("gitops.known_hosts_file", &self.known_hosts_file),
+            ("gitops.ca_file", &self.ca_file),
         ] {
             if let Some(path) = path
                 && (path.as_os_str().is_empty()
@@ -1157,6 +1207,103 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("git.example.com"), "{shown}");
+    }
+
+    #[test]
+    fn proxy_must_be_an_http_https_or_socks5_url() {
+        Jail::expect_with(|jail| {
+            let cfg = load_gitops(&gitops_toml("")).unwrap();
+            assert!(cfg.gitops.proxy.is_none() && cfg.gitops.ca_file.is_none());
+            for proxy in [
+                "http://proxy.example.com:3128",
+                "https://proxy.example.com",
+                "socks5://127.0.0.1:1080",
+                "socks5h://user:pw@proxy:1080",
+                "HTTP://proxy:3128",
+            ] {
+                let toml = gitops_toml(&format!("proxy = {proxy:?}\n"));
+                assert!(load_gitops(&toml).is_ok(), "{proxy} rejected");
+            }
+            // TOML string literals.
+            for proxy in [
+                r#""""#,
+                r#""proxy.example.com:3128""#,
+                r#""ftp://proxy:21""#,
+                r#""socks4://proxy:1080""#,
+                r#""http://""#,
+                r#""http://proxy :3128""#,
+                r#"" http://proxy:3128""#,
+                r#""http://proxy:3128\n""#,
+                r#""http://pro\u0007xy:3128""#,
+            ] {
+                let msg = invalid(load_gitops(&gitops_toml(&format!("proxy = {proxy}\n"))));
+                assert_eq!(
+                    msg, "gitops.proxy must be an http, https or socks5 URL",
+                    "{proxy:?}"
+                );
+            }
+            // A proxy password in an error never shows.
+            let msg = invalid(load_gitops(&gitops_toml(
+                "proxy = \"ftp://user:pw-SECRET@proxy\"\n",
+            )));
+            assert!(!msg.contains("pw-SECRET"), "{msg}");
+            jail.create_file("cerbrix.toml", &gitops_toml(""))?;
+            jail.set_env("CERBRIX_GITOPS__PROXY", "http://proxy:3128");
+            jail.set_env("CERBRIX_GITOPS__CA_FILE", ABS_KEY);
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert_eq!(cfg.gitops.proxy.as_deref(), Some("http://proxy:3128"));
+            assert_eq!(cfg.gitops.ca_file, Some(PathBuf::from(ABS_KEY)));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn proxy_and_ca_file_need_an_https_repository() {
+        Jail::expect_with(|_| {
+            let proxy = "proxy = \"http://proxy:3128\"\n".to_owned();
+            let ca = format!("ca_file = \"{ABS_KEY}\"\n");
+            for extra in [&proxy, &ca] {
+                for url in [
+                    "ssh://git@host/org/r.git",
+                    "git@host:org/r.git",
+                    "file:///srv/repo",
+                ] {
+                    let msg = invalid(load_gitops(&gitops_toml_with_url(url, extra)));
+                    assert_eq!(
+                        msg, "gitops.proxy and gitops.ca_file need an https repository URL",
+                        "{url}"
+                    );
+                }
+                assert!(load_gitops(&gitops_toml(extra)).is_ok(), "{extra}");
+            }
+            assert!(load_gitops(&gitops_toml(&format!("{proxy}{ca}"))).is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn relative_ca_file_rejected() {
+        Jail::expect_with(|_| {
+            let msg = invalid(load_gitops(&gitops_toml("ca_file = \"certs/ca.pem\"\n")));
+            assert_eq!(msg, "gitops.ca_file must be an absolute path");
+            let msg = invalid(load_gitops(&gitops_toml("ca_file = \"\"\n")));
+            assert_eq!(msg, "gitops.ca_file is not a valid path");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn debug_masks_the_proxy_user_info() {
+        let cfg = GitopsConfig {
+            proxy: Some("http://user:secret@proxy:3128".into()),
+            ..GitopsConfig::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(
+            !shown.contains("secret") && !shown.contains("user"),
+            "{shown}"
+        );
+        assert!(shown.contains("proxy:3128"), "{shown}");
     }
 
     #[test]
