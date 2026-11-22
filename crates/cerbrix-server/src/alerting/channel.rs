@@ -104,20 +104,14 @@ impl SmtpChannel {
         };
         let tls = || {
             // The default store holds the public (webpki) roots; `ca_file` adds to them.
-            roots
-                .iter()
-                .cloned()
-                .fold(TlsParameters::builder(host.to_owned()), |b, cert| {
-                    b.add_root_certificate(cert)
-                })
+            // `root_certificates` has already checked that each one can be added.
+            let mut builder = TlsParameters::builder(host.to_owned());
+            for cert in &roots {
+                builder = builder.add_root_certificate(cert.clone());
+            }
+            builder
                 .build()
-                .map_err(|_| match &cfg.ca_file {
-                    Some(path) => anyhow::anyhow!(
-                        "smtp.ca_file {} holds a certificate that cannot be used",
-                        path.display()
-                    ),
-                    None => anyhow::anyhow!("smtp.host cannot be used for TLS"),
-                })
+                .map_err(|e| anyhow::anyhow!("smtp.host cannot be used for TLS: {e}"))
         };
         let tls = match cfg.encryption {
             // `Required`: the dialogue stops before AUTH and MAIL if STARTTLS is not offered.
@@ -221,7 +215,8 @@ pub(crate) fn hello_name(cfg: &SmtpConfig) -> Option<String> {
     is_host_name(domain).then(|| domain.to_owned())
 }
 
-/// Every certificate in the PEM file `path`. Error texts name the file, never its content.
+/// Every certificate in the PEM file `path`, each checked to be usable as a root the way
+/// lettre adds it (a rustls `RootCertStore`). Error texts name the file, never its content.
 fn root_certificates(path: &Path) -> anyhow::Result<Vec<Certificate>> {
     let shown = path.display();
     let pem = std::fs::read(path)
@@ -232,11 +227,16 @@ fn root_certificates(path: &Path) -> anyhow::Result<Vec<Certificate>> {
     if certs.is_empty() {
         anyhow::bail!("smtp.ca_file {shown} contains no certificate");
     }
+    let mut check = rustls::RootCertStore::empty();
     certs
         .into_iter()
         .map(|der| {
-            Certificate::from_der(der.to_vec()).map_err(|_| {
-                anyhow::anyhow!("smtp.ca_file {shown} holds a certificate that cannot be used")
+            // rustls' error names the kind of fault (e.g. `BadEncoding`), not the bytes.
+            check.add(der.clone()).map_err(|e| {
+                anyhow::anyhow!("smtp.ca_file {shown} holds a certificate that cannot be used: {e}")
+            })?;
+            Certificate::from_der(der.to_vec()).map_err(|e| {
+                anyhow::anyhow!("smtp.ca_file {shown} holds a certificate that cannot be used: {e}")
             })
         })
         .collect()
@@ -851,7 +851,29 @@ mod tests {
             .send(TO, &notification())
             .await;
         assert!(
-            matches!(result, Err(ChannelError::Retryable(_))),
+            matches!(&result, Err(ChannelError::Retryable(t)) if t.contains("UnknownIssuer")),
+            "{result:?}"
+        );
+        let captured = finished(server).await;
+        assert!(captured[0].commands.is_empty(), "{captured:?}");
+    }
+
+    #[tokio::test]
+    async fn the_host_name_is_still_checked_with_ca_file() {
+        // The certificate is for `localhost`; connecting as `127.0.0.1` must be refused.
+        let ca = InternalCa::new();
+        let (addr, server) = smtps_server(vec![Script::default()], ca.server.clone()).await;
+        let cfg = SmtpConfig {
+            host: Some("127.0.0.1".to_owned()),
+            ca_file: Some(ca.ca_file()),
+            ..tls_config(addr)
+        };
+        let result = SmtpChannel::new(&cfg)
+            .unwrap()
+            .send(TO, &notification())
+            .await;
+        assert!(
+            matches!(&result, Err(ChannelError::Retryable(t)) if t.contains("certificate not valid for name")),
             "{result:?}"
         );
         let captured = finished(server).await;
@@ -861,16 +883,42 @@ mod tests {
     #[test]
     fn an_unreadable_ca_file_fails_at_start() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing.pem");
-        let not_pem = dir.path().join("not-pem.pem");
-        std::fs::write(&not_pem, "CONTENT-MARKER no certificate in here\n").unwrap();
-        let broken = dir.path().join("broken.pem");
-        std::fs::write(
-            &broken,
-            "-----BEGIN CERTIFICATE-----\nCONTENT-MARKER!!\n-----END CERTIFICATE-----\n",
-        )
-        .unwrap();
-        for path in [missing, not_pem, broken] {
+        let file = |name: &str, content: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            path
+        };
+        // `CONTENTMARKERAAA` is valid base64 for 12 bytes that are no certificate.
+        let cases = [
+            (dir.path().join("missing.pem"), "cannot be read"),
+            (file("empty.pem", ""), "contains no certificate"),
+            (
+                file("text.pem", "CONTENT-MARKER no certificate in here\n"),
+                "contains no certificate",
+            ),
+            (
+                file(
+                    "key-only.pem",
+                    "-----BEGIN PRIVATE KEY-----\nQ09OVEVOVA==\n-----END PRIVATE KEY-----\n",
+                ),
+                "contains no certificate",
+            ),
+            (
+                file(
+                    "broken.pem",
+                    "-----BEGIN CERTIFICATE-----\nCONTENT-MARKER!!\n-----END CERTIFICATE-----\n",
+                ),
+                "is not a valid PEM file",
+            ),
+            (
+                file(
+                    "not-a-cert.pem",
+                    "-----BEGIN CERTIFICATE-----\nCONTENTMARKERAAA\n-----END CERTIFICATE-----\n",
+                ),
+                "holds a certificate that cannot be used",
+            ),
+        ];
+        for (path, expected) in cases {
             let cfg = SmtpConfig {
                 host: Some("mail.example.com".to_owned()),
                 from: Some("cerbrix@example.com".to_owned()),
@@ -878,8 +926,9 @@ mod tests {
                 ..SmtpConfig::default()
             };
             let msg = SmtpChannel::new(&cfg).unwrap_err().to_string();
-            assert!(msg.contains(&path.display().to_string()), "{msg}");
-            assert!(!msg.contains("CONTENT-MARKER"), "{msg}");
+            let prefix = format!("smtp.ca_file {} {expected}", path.display());
+            assert!(msg.starts_with(&prefix), "{prefix:?}: {msg}");
+            assert!(!msg.contains("CONTENT") && !msg.contains("MARKER"), "{msg}");
         }
     }
 }

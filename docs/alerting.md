@@ -362,10 +362,10 @@ an empty user name or password is rejected.
 `smtp.encryption = "none" would send the password unencrypted`, because that would send the
 password over the network in plain text.
 
-**A relay with a certificate from an internal CA.** Put the certificate of your internal CA (more than
-one if several authorities are to be trusted) into a PEM file,
-mount it read-only into the `server` container (for example `./smtp-ca:/etc/cerbrix/smtp-ca:ro`
-in the `volumes` of the `server` service) and set:
+**A relay with a certificate from an internal CA.** Put the certificate of your internal CA
+(more than one if several authorities are to be trusted) into a PEM file, mount it read-only
+into the `server` container (for example `./smtp-ca:/etc/cerbrix/smtp-ca:ro` in the `volumes`
+of the `server` service) and set:
 
 ```
 CERBRIX_SMTP__HOST=relay.internal.example.com
@@ -375,9 +375,9 @@ CERBRIX_SMTP__CA_FILE=/etc/cerbrix/smtp-ca/ca.pem
 
 The public authorities stay trusted, so the same setting works if the relay later gets a
 public certificate. The relay's name in `CERBRIX_SMTP__HOST` must be one its certificate is
-issued for. A file that cannot be read or holds no certificate stops the server at start with a
-message naming the file, for example `smtp.ca_file /etc/cerbrix/smtp-ca/ca.pem contains no
-certificate`.
+issued for. A file that cannot be read, is not PEM, holds no certificate or holds one that
+cannot be used stops the server at start with a message naming the file, for example
+`smtp.ca_file /etc/cerbrix/smtp-ca/ca.pem contains no certificate`.
 
 **The EHLO name.** The server introduces itself with the domain of the sender
 (`cerbrix@example.com` gives `EHLO example.com`). Set `CERBRIX_SMTP__HELLO_NAME` when the relay
