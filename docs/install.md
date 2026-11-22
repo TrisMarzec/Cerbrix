@@ -102,6 +102,7 @@ counting of failed logins:
 | `CERBRIX_AUTH__SESSION_MAX_SECS` | `604800` (7 days) | A session ends this long after the login, however active it is. Not smaller than the idle time, at most 2592000 (30 days). |
 | `CERBRIX_AUTH__SECURE_COOKIE` | unset | Whether the session cookie carries the `Secure` attribute, so that a browser sends it only over HTTPS. Unset means on, unless `CERBRIX_SERVER__INSECURE_HTTP=true`. Set it to `true` when a reverse proxy terminates TLS. |
 | `CERBRIX_AUTH__CLIENT_ADDRESS_HEADER` | unset | The request header that names the client address for counting failed logins, such as `X-Forwarded-For`; the right-most address in it is used. Unset means the address of the connection. Set it only behind a reverse proxy, see [Behind a reverse proxy](#behind-a-reverse-proxy). |
+| `CERBRIX_AUTH__THROTTLE_LOGINS` | `true` | Whether failed logins are counted per client address. `false` switches that counting off, for an installation where all clients share one address (see below); the lock of a user after five wrong passwords stays. |
 
 An invalid value stops the server at start. After five wrong passwords in a row a user is
 locked for five minutes; the lock ends by itself and a login with the right password resets
@@ -118,6 +119,15 @@ does not prevent somebody who knows a user name from keeping that user locked: f
 passwords lock a user, fewer than the ten an address may try in 5 minutes, so one address is
 still enough for one user. And it offers little against somebody with many addresses, such as a
 large IPv6 range, who gets ten tries for each address (for IPv6, each /64).
+
+All clients can share one counter without any proxy, too. With Docker Desktop (Windows, macOS),
+with rootless Docker, and for connections from the Docker host itself, the server does not see
+the address of the client but that of the Docker gateway. Then 10 failed logins by anybody within
+5 minutes refuse the logins of everybody until they are over. The warning the server logs when it
+starts refusing names the address: if that is the address of the Docker gateway, every client
+shares it. Either put a reverse proxy in front of the
+server and set `CERBRIX_AUTH__CLIENT_ADDRESS_HEADER` (see
+[Behind a reverse proxy](#behind-a-reverse-proxy)), or set `CERBRIX_AUTH__THROTTLE_LOGINS=false`.
 
 ### Behind a reverse proxy
 
@@ -148,7 +158,9 @@ client address to that header or sets it (nginx: `proxy_set_header X-Forwarded-F
 $proxy_add_x_forwarded_for;`, Caddy does it by default). The server uses the right-most address
 in the header, the one the proxy added; a client that can reach the server directly could
 write any address there itself. When the header is missing or holds no address, the address of
-the connection counts.
+the connection counts. With more than one proxy in a row, such as a CDN in front of nginx, the
+right-most entry is the address of the outer proxy, so all clients share one counter again,
+unless the inner proxy is configured to pass the real client address as the last entry.
 
 ## 4. Create a host and an enrolment key
 
@@ -360,7 +372,7 @@ The server sends an e-mail when a problem starts and another when it ends (see
 | `CERBRIX_SMTP__FROM` | none | The sender, for example `Cerbrix <cerbrix@example.com>`. Required when a host is set. |
 | `CERBRIX_SMTP__USERNAME`, `CERBRIX_SMTP__PASSWORD` | none | Login; set both or neither. |
 | `CERBRIX_SMTP__TIMEOUT_SECS` | `15` | Seconds allowed for one message, 1 to 120. |
-| `CERBRIX_SMTP__CA_FILE` | none | Path inside the container of a PEM file with certificate authorities trusted for `starttls` and `tls` in addition to the public ones, for a relay with a certificate from an internal CA. Not allowed with `none`. See [SMTP settings](alerting.md#smtp-settings). |
+| `CERBRIX_SMTP__CA_FILE` | none | Absolute path inside the container of a PEM file with certificate authorities trusted for `starttls` and `tls` in addition to the public ones, for a relay with a certificate from an internal CA. Not allowed with `none`. See [SMTP settings](alerting.md#smtp-settings). |
 | `CERBRIX_SMTP__HELLO_NAME` | the domain of `CERBRIX_SMTP__FROM` | The host name sent with `EHLO`. |
 
 Apply the settings with `docker compose up -d` and send a test message:
@@ -397,10 +409,17 @@ metric values. Shortening `CERBRIX_METRICS_RETENTION` and restarting the stack
 be brought back. Lengthening it keeps values from then on, it does not bring back values already
 removed.
 
-The server deletes expired problems once an hour, the first time right after it starts, in batches of
-5000 problems so that no single step holds the table for long. Open problems are never deleted, however long ago they started: only the time a problem
-was resolved counts. The sync history is kept; retention does not touch it. An invalid value of
+The server deletes expired problems once an hour, the first time right after it starts, in
+batches of 5000 problems so that no single step holds the table for long. Open problems are
+never deleted, however long ago they started: only the time a problem was resolved counts. The
+sync history is kept; retention does not touch it. An invalid value of
 `CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS` stops the server at start.
+
+**Upgrading from a release without retention:** the first start of this version deletes, within
+seconds, every problem that was resolved more than 365 days ago, together with its notification
+records. This cannot be undone. To keep that history, set
+`CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS=0` (keep for ever) or a larger number in
+`deploy/server.env` **before** you start the new version for the first time.
 
 ## Making the server reachable for agents
 

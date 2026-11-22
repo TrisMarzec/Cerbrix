@@ -339,7 +339,7 @@ configured is never mailed, not even after you configure it later. Put the setti
 | `CERBRIX_SMTP__USERNAME` | none | User name for the mail server. Set together with the password, or not at all. |
 | `CERBRIX_SMTP__PASSWORD` | none | Password. Never written to the log or the database. |
 | `CERBRIX_SMTP__TIMEOUT_SECS` | `15` | Seconds allowed for sending one message, 1 to 120. |
-| `CERBRIX_SMTP__CA_FILE` | none | Path inside the container of a PEM file with one or more certificate authorities to trust for `starttls` and `tls`, **in addition to** the public ones. For a mail relay whose certificate was issued by your own (internal) CA. Not allowed with `none`. |
+| `CERBRIX_SMTP__CA_FILE` | none | Absolute path inside the container of a PEM file with one or more certificate authorities to trust for `starttls` and `tls`, **in addition to** the public ones. For a mail relay whose certificate was issued by your own (internal) CA. Not allowed with `none`. |
 | `CERBRIX_SMTP__HELLO_NAME` | the domain of `CERBRIX_SMTP__FROM` | The name the server gives in `EHLO`. A host name: letters, digits, `-` and `.`, at most 253 characters. When the sender's domain is not such a name (an address literal such as `[192.0.2.1]`), the address `[127.0.0.1]` is sent. |
 
 Example for a mail server with a login:
