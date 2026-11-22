@@ -412,16 +412,28 @@ fn url_with_masked_userinfo(raw: &str) -> String {
     }
 }
 
-/// A proxy URL git can use: `http`, `https`, `socks5` or `socks5h` with a host.
+/// A proxy URL git can use: `http`, `https`, `socks5` or `socks5h` with a host
+/// and nothing after it.
 fn valid_proxy(raw: &str) -> bool {
     // `Url::parse` would silently trim surrounding spaces and control characters.
     if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return false;
     }
+    // Checked on the raw text: `Url::parse` lowercases the scheme, but git matches
+    // it case-sensitively and treats any other spelling as a plain HTTP proxy.
+    if !["http://", "https://", "socks5://", "socks5h://"]
+        .iter()
+        .any(|scheme| raw.starts_with(scheme))
+    {
+        return false;
+    }
     match url::Url::parse(raw) {
+        // A path would hide a password with an unencoded `/` from masking.
         Ok(u) => {
-            matches!(u.scheme(), "http" | "https" | "socks5" | "socks5h")
-                && u.host_str().is_some_and(|h| !h.is_empty())
+            u.host_str().is_some_and(|h| !h.is_empty())
+                && matches!(u.path(), "" | "/")
+                && u.query().is_none()
+                && u.fragment().is_none()
         }
         Err(_) => false,
     }
@@ -439,7 +451,14 @@ impl fmt::Debug for GitopsConfig {
             .field("known_hosts_file", &self.known_hosts_file)
             .field(
                 "proxy",
-                &self.proxy.as_deref().map(url_with_masked_userinfo),
+                // An invalid value may hold its password where masking cannot find it.
+                &self.proxy.as_deref().map(|p| {
+                    if valid_proxy(p) {
+                        url_with_masked_userinfo(p)
+                    } else {
+                        "<invalid>".to_owned()
+                    }
+                }),
             )
             .field("ca_file", &self.ca_file)
             .field("cache_dir", &self.cache_dir)
@@ -1243,7 +1262,7 @@ mod tests {
                 "https://proxy.example.com",
                 "socks5://127.0.0.1:1080",
                 "socks5h://user:pw@proxy:1080",
-                "HTTP://proxy:3128",
+                "http://proxy:3128/",
             ] {
                 let toml = gitops_toml(&format!("proxy = {proxy:?}\n"));
                 assert!(load_gitops(&toml).is_ok(), "{proxy} rejected");
@@ -1259,6 +1278,21 @@ mod tests {
                 r#"" http://proxy:3128""#,
                 r#""http://proxy:3128\n""#,
                 r#""http://pro\u0007xy:3128""#,
+                // Git matches the scheme case-sensitively and would fall back to a
+                // plain HTTP proxy.
+                r#""HTTP://proxy:3128""#,
+                r#""HTTPS://user:pw@proxy:3128""#,
+                r#""SOCKS5://proxy:1080""#,
+                r#""Socks5h://proxy:1080""#,
+                r#""hTTps://proxy:3128""#,
+                // A path, query or fragment: an unencoded `/` in the password would
+                // make the password part of a path and escape masking.
+                r#""http://user:123/x@proxy:3128""#,
+                r#""http://proxy:3128/path""#,
+                r#""socks5://proxy:1080/x""#,
+                r#""http://proxy:3128?a=b""#,
+                r#""http://proxy:3128/?""#,
+                r#""http://proxy:3128#frag""#,
             ] {
                 let msg = invalid(load_gitops(&gitops_toml(&format!("proxy = {proxy}\n"))));
                 assert_eq!(
@@ -1267,10 +1301,13 @@ mod tests {
                 );
             }
             // A proxy password in an error never shows.
-            let msg = invalid(load_gitops(&gitops_toml(
-                "proxy = \"ftp://user:pw-SECRET@proxy\"\n",
-            )));
-            assert!(!msg.contains("pw-SECRET"), "{msg}");
+            for proxy in [
+                "ftp://user:pw-SECRET@proxy",
+                "http://user:pw-SECRET/x@proxy:3128",
+            ] {
+                let msg = invalid(load_gitops(&gitops_toml(&format!("proxy = {proxy:?}\n"))));
+                assert!(!msg.contains("pw-SECRET"), "{msg}");
+            }
             jail.create_file("cerbrix.toml", &gitops_toml(""))?;
             jail.set_env("CERBRIX_GITOPS__PROXY", "http://proxy:3128");
             jail.set_env("CERBRIX_GITOPS__CA_FILE", ABS_KEY);
@@ -1328,6 +1365,15 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("proxy:3128"), "{shown}");
+        // An invalid value is not shown at all: its password may sit where masking
+        // cannot find it.
+        let cfg = GitopsConfig {
+            proxy: Some("http://user:123/secret@proxy:3128".into()),
+            ..GitopsConfig::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("proxy: Some(\"<invalid>\")"), "{shown}");
     }
 
     #[test]

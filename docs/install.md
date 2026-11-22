@@ -192,7 +192,7 @@ The settings go into `deploy/server.env` (a commented block is in the example fi
 | `CERBRIX_GITOPS__TOKEN` | none | Access token for an `https://` URL. Not allowed together with an SSH key. |
 | `CERBRIX_GITOPS__SSH_KEY_FILE` | none | Absolute path of a private key inside the container, for an `ssh://` or `user@host:path` URL. |
 | `CERBRIX_GITOPS__KNOWN_HOSTS_FILE` | none | Absolute path of a `known_hosts` file inside the container. |
-| `CERBRIX_GITOPS__PROXY` | none | Proxy for an `https://` URL: `http://`, `https://`, `socks5://` or `socks5h://`, optionally with `user:password@`. See [Behind a proxy or with a private CA](#behind-a-proxy-or-with-a-private-ca). |
+| `CERBRIX_GITOPS__PROXY` | none | Proxy for an `https://` URL: `http://`, `https://`, `socks5://` or `socks5h://` (lower case), host and port only, optionally with `user:password@`. See [Behind a proxy or with a private CA](#behind-a-proxy-or-with-a-private-ca). |
 | `CERBRIX_GITOPS__CA_FILE` | none | Absolute path inside the container of a PEM file with the certificate authorities to trust for an `https://` URL. It replaces the default bundle. |
 | `CERBRIX_GITOPS__CACHE_DIR` | `/var/lib/cerbrix/git` | Where the server keeps its checkout. The Compose file mounts a volume here. |
 | `CERBRIX_GITOPS__MAX_HOST_REMOVAL_PERCENT` | `50` | Mass-removal guard, see [the repository guide](configuration-repository.md#mass-removal-guard). |
@@ -269,13 +269,16 @@ affected by them: SSH connections do not go through the proxy.
 - `CERBRIX_GITOPS__PROXY` is the proxy for every fetch (`NO_PROXY` has no counterpart: set
   the proxy only when the repository is reached through it). `http://` and `https://` name an
   HTTP proxy, `socks5://` a SOCKS proxy that receives an address, `socks5h://` one that
-  resolves the host name itself. Credentials go into the URL, percent-encoded where needed
-  (`http://user:p%40ss@proxy.example.com:3128`). The password is a secret like the token: it
-  is masked where the settings are printed and removed from error messages. Keep `deploy/server.env` private.
+  resolves the host name itself. Write the scheme in lower case; the URL is host and port
+  only, with no path, query or fragment. Credentials go into the URL, percent-encoded where
+  needed (`http://user:p%40ss@proxy.example.com:3128`; a `/` in the password is `%2F`). The
+  password is a secret like the token: it is masked where the settings are printed and removed
+  from error messages. Keep `deploy/server.env` private.
 - `CERBRIX_GITOPS__CA_FILE` is a PEM file with the certificate authorities git trusts for the
   fetch. It replaces git's default bundle instead of adding to it, so it must contain the
   authority that signed the Git server's certificate (behind a proxy that inspects TLS traffic,
-  the authority the proxy signs with).
+  the authority the proxy signs with). It is for the Git server's certificate only and does not
+  cover the certificate of an `https://` proxy itself.
 
 Mount the file read-only, as with the SSH key (for example `./git-ca:/etc/cerbrix/git-ca:ro`
 in the `volumes` of the `server` service), and set:

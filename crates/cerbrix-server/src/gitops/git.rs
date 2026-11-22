@@ -1061,20 +1061,20 @@ mod tests {
         assert!(!out.contains("crät") && !out.contains("C3%A4t"), "{out}");
     }
 
-    /// A TCP listener standing in for the proxy: for each connection it reports the
-    /// first line of the request and closes the connection.
+    /// A TCP listener standing in for the proxy: it accepts one connection, reports
+    /// the first line of the request and closes.
     fn fake_proxy() -> (u16, std::sync::mpsc::Receiver<String>) {
         use std::io::{BufRead, BufReader};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = std::sync::mpsc::channel();
+        // One connection only: the thread ends and the listener closes, so the
+        // retry of the fetch is refused instead of leaving a thread in `accept`.
         std::thread::spawn(move || {
-            while let Ok((stream, _)) = listener.accept() {
+            if let Ok((stream, _)) = listener.accept() {
                 let mut line = String::new();
                 let _ = BufReader::new(&stream).read_line(&mut line);
-                if tx.send(line).is_err() {
-                    return;
-                }
+                let _ = tx.send(line);
             }
         });
         (port, rx)
