@@ -392,6 +392,7 @@ mod tests {
             alerting: Default::default(),
             smtp: Default::default(),
             auth: Default::default(),
+            retention: Default::default(),
         })
     }
 
@@ -405,6 +406,8 @@ mod tests {
             warnings: Arc::default(),
             queue_mail: false,
             passwords: Default::default(),
+            logins: Arc::default(),
+            client_address_header: None,
         });
         (router, metrics, store)
     }
@@ -1080,6 +1083,8 @@ mod tests {
             warnings: Arc::default(),
             queue_mail,
             passwords: Default::default(),
+            logins: Arc::default(),
+            client_address_header: None,
         });
         (router, store)
     }

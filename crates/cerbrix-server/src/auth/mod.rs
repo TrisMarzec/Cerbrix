@@ -3,6 +3,8 @@
 //! Passwords are stored only as Argon2id PHC strings; hashing and verifying run on blocking
 //! threads because they take tens of milliseconds of CPU and a lot of memory.
 
+pub mod throttle;
+
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -21,7 +23,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::{ApiError, AppState};
-use crate::state::{StateStore, User};
+use crate::state::{StateError, StateStore, User};
 
 /// What a user may do. The order is the order of privilege: `Viewer < Operator < Admin`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -271,7 +273,7 @@ pub fn session_token(headers: &HeaderMap) -> Option<&str> {
         .map(|(_, value)| value)
 }
 
-/// Why a request was not let through. Becomes a 401, 403 or 500 answer.
+/// Why a request was not let through. Becomes a 401, 403, 503 or 500 answer.
 #[derive(Debug)]
 pub enum AuthError {
     /// No session, or one that is invalid, expired or belongs to a disabled user. When the
@@ -281,6 +283,8 @@ pub enum AuthError {
     },
     /// A valid session whose role is too low.
     Forbidden,
+    /// The database could not be reached to check the session or token.
+    Unavailable,
     Internal,
 }
 
@@ -304,6 +308,7 @@ impl IntoResponse for AuthError {
                 "your role does not allow this",
             )
             .into_response(),
+            AuthError::Unavailable => crate::api::ui::database_unavailable().into_response(),
             AuthError::Internal => ApiError::internal().into_response(),
         }
     }
@@ -330,8 +335,18 @@ pub(crate) async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<
         Ok(None) => Err(AuthError::Unauthorized { clear_cookie: true }),
         Err(e) => {
             tracing::error!(error = %e, "session lookup failed");
-            Err(AuthError::Internal)
+            Err(store_error(&e))
         }
+    }
+}
+
+/// The refusal for a store error of the guard: `Unavailable` when the database cannot be
+/// reached, otherwise `Internal`.
+fn store_error(e: &StateError) -> AuthError {
+    if e.is_unavailable() {
+        AuthError::Unavailable
+    } else {
+        AuthError::Internal
     }
 }
 
@@ -466,7 +481,7 @@ pub(crate) async fn authenticate_display(
         Ok(_) => Err(unauthorized),
         Err(e) => {
             tracing::error!(error = %e, "display token lookup failed");
-            Err(AuthError::Internal)
+            Err(store_error(&e))
         }
     }
 }

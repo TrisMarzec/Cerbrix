@@ -146,6 +146,16 @@ export interface Display {
   target: string | null;
   causes: string[];
   waiting: string[];
+  worst: WorstProblem | null;
+}
+
+/** The most urgent alarm of a display's `target`, the one of `causes[0]`. */
+export interface WorstProblem {
+  /** The name of the host. */
+  host: string;
+  summary: string;
+  severity: Severity;
+  started_at: string;
 }
 
 /** `GET /display/{id}`: what a wall monitor needs on each poll. */
@@ -164,6 +174,8 @@ export interface DisplayState {
   causes: string[];
   /** The other dashboards with an alarm, in the order the display would take them. */
   waiting: string[];
+  /** The most urgent alarm of `target`; `null` exactly when `target` is `null`. */
+  worst: WorstProblem | null;
   sync: SyncState;
 }
 

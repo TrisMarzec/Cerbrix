@@ -55,6 +55,11 @@ function bandOf(state: DisplayState, shown: Shown): WallAlarm | undefined {
   const alarm: WallAlarm = { showing: state.names[target] ?? target, waiting: shown.alarm.waiting };
   const from = shown.alarm.switchedFrom;
   if (from !== undefined) alarm.switchedFrom = state.names[from] ?? from;
+  const worst = state.worst;
+  if (worst !== null) {
+    const more = Math.max(0, state.causes.length - 1);
+    alarm.problem = { severity: worst.severity, host: worst.host, summary: worst.summary, more };
+  }
   return alarm;
 }
 

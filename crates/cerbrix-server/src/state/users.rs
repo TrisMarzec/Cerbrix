@@ -278,7 +278,7 @@ impl StateStore {
         password_hash: &str,
         now: OffsetDateTime,
     ) -> Result<(), StateError> {
-        let tx = self.store_password(id, password_hash, now).await?;
+        let tx = self.store_password(id, None, password_hash, now).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -287,14 +287,21 @@ impl StateStore {
     /// user, with the limits of a fresh login: a user changing the own password ends every
     /// session, the one of the request included, and goes on with the new one. Returns its
     /// token, once; only its hash is stored.
+    ///
+    /// Stores only while the user's hash is still `verified_hash`, the one the current
+    /// password was checked against: a change or reset in the meantime wins, and this one is
+    /// `Conflict` with nothing changed.
     pub async fn set_user_password_renewing_session(
         &self,
         id: Uuid,
+        verified_hash: &str,
         password_hash: &str,
         now: OffsetDateTime,
         cfg: &AuthConfig,
     ) -> Result<String, StateError> {
-        let mut tx = self.store_password(id, password_hash, now).await?;
+        let mut tx = self
+            .store_password(id, Some(verified_hash), password_hash, now)
+            .await?;
         let token = tokens::generate("cbx_se_");
         insert_session(&mut tx, &tokens::hash(&token), id, now, cfg).await?;
         tx.commit().await?;
@@ -302,25 +309,38 @@ impl StateStore {
     }
 
     /// Stores the hash, clears the failed-login state and ends the sessions; the caller
-    /// commits.
+    /// commits. With `expected`, only while the stored hash is that one: `Conflict` when it
+    /// is another, `NotFound` when the user does not exist.
     async fn store_password(
         &self,
         id: Uuid,
+        expected: Option<&str>,
         password_hash: &str,
         now: OffsetDateTime,
     ) -> Result<Transaction<'static, Postgres>, StateError> {
         let mut tx = self.pool.begin().await?;
         let done = sqlx::query(
             "UPDATE users SET password_hash = $2, password_changed_at = $3, \
-             failed_logins = 0, locked_until = NULL WHERE id = $1",
+             failed_logins = 0, locked_until = NULL \
+             WHERE id = $1 AND ($4::text IS NULL OR password_hash = $4)",
         )
         .bind(id)
         .bind(password_hash)
         .bind(now)
+        .bind(expected)
         .execute(&mut *tx)
         .await?;
         if done.rows_affected() == 0 {
-            return Err(StateError::NotFound);
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            return Err(if exists {
+                StateError::Conflict("the password was changed in the meantime".to_owned())
+            } else {
+                StateError::NotFound
+            });
         }
         end_sessions(&mut tx, id).await?;
         Ok(tx)
@@ -383,14 +403,29 @@ impl fmt::Debug for LoginOutcome {
     }
 }
 
-/// The result of checking a user's password outside a login.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The result of checking a user's password outside a login. Debug output carries no hash.
+#[derive(Clone, PartialEq, Eq)]
 pub enum PasswordCheck {
-    Right,
+    /// The password matched this stored hash; a change made from it stores only while the
+    /// hash is still this one.
+    Right {
+        hash: String,
+    },
     Wrong,
     Locked,
     /// No permit for the check came in time: nothing was checked or counted.
     Busy,
+}
+
+impl fmt::Debug for PasswordCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PasswordCheck::Right { .. } => f.write_str("Right"),
+            PasswordCheck::Wrong => f.write_str("Wrong"),
+            PasswordCheck::Locked => f.write_str("Locked"),
+            PasswordCheck::Busy => f.write_str("Busy"),
+        }
+    }
 }
 
 /// The first half of a login: what the password check found.
@@ -465,13 +500,13 @@ impl StateStore {
         };
         Ok(
             match self
-                .attempt(id, hash.clone(), locked_until, password, now, gate)
+                .attempt(id, hash, locked_until, password, now, gate)
                 .await?
             {
                 PasswordCheck::Wrong => Verified::Wrong,
                 PasswordCheck::Locked => Verified::Locked,
                 PasswordCheck::Busy => Verified::Busy,
-                PasswordCheck::Right => Verified::Right { id, hash },
+                PasswordCheck::Right { hash } => Verified::Right { id, hash },
             },
         )
     }
@@ -600,7 +635,7 @@ impl StateStore {
             .execute(&self.pool)
             .await?;
             return Ok(if reset.rows_affected() == 1 {
-                PasswordCheck::Right
+                PasswordCheck::Right { hash }
             } else {
                 PasswordCheck::Locked
             });
@@ -934,6 +969,8 @@ mod login_tests {
             session_idle_secs: 600,
             session_max_secs: 3600,
             secure_cookie: None,
+            client_address_header: None,
+            throttle_logins: true,
         }
     }
 
@@ -1266,8 +1303,9 @@ mod login_tests {
         let current = token_of(try_login(&store, "amy", PASSWORD, t0()).await);
         let other = token_of(try_login(&store, "amy", PASSWORD, t0()).await);
         let later = t0() + Duration::minutes(10);
+        let verified = store.user_password_hash(amy.id).await.unwrap().unwrap();
         let renewed = store
-            .set_user_password_renewing_session(amy.id, "$argon2id$new", later, &cfg())
+            .set_user_password_renewing_session(amy.id, &verified, "$argon2id$new", later, &cfg())
             .await
             .unwrap();
         assert!(renewed.starts_with("cbx_se_"));
@@ -1298,7 +1336,7 @@ mod login_tests {
         // An unknown user gets no session.
         assert!(matches!(
             store
-                .set_user_password_renewing_session(Uuid::new_v4(), "h", later, &cfg())
+                .set_user_password_renewing_session(Uuid::new_v4(), &verified, "h", later, &cfg())
                 .await,
             Err(StateError::NotFound)
         ));
@@ -1375,12 +1413,14 @@ mod login_tests {
             LoginOutcome::Locked
         ));
         let later = t0() + Duration::minutes(6);
-        assert_eq!(
-            store
-                .check_password(amy.id, PASSWORD, later, &gate)
-                .await
-                .unwrap(),
-            PasswordCheck::Right
+        let checked = store
+            .check_password(amy.id, PASSWORD, later, &gate)
+            .await
+            .unwrap();
+        let stored = store.user_password_hash(amy.id).await.unwrap();
+        assert!(
+            matches!(&checked, PasswordCheck::Right { hash } if Some(hash) == stored.as_ref()),
+            "{checked:?}"
         );
         assert_eq!(failed(&pool, amy.id).await, (0, None));
     }
@@ -1408,6 +1448,45 @@ mod login_tests {
             .await
             .unwrap();
         assert_eq!(sessions, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn password_change_racing_an_admin_reset_changes_nothing(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let amy = add(&store, "amy", Role::Viewer).await;
+        // The current password is verified ...
+        let PasswordCheck::Right { hash } = store
+            .check_password(amy.id, PASSWORD, t0(), &PasswordGate::default())
+            .await
+            .unwrap()
+        else {
+            panic!("the password is right");
+        };
+        // ... then an admin resets it, and the user logs in with the reset password ...
+        const RESET: &str = "the password the admin set";
+        let reset = hash_password(RESET.to_owned()).await.unwrap();
+        store.set_user_password(amy.id, &reset, t0()).await.unwrap();
+        let token = token_of(try_login(&store, "amy", RESET, t0()).await);
+        // ... and only then the change would be stored, from the old password.
+        let changed = store
+            .set_user_password_renewing_session(amy.id, &hash, "$argon2id$new", t0(), &cfg())
+            .await;
+        assert!(
+            matches!(changed, Err(StateError::Conflict(_))),
+            "{changed:?}"
+        );
+        assert_eq!(
+            store.user_password_hash(amy.id).await.unwrap().as_deref(),
+            Some(reset.as_str())
+        );
+        // The session of the reset password stays, and no other was started.
+        let user = store.session_user(&token, t0(), &cfg()).await.unwrap();
+        assert_eq!(user.map(|u| u.id), Some(amy.id));
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 1);
     }
 
     /// Everything the process logs while the tests run, from a subscriber installed once

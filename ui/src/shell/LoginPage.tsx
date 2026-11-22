@@ -32,8 +32,9 @@ export function LoginPage({ expired, onLoggedIn }: Props) {
     try {
       onLoggedIn(await api.send<SessionUser>('POST', '/session', { name, password: attempt }));
     } catch (failure) {
-      // A 401 (a wrong name or password) is said in the server's words.
-      setError(describeError(failure));
+      // A 401 (a wrong name or password) is said in the server's words. A 429 is a busy
+      // server or an address with too many failed logins; the sentence fits both.
+      setError(describeError(failure, { 429: 'Too many attempts. Try again in a few minutes.' }));
       setBusy(false);
     }
   }

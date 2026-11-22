@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::dashboard::{selected_hosts, urgency};
-use crate::state::BoardInputs;
+use crate::state::{BoardInputs, Problem};
 
 /// What an alarm makes a display do.
 #[derive(Serialize, PartialEq, Debug)]
@@ -23,6 +23,20 @@ pub struct DisplayTarget {
     pub causes: Vec<Uuid>,
     /// The other dashboards with an alarm, in the order the display would take them.
     pub waiting: Vec<String>,
+    /// The problem of the first cause; `None` exactly when `target` is `None`.
+    pub worst: Option<WorstProblem>,
+}
+
+/// The most urgent problem behind an alarm, for the band of a wall display. It carries no
+/// user names or comments, so a display token may read it.
+#[derive(Serialize, PartialEq, Debug)]
+pub struct WorstProblem {
+    /// The name of the host.
+    pub host: String,
+    pub summary: String,
+    pub severity: Severity,
+    #[serde(serialize_with = "super::serialize_time")]
+    pub started_at: OffsetDateTime,
 }
 
 impl DisplayTarget {
@@ -31,6 +45,7 @@ impl DisplayTarget {
             target: None,
             causes: Vec::new(),
             waiting: Vec::new(),
+            worst: None,
         }
     }
 }
@@ -75,14 +90,14 @@ pub fn alarm_target(display: &DisplayFile, inputs: &BoardInputs) -> DisplayTarge
         {
             continue;
         }
-        let mut alarms: Vec<Alarm> = selected_hosts(dashboard, &inputs.hosts)
+        let mut alarms: Vec<(Alarm, &Problem)> = selected_hosts(dashboard, &inputs.hosts)
             .into_iter()
             .flat_map(|h| h.open.iter())
             .filter(|p| p.acknowledged_at.is_none() && p.severity >= switch.min_severity)
-            .map(|p| (urgency(p.severity, p.started_at), p.id))
+            .map(|p| ((urgency(p.severity, p.started_at), p.id), p))
             .collect();
-        alarms.sort_unstable();
-        if let Some((most_urgent, _)) = alarms.first().copied() {
+        alarms.sort_unstable_by_key(|(alarm, _)| *alarm);
+        if let Some(((most_urgent, _), _)) = alarms.first().copied() {
             ranked.push(((Reverse(dashboard.priority), most_urgent, id), alarms));
         }
     }
@@ -91,10 +106,17 @@ pub fn alarm_target(display: &DisplayFile, inputs: &BoardInputs) -> DisplayTarge
     let Some((first, alarms)) = ranked.next() else {
         return DisplayTarget::none();
     };
+    let worst = alarms.first().map(|(_, p)| WorstProblem {
+        host: p.host.clone(),
+        summary: p.summary.clone(),
+        severity: p.severity,
+        started_at: p.started_at,
+    });
     DisplayTarget {
         target: Some(first.2.clone()),
-        causes: alarms.into_iter().map(|(_, id)| id).collect(),
+        causes: alarms.into_iter().map(|((_, id), _)| id).collect(),
         waiting: ranked.map(|(rank, _)| rank.2.clone()).collect(),
+        worst,
     }
 }
 
@@ -104,7 +126,7 @@ mod tests {
 
     use super::*;
     use crate::alerting::ProblemKind;
-    use crate::state::{HostRow, Problem};
+    use crate::state::HostRow;
 
     const T0: i64 = 1_800_000_000;
 
@@ -349,6 +371,101 @@ mod tests {
             ],
         );
         assert_eq!(alarm_target(&switching("high"), &i).causes, ids);
+    }
+
+    fn named(host: &str, summary: &str, mut p: Problem) -> Problem {
+        p.host = host.into();
+        p.summary = summary.into();
+        p
+    }
+
+    #[test]
+    fn alarm_target_names_the_most_urgent_problem() {
+        // The more severe one, although it is the younger one.
+        let i = inputs(
+            &[("a", 0, "g")],
+            vec![
+                host(
+                    "web-02",
+                    &["g"],
+                    vec![named(
+                        "web-02",
+                        "Load high",
+                        problem(Severity::High, 900, false),
+                    )],
+                ),
+                host(
+                    "web-01",
+                    &["g"],
+                    vec![named(
+                        "web-01",
+                        "Disk almost full",
+                        problem(Severity::Critical, 5, false),
+                    )],
+                ),
+            ],
+        );
+        let t = alarm_target(&switching("high"), &i);
+        assert_eq!(
+            t.worst,
+            Some(WorstProblem {
+                host: "web-01".into(),
+                summary: "Disk almost full".into(),
+                severity: Severity::Critical,
+                started_at: OffsetDateTime::from_unix_timestamp(T0 - 5).unwrap(),
+            })
+        );
+        // With equal severity, the older one.
+        let i = inputs(
+            &[("a", 0, "g")],
+            vec![
+                host(
+                    "db-new",
+                    &["g"],
+                    vec![named("db-new", "Young", problem(Severity::High, 10, false))],
+                ),
+                host(
+                    "db-old",
+                    &["g"],
+                    vec![named("db-old", "Old", problem(Severity::High, 600, false))],
+                ),
+            ],
+        );
+        let worst = alarm_target(&switching("high"), &i).worst.unwrap();
+        assert_eq!(
+            (worst.host.as_str(), worst.summary.as_str()),
+            ("db-old", "Old")
+        );
+        assert_eq!(worst.severity, Severity::High);
+        assert_eq!(
+            worst.started_at,
+            OffsetDateTime::from_unix_timestamp(T0 - 600).unwrap()
+        );
+        // The JSON form: severity as a word, the start as RFC 3339 in UTC.
+        assert_eq!(
+            serde_json::to_value(&worst).unwrap(),
+            serde_json::json!({"host": "db-old", "summary": "Old", "severity": "high",
+                               "started_at": "2027-01-15T07:50:00Z"})
+        );
+    }
+
+    #[test]
+    fn no_alarm_has_no_worst() {
+        let i = inputs(
+            &[("a", 0, "g")],
+            vec![host(
+                "h",
+                &["g"],
+                vec![problem(Severity::Critical, 5, true)],
+            )],
+        );
+        let t = alarm_target(&switching("info"), &i);
+        assert_eq!(t.target, None);
+        assert_eq!(t.worst, None);
+        assert_eq!(
+            serde_json::to_value(&t).unwrap()["worst"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]

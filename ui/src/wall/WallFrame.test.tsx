@@ -197,6 +197,38 @@ describe('WallFrame switch band', () => {
     expect(line?.lastElementChild).toBe(more);
   });
 
+  it('names the most urgent problem on a second line', () => {
+    const problem = { severity: 'critical', host: 'web-01', summary: 'Disk almost full', more: 0 } as const;
+    const { container } = show({ alarm: { showing: 'Kunde B', waiting: 1, problem } });
+    const lines = container.querySelectorAll('.wall-band.is-alarm .wall-band-line');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toHaveTextContent(/^Alarm: showing Kunde B\. 1 more dashboard waiting\.$/);
+    expect(lines[1]).toHaveClass('wall-band-detail');
+    expect(lines[1]).toHaveTextContent(/^Critical: web-01 – Disk almost full$/);
+    expect(lines[1]?.querySelector('.wall-band-text')).toHaveTextContent(/^Critical: web-01 – Disk almost full$/);
+    expect(lines[1]?.querySelector('.wall-band-more')).toBeNull();
+  });
+
+  it('ends the problem line with how many more alarms there are, in its own element', () => {
+    const problem = { severity: 'warning', host: 'db-01', summary: 'Replication lag', more: 2 } as const;
+    const { container } = show({ alarm: { showing: 'Kunde B', waiting: 0, problem } });
+    const line = container.querySelectorAll('.wall-band.is-alarm .wall-band-line')[1];
+    const text = line?.querySelector('.wall-band-text');
+    const more = line?.querySelector('.wall-band-more');
+    expect(text).toHaveTextContent(/^Warning: db-01 – Replication lag$/);
+    expect(more).toHaveTextContent(/^\+2 more$/);
+    // The text of the status region reads with a space before the count.
+    expect(line?.textContent).toBe('Warning: db-01 – Replication lag +2 more');
+    expect(text?.contains(more ?? null)).toBe(false);
+    expect(line?.lastElementChild).toBe(more);
+  });
+
+  it('has one line without a problem', () => {
+    const { container } = show({ alarm: { showing: 'Kunde B', waiting: 0 } });
+    expect(container.querySelectorAll('.wall-band.is-alarm .wall-band-line')).toHaveLength(1);
+    expect(container.querySelector('.wall-band.is-alarm .wall-band-detail')).toBeNull();
+  });
+
   it('comes before the Out Of Sync band', () => {
     const { container } = show({ sync: outOfSync, alarm: { showing: 'Kunde B', waiting: 0 } });
     const band = bands(container);
@@ -251,12 +283,18 @@ describe('WallFrame text from the API', () => {
     const { container } = show({
       title: hostile,
       sync: { ...outOfSync, issues: [{ file: null, line: null, column: null, reason: hostile }] },
-      alarm: { showing: hostile, switchedFrom: hostile, waiting: 0 },
+      alarm: {
+        showing: hostile,
+        switchedFrom: hostile,
+        waiting: 0,
+        problem: { severity: 'high', host: hostile, summary: hostile, more: 0 },
+      },
     });
     expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('.is-alarm .wall-band-detail')).toHaveTextContent(`High: ${hostile} – ${hostile}`);
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(hostile);
     expect(container.querySelector('.is-out-of-sync .wall-band-detail')).toHaveTextContent(hostile);
-    expect(container.querySelector('.is-alarm')).toHaveTextContent(
+    expect(container.querySelector('.is-alarm .wall-band-line')).toHaveTextContent(
       `Alarm: showing ${hostile}. Switched from ${hostile}.`,
     );
   });

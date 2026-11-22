@@ -15,7 +15,7 @@ use cerbrix_common::{DisplayFile, Show, SwitchOnAlarm, validate_name};
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use super::{ApiError, Entry, dashboards, forbidden};
+use super::{ApiError, Entry, dashboards, forbidden, store_failed};
 use crate::api::AppState;
 use crate::auth::{Admin, DisplayAccess, Viewer};
 use crate::state::StateError;
@@ -34,11 +34,6 @@ pub(super) fn entries() -> Vec<Entry> {
             dashboard,
         ),
     ]
-}
-
-fn store_failed(what: &str, e: &StateError) -> ApiError {
-    tracing::error!(error = %e, "{what}");
-    ApiError::internal()
 }
 
 fn not_found() -> ApiError {
@@ -352,7 +347,8 @@ mod tests {
                 "switch_on_alarm",
                 "target",
                 "token_created_at",
-                "waiting"
+                "waiting",
+                "worst"
             ]
         );
         assert_eq!(wall["file"], "displays/wall.json");
@@ -364,12 +360,20 @@ mod tests {
         assert_eq!(wall["target"], "b");
         assert_eq!(wall["causes"], json!([cause_b]));
         assert_eq!(wall["waiting"], json!(["a"]));
+        assert_eq!(
+            keys(&wall["worst"]),
+            ["host", "severity", "started_at", "summary"]
+        );
+        assert_eq!(wall["worst"]["host"], "host-b");
+        assert_eq!(wall["worst"]["summary"], "summary");
+        assert_eq!(wall["worst"]["severity"], "critical");
         assert_ne!(cause_a, cause_b);
         // A display that does not switch has no alarm target.
         let plain = &items[0];
         assert_eq!(plain["target"], Value::Null);
         assert_eq!(plain["causes"], json!([]));
         assert_eq!(plain["waiting"], json!([]));
+        assert_eq!(plain["worst"], Value::Null);
         assert_eq!(plain["dashboards"], json!(["a"]));
         assert_eq!(plain["switch_on_alarm"], Value::Null);
 
@@ -492,7 +496,8 @@ mod tests {
                 "switch_on_alarm",
                 "sync",
                 "target",
-                "waiting"
+                "waiting",
+                "worst"
             ]
         );
         assert_eq!(v["id"], fx.display);
@@ -501,6 +506,7 @@ mod tests {
         assert_eq!(v["switch_on_alarm"], json!({"min_severity": "critical"}));
         assert_eq!(v["allowed"], json!(["fixture-board", "other"]));
         assert_eq!(v["target"], Value::Null);
+        assert_eq!(v["worst"], Value::Null);
         assert_eq!(
             v["sync"],
             json!({"status": "never", "active_commit": null, "last_success_at": null,
@@ -516,6 +522,16 @@ mod tests {
         assert_eq!(v["target"], "other");
         assert_eq!(v["causes"], json!([cause]));
         assert_eq!(v["waiting"], json!(["fixture-board"]));
+        // The token reads the most urgent problem: host, summary, severity and start.
+        assert_eq!(
+            keys(&v["worst"]),
+            ["host", "severity", "started_at", "summary"]
+        );
+        assert_eq!(v["worst"]["host"], "host-o");
+        assert_eq!(v["worst"]["summary"], "summary");
+        assert_eq!(v["worst"]["severity"], "critical");
+        let started = v["worst"]["started_at"].as_str().unwrap();
+        assert!(started.ends_with('Z'), "{started}");
     }
 
     /// The wall shows what the desk shows about the sync: the `sync` object of the display

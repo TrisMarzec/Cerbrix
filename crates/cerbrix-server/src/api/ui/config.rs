@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use super::{ApiError, ApiJson, Entry, Listed, Page, invalid, query_text};
+use super::{ApiError, ApiJson, Entry, Listed, Page, invalid, query_text, store_failed};
 use crate::admin::parse_duration;
 use crate::api::AppState;
 use crate::auth::{Admin, Operator, Viewer};
@@ -32,11 +32,6 @@ pub(super) fn entries() -> Vec<Entry> {
         Entry::new("DELETE", "/api/v1/enrollment-keys/{id}", revoke_key),
         Entry::new("POST", "/api/v1/hosts/{name}/release", release),
     ]
-}
-
-fn store_failed(what: &str, e: &StateError) -> ApiError {
-    tracing::error!(error = %e, "{what}");
-    ApiError::internal()
 }
 
 #[derive(Serialize)]

@@ -56,8 +56,10 @@ for people. Test the code, not the message.
 | `forbidden` | 403 | The role is too low, the request comes from another origin, a display may not show a dashboard, or the current password given on a password change is wrong. |
 | `not_found` | 404 | The thing does not exist, or its identifier cannot be one. Also an unknown path. |
 | `conflict` | 409 | The change clashes with the state: a user name is taken, a problem is already resolved, or the last enabled admin would be lost. |
-| `too_many_attempts` | 429 | The server is busy checking passwords: too many logins, password changes or user creations at once. Nothing was checked or changed, and it does not count as a failed login. Try again shortly. See *Busy server* under [Login and sessions](#login-and-sessions). |
+| `too_many_attempts` | 429 | The server is busy checking passwords: too many logins, password changes or user creations at once. For a login it also means that the client address had too many failed logins. Nothing was checked or changed, and it does not count as a failed login. Try again shortly. See *Busy server* and *Failed logins* under [Login and sessions](#login-and-sessions). |
 | `metrics_unavailable` | 503 | The metrics store did not answer. Only the [series of a host](#get-apiv1hostsnameseries-viewer) uses it. |
+| `database_unavailable` | 503 | PostgreSQL cannot be reached. Any route can answer it, the login and the check of a session or display token included. See *Database down* below. |
+| `timeout` | 503 | The request was not answered within 25 seconds. Nothing tells whether a change it asked for was made; read the state again before repeating it. |
 | `internal` | 500 | A fault of the server; the cause is in the server log, not in the answer. |
 
 **Lists.** A list that can be long takes `limit` (1 to 500, default 50) and `offset` (from 0,
@@ -74,6 +76,12 @@ and their states do not lag: the server evaluates triggers when the values arriv
 the metrics store cannot be read. The data that could not be read is `null` (or an empty list),
 and `metrics_available` is `false`. The rest of the answer, which comes from PostgreSQL, is
 complete.
+
+**Database down.** When PostgreSQL cannot be reached, a request is answered within about 5
+seconds (the time the server waits for a database connection) with `503 database_unavailable`,
+in the error format and with the usual headers. A session is not ended by it: the check of the
+session itself answers 503, not 401. The web UI shows that the server cannot be reached and
+asks again by itself until the database is back.
 
 ## Login and sessions
 
@@ -103,6 +111,15 @@ five minutes; the lock ends by itself, a right password after that resets the co
 a password reset by an admin. A wrong current password on a password change counts like a wrong
 password at the login.
 
+Failed logins are also counted per client address: after 10 failed logins from one address
+within 5 minutes (an IPv6 address counts as its /64), the login answers
+`429 too_many_attempts` to that address until the 5 minutes from its first failure are over,
+with the message `too many failed logins from this address; try again in a few minutes`,
+whatever the name and password. Nothing is checked then,
+and it does not count against the user. A successful login and a busy server do not count.
+Which address counts behind a reverse proxy is a setting, see
+[Login settings](install.md#login-settings).
+
 **Busy server.** Checking and storing a password (Argon2id) takes a lot of memory and CPU, so the
 server runs only a few of these at once (one per processor core, at least 2 and at most 8). A
 request that has to check or store a password waits for its turn at most 5 seconds; then it is
@@ -110,7 +127,8 @@ answered `429 too_many_attempts` with the message
 `the server is busy checking passwords, try again shortly`. The answer is the same whatever the
 user name, an existing, unknown or locked one; nothing was checked, so it does not count as a
 failed login. This concerns the login, the password change, creating a user and resetting a
-password.
+password. The login also answers `429 too_many_attempts` to a client address with too many
+failed logins, with a message of its own, see *Failed logins*.
 
 **Same-origin rule.** Requests that change something (every method except `GET` and `HEAD`) are
 checked against cross-site requests. If the request has an `Origin` header, its host and port must
@@ -217,7 +235,8 @@ x-content-type-options: nosniff
 A wrong password, an unknown name, a disabled user and a locked user are all
 `401 unauthorized` with the message `wrong user name or password, or the account is temporarily locked`.
 A server that is too busy checking passwords answers `429 too_many_attempts`, the same for every
-name, see *Busy server* under [Login and sessions](#login-and-sessions).
+name, see *Busy server* under [Login and sessions](#login-and-sessions). So does a login from a
+client address with 10 failed logins in the last 5 minutes, see *Failed logins* there.
 
 ### `GET /api/v1/session` (viewer)
 
@@ -240,7 +259,10 @@ counting as a failed attempt. On success the answer is `204`, every session of t
 current one included, and the answer sets the cookie of a new session (`Set-Cookie`, as at the
 login): keep using the new cookie, the old one is `401`. A wrong `current`
 is `403 forbidden` and counts as a failed attempt for the lock; a locked user gets the same
-answer. A busy server answers `429 too_many_attempts` and changes nothing, see
+answer. When the password was changed in the meantime, for example reset by an admin while
+the request was being processed, the answer is `409 conflict` ("the password was changed in the
+meantime") and nothing changes: the password and the sessions stay as that other change left
+them. A busy server answers `429 too_many_attempts` and changes nothing, see
 *Busy server* under [Login and sessions](#login-and-sessions).
 
 ```sh
@@ -484,11 +506,11 @@ All wall displays, for the desk (not for the monitors). Not paged. `show` is wha
 when nothing is wrong: `{"dashboard": "<id>"}` or `{"rotate": [...], "every": "30s"}`.
 `switch_on_alarm` is `null` or `{"min_severity": ...}`; `dashboards` limits which dashboards an
 alarm may switch to (`null`: all). `token_created_at` says when the display's token was created,
-`null` if it has none; the token itself is never shown again. `target`, `causes` and `waiting` are
-what the display shows because of an alarm right now (see the next route).
+`null` if it has none; the token itself is never shown again. `target`, `causes`, `waiting` and
+`worst` are what the display shows because of an alarm right now (see the next route).
 
 ```json
-{"items":[{"id":"e2e-wall","name":"E2E wall","file":"displays/e2e-wall.json","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"dashboards":["e2e"],"token_created_at":null,"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[]}]}
+{"items":[{"id":"e2e-wall","name":"E2E wall","file":"displays/e2e-wall.json","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"dashboards":["e2e"],"token_created_at":null,"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"worst":{"host":"e2e-host","summary":"no data for 3m","severity":"critical","started_at":"2026-11-16T21:52:10.418204Z"}}]}
 ```
 
 ### `POST /api/v1/displays/{id}/token` (admin)
@@ -524,6 +546,7 @@ this display in `Authorization: Bearer <token>`.
 | `target` | The dashboard to show because of an alarm, or `null` to follow `show`. An alarm is an open problem nobody has acknowledged, at or above `min_severity`, on a host of the dashboard. The dashboard with the highest `priority` wins, then the most urgent alarm. |
 | `causes` | The ids of the alarms of `target`, most urgent first. |
 | `waiting` | The other dashboards that have an alarm, in the order the display would take them. |
+| `worst` | The most urgent alarm of `target`, the one of `causes[0]`: `host` (the host's name), `summary`, `severity` and `started_at`; `null` exactly when `target` is `null`. It holds no user names or comments. The alarm band of the wall shows it. |
 | `sync` | The sync state of the configuration, the same object as `sync` of [`/api/v1/status`](#get-apiv1status-viewer): `status` (`never`, `in_sync` or `out_of_sync`), `active_commit` (the commit whose configuration is in use), `last_success_at`, `last_attempt_at` and `issues`, the list of what the last synchronisation found wrong (`file`, `line`, `column`, `reason`). The wall shows "out of sync since ..., showing the configuration from commit ..." with them. |
 
 ```sh
@@ -531,7 +554,7 @@ curl -sS -H @display.header http://127.0.0.1:18443/api/v1/display/e2e-wall
 ```
 
 ```json
-{"id":"e2e-wall","name":"E2E wall","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"allowed":["e2e"],"names":{"e2e":"E2E"},"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"sync":{"status":"in_sync","active_commit":"253a2994b13aca387e272ff08db9eb858b436b66","last_success_at":"2026-11-16T21:54:32.810398Z","last_attempt_at":"2026-11-16T21:54:50.503921Z","issues":[]}}
+{"id":"e2e-wall","name":"E2E wall","show":{"dashboard":"e2e"},"switch_on_alarm":{"min_severity":"warning"},"allowed":["e2e"],"names":{"e2e":"E2E"},"target":"e2e","causes":["0c208a84-6643-46d4-86ab-066f04916ecc"],"waiting":[],"worst":{"host":"e2e-host","summary":"no data for 3m","severity":"critical","started_at":"2026-11-16T21:52:10.418204Z"},"sync":{"status":"in_sync","active_commit":"253a2994b13aca387e272ff08db9eb858b436b66","last_success_at":"2026-11-16T21:54:32.810398Z","last_attempt_at":"2026-11-16T21:54:50.503921Z","issues":[]}}
 ```
 
 (`display.header` is a file with the one line `Authorization: Bearer <token>`.) Poll every 5 to

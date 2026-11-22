@@ -37,7 +37,8 @@ docker compose ps
 ```
 
 The first start builds the server image, which takes several minutes. The stack consists of
-`postgres`, `victoriametrics` (12 months retention) and `server`. The server applies its
+`postgres`, `victoriametrics` (keeps metric values for 12 months by default, see
+[Retention](#retention)) and `server`. The server applies its
 database migrations on start. By default the server is published on `127.0.0.1:8443` and
 VictoriaMetrics on `127.0.0.1:8428` only; PostgreSQL is not published at all. Check it:
 
@@ -91,19 +92,42 @@ real use (see [Behind a reverse proxy](#behind-a-reverse-proxy) and
 
 ### Login settings
 
-Sessions are kept in PostgreSQL, so they survive a restart of the server. Three settings
-(in `deploy/server.env`, a commented block is in the example file) control them:
+Sessions are kept in PostgreSQL, so they survive a restart of the server. These settings
+(in `deploy/server.env`, a commented block is in the example file) control them and the
+counting of failed logins:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CERBRIX_AUTH__SESSION_IDLE_SECS` | `43200` (12 hours) | A session that was not used for this long ends. 300 to 604800. |
 | `CERBRIX_AUTH__SESSION_MAX_SECS` | `604800` (7 days) | A session ends this long after the login, however active it is. Not smaller than the idle time, at most 2592000 (30 days). |
 | `CERBRIX_AUTH__SECURE_COOKIE` | unset | Whether the session cookie carries the `Secure` attribute, so that a browser sends it only over HTTPS. Unset means on, unless `CERBRIX_SERVER__INSECURE_HTTP=true`. Set it to `true` when a reverse proxy terminates TLS. |
+| `CERBRIX_AUTH__CLIENT_ADDRESS_HEADER` | unset | The request header that names the client address for counting failed logins, such as `X-Forwarded-For`; the right-most address in it is used. Unset means the address of the connection. Set it only behind a reverse proxy, see [Behind a reverse proxy](#behind-a-reverse-proxy). |
+| `CERBRIX_AUTH__THROTTLE_LOGINS` | `true` | Whether failed logins are counted per client address. `false` switches that counting off, for an installation where all clients share one address (see below); the lock of a user after five wrong passwords stays. |
 
 An invalid value stops the server at start. After five wrong passwords in a row a user is
 locked for five minutes; the lock ends by itself and a login with the right password resets
 the count. The login answer is the same for a wrong password, an unknown name and a locked
 user. The [API reference](api.md) describes the login and the roles.
+
+Failed logins are also counted per client address (an IPv6 address counts as its /64): after
+10 failed logins within 5 minutes, counted from the first of them, further logins from that
+address are answered `429 too_many_attempts` until the 5 minutes are over, without checking
+the password and without counting against the user. The server logs a warning when it starts
+refusing an address. The count is kept in memory and starts afresh when the server restarts.
+This limits how fast one address can guess passwords, and how many users it can keep locked. It
+does not prevent somebody who knows a user name from keeping that user locked: five wrong
+passwords lock a user, fewer than the ten an address may try in 5 minutes, so one address is
+still enough for one user. And it offers little against somebody with many addresses, such as a
+large IPv6 range, who gets ten tries for each address (for IPv6, each /64).
+
+All clients can share one counter without any proxy, too. With Docker Desktop (Windows, macOS),
+with rootless Docker, and for connections from the Docker host itself, the server does not see
+the address of the client but that of the Docker gateway. Then 10 failed logins by anybody within
+5 minutes refuse the logins of everybody until they are over. The warning the server logs when it
+starts refusing names the address: if that is the address of the Docker gateway, every client
+shares it. Either put a reverse proxy in front of the
+server and set `CERBRIX_AUTH__CLIENT_ADDRESS_HEADER` (see
+[Behind a reverse proxy](#behind-a-reverse-proxy)), or set `CERBRIX_AUTH__THROTTLE_LOGINS=false`.
 
 ### Behind a reverse proxy
 
@@ -124,6 +148,19 @@ When the proxy terminates TLS and talks plain HTTP to the server, as in
 without the setting it sends the cookie without `Secure`. Do not publish the plain HTTP port
 of the server to a network; the session cookie and the passwords of a login would cross it
 unencrypted.
+
+Failed logins are counted per client address (see [Login settings](#login-settings)). Behind a
+proxy, the address of every connection is that of the proxy, so all users share one counter:
+10 failed logins by anybody within 5 minutes refuse the logins of everybody until they are
+over. To count per browser instead, set `CERBRIX_AUTH__CLIENT_ADDRESS_HEADER=X-Forwarded-For`,
+but only when every request reaches the server through the proxy and the proxy appends the
+client address to that header or sets it (nginx: `proxy_set_header X-Forwarded-For
+$proxy_add_x_forwarded_for;`, Caddy does it by default). The server uses the right-most address
+in the header, the one the proxy added; a client that can reach the server directly could
+write any address there itself. When the header is missing or holds no address, the address of
+the connection counts. With more than one proxy in a row, such as a CDN in front of nginx, the
+right-most entry is the address of the outer proxy, so all clients share one counter again,
+unless the inner proxy is configured to pass the real client address as the last entry.
 
 ## 4. Create a host and an enrolment key
 
@@ -167,6 +204,8 @@ The settings go into `deploy/server.env` (a commented block is in the example fi
 | `CERBRIX_GITOPS__TOKEN` | none | Access token for an `https://` URL. Not allowed together with an SSH key. |
 | `CERBRIX_GITOPS__SSH_KEY_FILE` | none | Absolute path of a private key inside the container, for an `ssh://` or `user@host:path` URL. |
 | `CERBRIX_GITOPS__KNOWN_HOSTS_FILE` | none | Absolute path of a `known_hosts` file inside the container. |
+| `CERBRIX_GITOPS__PROXY` | none | Proxy for an `https://` URL: `http://`, `https://`, `socks5://` or `socks5h://` (lower case), host and port only, optionally with `user:password@`. See [Behind a proxy or with a private CA](#behind-a-proxy-or-with-a-private-ca). |
+| `CERBRIX_GITOPS__CA_FILE` | none | Absolute path inside the container of a PEM file with the certificate authorities to trust for an `https://` URL. It replaces the default bundle. |
 | `CERBRIX_GITOPS__CACHE_DIR` | `/var/lib/cerbrix/git` | Where the server keeps its checkout. The Compose file mounts a volume here. |
 | `CERBRIX_GITOPS__MAX_HOST_REMOVAL_PERCENT` | `50` | Mass-removal guard, see [the repository guide](configuration-repository.md#mass-removal-guard). |
 
@@ -232,6 +271,38 @@ installation that matters.
 
 Apply the settings with `docker compose up -d`.
 
+### Behind a proxy or with a private CA
+
+The server runs `git` with a cleared environment, so `HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`
+and `GIT_SSL_CAINFO` never reach it. Use two settings instead. They apply to `https://`
+repositories only; with another URL the server does not start. SSH repositories are not
+affected by them: SSH connections do not go through the proxy.
+
+- `CERBRIX_GITOPS__PROXY` is the proxy for every fetch (`NO_PROXY` has no counterpart: set
+  the proxy only when the repository is reached through it). `http://` and `https://` name an
+  HTTP proxy, `socks5://` a SOCKS proxy that receives an address, `socks5h://` one that
+  resolves the host name itself. Write the scheme in lower case; the URL is host and port
+  only, with no path, query or fragment. Credentials go into the URL, percent-encoded where
+  needed (`http://user:p%40ss@proxy.example.com:3128`; a `/` in the password is `%2F`). The
+  password is a secret like the token: it is masked where the settings are printed and removed
+  from error messages. Keep `deploy/server.env` private.
+- `CERBRIX_GITOPS__CA_FILE` is a PEM file with the certificate authorities git trusts for the
+  fetch. It replaces git's default bundle instead of adding to it, so it must contain the
+  authority that signed the Git server's certificate (behind a proxy that inspects TLS traffic,
+  the authority the proxy signs with). It is for the Git server's certificate only and does not
+  cover the certificate of an `https://` proxy itself.
+
+Mount the file read-only, as with the SSH key (for example `./git-ca:/etc/cerbrix/git-ca:ro`
+in the `volumes` of the `server` service), and set:
+
+```
+CERBRIX_GITOPS__ENABLED=true
+CERBRIX_GITOPS__URL=https://git.internal.example.com/ops/monitoring-config.git
+CERBRIX_GITOPS__TOKEN=the-token
+CERBRIX_GITOPS__PROXY=http://proxy.example.com:3128
+CERBRIX_GITOPS__CA_FILE=/etc/cerbrix/git-ca/ca.pem
+```
+
 ### Checking and operating it
 
 ```sh
@@ -260,9 +331,9 @@ the server and need no editing; if the checkout is damaged the server rebuilds i
 
 ### Limits to know
 
-- The server runs `git` with a cleared environment. Proxy settings (`HTTPS_PROXY`) and custom CA
-  certificate variables are not passed on, so the repository must be reachable directly and with
-  a certificate that the system trusts. This is a known limitation.
+- The server runs `git` with a cleared environment: proxy and CA variables such as
+  `HTTPS_PROXY` or `SSL_CERT_FILE` are not passed on. Use `CERBRIX_GITOPS__PROXY` and
+  `CERBRIX_GITOPS__CA_FILE`, see [Behind a proxy or with a private CA](#behind-a-proxy-or-with-a-private-ca).
 - HTTP redirects are not followed, so the token is never sent to another address. The
   configured URL must be the final one: after a repository was renamed or moved, set the new
   URL instead of relying on the provider's redirect.
@@ -301,6 +372,8 @@ The server sends an e-mail when a problem starts and another when it ends (see
 | `CERBRIX_SMTP__FROM` | none | The sender, for example `Cerbrix <cerbrix@example.com>`. Required when a host is set. |
 | `CERBRIX_SMTP__USERNAME`, `CERBRIX_SMTP__PASSWORD` | none | Login; set both or neither. |
 | `CERBRIX_SMTP__TIMEOUT_SECS` | `15` | Seconds allowed for one message, 1 to 120. |
+| `CERBRIX_SMTP__CA_FILE` | none | Absolute path inside the container of a PEM file with certificate authorities trusted for `starttls` and `tls` in addition to the public ones, for a relay with a certificate from an internal CA. Not allowed with `none`. See [SMTP settings](alerting.md#smtp-settings). |
+| `CERBRIX_SMTP__HELLO_NAME` | the domain of `CERBRIX_SMTP__FROM` | The host name sent with `EHLO`. |
 
 Apply the settings with `docker compose up -d` and send a test message:
 
@@ -308,8 +381,7 @@ Apply the settings with `docker compose up -d` and send a test message:
 docker compose exec server cerbrix-server admin notify test you@example.com
 ```
 
-Only the public certificate authorities are trusted for `starttls` and `tls`; a mail relay with a
-certificate from an internal CA cannot be used with them yet. Who receives which problem is set by
+Who receives which problem is set by
 the notification files in the configuration repository, see
 [Who is told](alerting.md#who-is-told-notification-rules). Two further settings, the age limit
 for values and the interval of the no-data check, are in
@@ -321,6 +393,33 @@ settings it records problems but sends no e-mail; hosts with no-data triggers co
 the start of the server, so the upgrade does not report any host as silent. If a host has an
 item-level no-data trigger without a host-level one, the configuration is now refused (Out Of
 Sync) until you add the host-level trigger; see [Alerting](alerting.md#when-data-stops-arriving).
+
+## Retention
+
+Two settings decide how long data is kept:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CERBRIX_METRICS_RETENTION` | `12` | How long VictoriaMetrics keeps metric values. A number without a unit means months; `90d` (days) or `2y` (years) are possible too. A Compose variable: set it in the shell environment or in the `.env` file next to `docker-compose.yml`, not in `deploy/server.env`. |
+| `CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS` | `365` | Problems resolved longer ago than this many days are deleted, together with their notification records (the queued and sent e-mails). `0` keeps them for ever, otherwise 1 to 3650. Set in `deploy/server.env`. |
+
+VictoriaMetrics removes values older than its retention by itself; the server never deletes
+metric values. Shortening `CERBRIX_METRICS_RETENTION` and restarting the stack
+(`docker compose up -d`) deletes the values that are older than the new period, and they cannot
+be brought back. Lengthening it keeps values from then on, it does not bring back values already
+removed.
+
+The server deletes expired problems once an hour, the first time right after it starts, in
+batches of 5000 problems so that no single step holds the table for long. Open problems are
+never deleted, however long ago they started: only the time a problem was resolved counts. The
+sync history is kept; retention does not touch it. An invalid value of
+`CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS` stops the server at start.
+
+**Upgrading from a release without retention:** the first start of this version deletes, within
+seconds, every problem that was resolved more than 365 days ago, together with its notification
+records. This cannot be undone. To keep that history, set
+`CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS=0` (keep for ever) or a larger number in
+`deploy/server.env` **before** you start the new version for the first time.
 
 ## Making the server reachable for agents
 

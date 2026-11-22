@@ -1,7 +1,8 @@
 //! The Git source: fetches the configuration repository by running the `git`
 //! program and hands the checkout to the tree reader.
 //!
-//! The URL is operator-supplied and the token and SSH key are secrets, so:
+//! The URL is operator-supplied and the token, the SSH key and the proxy's
+//! password are secrets, so:
 //! every argument is passed separately (never through a shell), git runs with a
 //! cleared environment, the token travels in the process environment as a
 //! config value (never on a command line), and everything that leaves this
@@ -181,14 +182,9 @@ impl ConfigSource for GitSource {
             .map_err(|e| SourceError::Fetch(format!("cannot create the cache directory: {e}")))?;
         let repo = cfg.cache_dir.join("repo");
         let config = git_config(cfg);
-        let mut secrets = Vec::new();
-        if let Some(token) = &cfg.token {
-            secrets.push(token.clone());
-            secrets.push(base64_token(token));
-        }
         let runner = Runner {
             env: git_env(&cfg.cache_dir, &config),
-            secrets,
+            secrets: runner_secrets(cfg),
             timeout: self.timeout,
         };
 
@@ -380,6 +376,64 @@ async fn prepare(runner: &Runner, repo: &Path, url: &str) -> Result<(), RunError
     Ok(())
 }
 
+/// The texts scrubbed from everything git prints.
+fn runner_secrets(cfg: &GitopsConfig) -> Vec<String> {
+    let mut secrets = Vec::new();
+    if let Some(token) = &cfg.token {
+        secrets.push(token.clone());
+        secrets.push(base64_token(token));
+    }
+    if let Some(password) = cfg.proxy.as_deref().and_then(proxy_password) {
+        // As written, as the URL parser normalises it, and decoded as curl sends it.
+        let mut forms = vec![password.to_owned(), percent_decode(password)];
+        if let Some(normal) = cfg
+            .proxy
+            .as_deref()
+            .and_then(|p| url::Url::parse(p).ok())
+            .and_then(|u| u.password().map(str::to_owned))
+        {
+            forms.push(normal);
+        }
+        for form in forms {
+            if !form.is_empty() && !secrets.contains(&form) {
+                secrets.push(form);
+            }
+        }
+    }
+    secrets
+}
+
+/// The password of a proxy URL exactly as written, if it has one.
+fn proxy_password(proxy: &str) -> Option<&str> {
+    let (_, rest) = proxy.split_once("://")?;
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let (userinfo, _) = authority.rsplit_once('@')?;
+    userinfo.split_once(':').map(|(_, password)| password)
+}
+
+/// Decodes `%XX` sequences; anything else is kept as it is.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Base64 of `x-access-token:<token>`, the credential of the basic-auth header.
 fn base64_token(token: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"))
@@ -441,6 +495,13 @@ pub(crate) fn git_config(cfg: &GitopsConfig) -> Vec<(String, String)> {
     // A redirect could carry the token's header to another host: the configured
     // URL must be the final one.
     set("http.followRedirects", "false".into());
+    // Explicit settings instead of `HTTPS_PROXY` and friends: the environment stays cleared.
+    if let Some(proxy) = &cfg.proxy {
+        set("http.proxy", proxy.clone());
+    }
+    if let Some(ca_file) = &cfg.ca_file {
+        set("http.sslCAInfo", plain_path(ca_file));
+    }
 
     // Only the transports the source needs.
     let url = cfg.url.as_deref().unwrap_or_default();
@@ -950,6 +1011,127 @@ mod tests {
             Some(format!("Authorization: Basic {}", base64_token("abc")).as_str())
         );
         assert!(value(&config, "core.sshCommand").is_none());
+    }
+
+    #[test]
+    fn proxy_and_ca_file_become_http_settings() {
+        let plain = git_config(&remote_cfg());
+        assert!(value(&plain, "http.proxy").is_none());
+        assert!(value(&plain, "http.sslCAInfo").is_none());
+        let cfg = GitopsConfig {
+            proxy: Some("http://user:pw@proxy.example.com:3128".into()),
+            ca_file: Some(PathBuf::from("/etc/cerbrix/ca.pem")),
+            ..remote_cfg()
+        };
+        let config = git_config(&cfg);
+        assert_eq!(
+            value(&config, "http.proxy"),
+            Some("http://user:pw@proxy.example.com:3128")
+        );
+        assert_eq!(
+            value(&config, "http.sslCAInfo"),
+            Some("/etc/cerbrix/ca.pem")
+        );
+    }
+
+    #[test]
+    fn proxy_password_is_a_secret_in_every_form() {
+        let none = GitopsConfig {
+            proxy: Some("http://proxy:3128".into()),
+            ..remote_cfg()
+        };
+        assert!(runner_secrets(&none).is_empty());
+        let user_only = GitopsConfig {
+            proxy: Some("http://alice@proxy:3128".into()),
+            ..remote_cfg()
+        };
+        assert!(runner_secrets(&user_only).is_empty());
+        let cfg = GitopsConfig {
+            token: Some("tok".into()),
+            proxy: Some("http://user:s%40cr%C3%A4t@proxy:3128".into()),
+            ..remote_cfg()
+        };
+        let secrets = runner_secrets(&cfg);
+        for form in ["tok", &base64_token("tok"), "s%40cr%C3%A4t", "s@crät"] {
+            assert!(secrets.iter().any(|s| s == form), "{form}: {secrets:?}");
+        }
+        // Outside a URL, only the secrets list catches the password.
+        let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
+        let out = scrub("proxy said s@crät and s%40cr%C3%A4t", &secrets);
+        assert!(!out.contains("crät") && !out.contains("C3%A4t"), "{out}");
+    }
+
+    /// A TCP listener standing in for the proxy: it accepts one connection, reports
+    /// the first line of the request and closes.
+    fn fake_proxy() -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // One connection only: the thread ends and the listener closes, so the
+        // retry of the fetch is refused instead of leaving a thread in `accept`.
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut line = String::new();
+                let _ = BufReader::new(&stream).read_line(&mut line);
+                let _ = tx.send(line);
+            }
+        });
+        (port, rx)
+    }
+
+    #[tokio::test]
+    async fn fetch_goes_through_the_proxy_and_hides_its_password() {
+        let (port, requests) = fake_proxy();
+        let cache = tempfile::tempdir().unwrap();
+        let cfg = GitopsConfig {
+            enabled: true,
+            url: Some("https://example.invalid/repo.git".into()),
+            proxy: Some(format!("http://user:secret@127.0.0.1:{port}")),
+            cache_dir: cache.path().to_path_buf(),
+            ..GitopsConfig::default()
+        };
+        let reason = fetch_error(GitSource::new(&cfg).fetch().await);
+        let first = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("git did not connect to the proxy");
+        assert!(first.starts_with("CONNECT example.invalid:443"), "{first}");
+        // Git reports the failure without the proxy URL ("Proxy CONNECT aborted").
+        assert!(!reason.is_empty() && !reason.contains("secret"), "{reason}");
+        let shown = format!("{:?}", GitSource::new(&cfg));
+        assert!(!shown.contains("secret"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn git_errors_are_scrubbed_of_the_proxy_password() {
+        let cache = tempfile::tempdir().unwrap();
+        let cfg = GitopsConfig {
+            proxy: Some("http://user:s%40cr%C3%A4t@127.0.0.1:1".into()),
+            cache_dir: cache.path().to_path_buf(),
+            ..remote_cfg()
+        };
+        let runner = Runner {
+            env: git_env(cache.path(), &git_config(&cfg)),
+            secrets: runner_secrets(&cfg),
+            timeout: Duration::from_secs(60),
+        };
+        runner
+            .run(cache.path(), &["init", "--quiet", "--template="])
+            .await
+            .unwrap();
+        // Git echoes an unknown revision in its error, outside of any URL.
+        for form in ["s@crät", "s%40cr%C3%A4t"] {
+            match runner.run(cache.path(), &["rev-parse", form]).await {
+                Err(RunError::Failed(reason)) => {
+                    assert!(reason.contains("***"), "{reason}");
+                    assert!(
+                        !reason.contains("crät") && !reason.contains("C3%A4t"),
+                        "{reason}"
+                    );
+                }
+                other => panic!("expected a failure, got {other:?}"),
+            }
+        }
     }
 
     #[test]

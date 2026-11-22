@@ -459,6 +459,20 @@ describe('SessionProvider while the server cannot be reached', () => {
     expect(mock.count('GET /session')).toBe(2);
   });
 
+  it('treats a 503 of a server without its database as unreachable and retries by itself', async () => {
+    const down: Answer = {
+      status: 503,
+      json: { error: 'database_unavailable', message: 'the database is not reachable' },
+    };
+    showGate([down, { json: { name: 'anna', role: 'viewer' } }]);
+    await advance(0);
+    expect(screen.getByText('Could not reach the server')).toBeInTheDocument();
+    expect(screen.queryByLabelText('User name')).not.toBeInTheDocument();
+    await advance(5000);
+    expect(mock.count('GET /session')).toBe(2);
+    expect(screen.getByText('user=anna/viewer')).toBeInTheDocument();
+  });
+
   it('shows the login page when a retry is answered 401', async () => {
     showGate(['network', UNAUTHORIZED]);
     await advance(0);

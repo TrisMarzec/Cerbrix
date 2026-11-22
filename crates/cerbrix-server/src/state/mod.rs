@@ -25,6 +25,8 @@ pub use sync::{
 };
 pub use users::{LoginOutcome, PasswordCheck, User};
 
+use std::time::Duration;
+
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -48,6 +50,34 @@ pub enum StateError {
     Db(#[from] sqlx::Error),
 }
 
+impl StateError {
+    /// True when the database could not be reached: no connection came within
+    /// [`ACQUIRE_TIMEOUT`], the pool is closed, the connection failed, or the server is
+    /// shutting down or starting. Such an error says nothing about the request.
+    pub fn is_unavailable(&self) -> bool {
+        match self {
+            StateError::Db(
+                sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_),
+            ) => true,
+            StateError::Db(sqlx::Error::Database(e)) => {
+                e.code().is_some_and(|code| sqlstate_unavailable(&code))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// True for the SQLSTATE classes of a connection failure (`08`) and of a server that is
+/// shutting down or starting (`57P`).
+fn sqlstate_unavailable(code: &str) -> bool {
+    code.starts_with("08") || code.starts_with("57P")
+}
+
+/// How long a caller waits for a connection of the pool. It is shared by ingestion,
+/// alerting, sync and the UI API; all of them retry on their own, so waiting longer gains
+/// nothing.
+pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Handle to the PostgreSQL state; cheap to clone.
 #[derive(Clone)]
 pub struct StateStore {
@@ -59,6 +89,7 @@ impl StateStore {
     pub async fn connect(url: &str) -> Result<Self, StateError> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
+            .acquire_timeout(ACQUIRE_TIMEOUT)
             .connect(url)
             .await?;
         sqlx::migrate!("./migrations")
@@ -275,6 +306,31 @@ mod tests {
         assert_eq!(list[0].host_name, "ghost");
         assert_eq!(list[0].attempts, 2);
         assert!(list[0].first_seen < list[0].last_seen);
+    }
+
+    #[test]
+    fn unreachable_database_is_unavailable() {
+        for e in [
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+            sqlx::Error::Io(std::io::Error::other("connection refused")),
+        ] {
+            assert!(StateError::Db(e).is_unavailable());
+        }
+    }
+
+    #[test]
+    fn other_errors_are_not_unavailable() {
+        assert!(!StateError::Db(sqlx::Error::RowNotFound).is_unavailable());
+        assert!(!StateError::NotFound.is_unavailable());
+        assert!(!StateError::Conflict("taken".into()).is_unavailable());
+    }
+
+    #[test]
+    fn connection_and_shutdown_sqlstates_are_unavailable() {
+        assert!(sqlstate_unavailable("08006"));
+        assert!(sqlstate_unavailable("57P03"));
+        assert!(!sqlstate_unavailable("23505"));
     }
 
     #[sqlx::test(migrations = "./migrations")]

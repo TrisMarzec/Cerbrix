@@ -2,7 +2,7 @@
 //! (operator-supplied certificate) or, for development, plain HTTP.
 
 use std::future::Future;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +21,7 @@ use crate::auth::{PasswordGate, SESSION_CLEANUP_EVERY, run_session_cleanup_loop}
 use crate::config::Config;
 use crate::gitops::{GitSource, run_sync_loop};
 use crate::metrics::VictoriaMetrics;
+use crate::retention::{RETENTION_EVERY, run_retention_loop};
 use crate::state::StateStore;
 
 /// Upper bound for one request, body included, so that a client trickling a body
@@ -96,6 +97,15 @@ pub async fn serve(
         SESSION_CLEANUP_EVERY,
         shutdown_token.clone(),
     ));
+    // `closed_problems_days = 0` keeps closed problems for ever: no loop.
+    let retention_task = (config.retention.closed_problems_days != 0).then(|| {
+        tokio::spawn(run_retention_loop(
+            store.clone(),
+            config.retention.clone(),
+            RETENTION_EVERY,
+            shutdown_token.clone(),
+        ))
+    });
     let dispatch_task = channel.map(|channel| {
         tokio::spawn(run_dispatch_loop(
             store.clone(),
@@ -104,6 +114,7 @@ pub async fn serve(
             shutdown_token.clone(),
         ))
     });
+    let client_address_header = config.auth.client_address_header_name()?;
     let state = AppState {
         store,
         metrics: Arc::new(metrics),
@@ -111,6 +122,8 @@ pub async fn serve(
         warnings: Arc::default(),
         queue_mail,
         passwords: PasswordGate::default(),
+        logins: Arc::default(),
+        client_address_header,
     };
     let app = router(state).layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
@@ -135,14 +148,14 @@ pub async fn serve(
                 tracing::info!(%addr, "listening (HTTPS)");
                 axum_server::from_tcp_rustls(listener, tls)?
                     .handle(handle)
-                    .serve(app.into_make_service())
+                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                     .await?;
             }
             None => {
                 tracing::info!(%addr, "listening (HTTP)");
                 axum_server::from_tcp(listener)?
                     .handle(handle)
-                    .serve(app.into_make_service())
+                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                     .await?;
             }
         }
@@ -165,6 +178,11 @@ pub async fn serve(
     }
     if let Err(err) = sessions_task.await {
         tracing::error!(%err, "session cleanup loop ended abnormally");
+    }
+    if let Some(task) = retention_task
+        && let Err(err) = task.await
+    {
+        tracing::error!(%err, "retention loop ended abnormally");
     }
     if let Some(task) = dispatch_task
         && let Err(err) = task.await

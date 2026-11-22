@@ -32,6 +32,8 @@ pub struct Config {
     pub smtp: SmtpConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub retention: RetentionConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +117,12 @@ pub struct AuthConfig {
     /// Whether the session cookie carries `Secure`. Unset: on, unless `server.insecure_http`.
     /// Behind a TLS-terminating reverse proxy, set it to true.
     pub secure_cookie: Option<bool>,
+    /// The request header whose right-most address is the client address for counting failed
+    /// logins, such as `X-Forwarded-For` behind a reverse proxy. Unset: the peer address.
+    pub client_address_header: Option<String>,
+    /// Whether failed logins are counted per client address. Off where all clients share
+    /// one address and no proxy header names the real one; the account lock stays.
+    pub throttle_logins: bool,
 }
 
 impl Default for AuthConfig {
@@ -123,6 +131,8 @@ impl Default for AuthConfig {
             session_idle_secs: 43_200,
             session_max_secs: 604_800,
             secure_cookie: None,
+            client_address_header: None,
+            throttle_logins: true,
         }
     }
 }
@@ -138,6 +148,54 @@ impl AuthConfig {
         }
         if self.session_max_secs > 2_592_000 {
             return bad("auth.session_max_secs must be at most 2592000");
+        }
+        self.client_address_header_name()?;
+        Ok(())
+    }
+
+    /// `client_address_header` as a header name, or the validation error.
+    pub fn client_address_header_name(
+        &self,
+    ) -> Result<Option<axum::http::HeaderName>, ConfigError> {
+        self.client_address_header
+            .as_deref()
+            .map(|name| {
+                axum::http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    ConfigError::Invalid(
+                        "auth.client_address_header must be a header name such as X-Forwarded-For"
+                            .to_owned(),
+                    )
+                })
+            })
+            .transpose()
+    }
+}
+
+/// How long data is kept in PostgreSQL. Metric values are kept by VictoriaMetrics, whose
+/// retention is set in the Compose file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    /// Problems resolved longer ago than this many days are deleted; `0` keeps them for ever.
+    pub closed_problems_days: u32,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            closed_problems_days: 365,
+        }
+    }
+}
+
+impl RetentionConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        // 0 is allowed and means "keep for ever".
+        if self.closed_problems_days > 3650 {
+            return Err(ConfigError::Invalid(
+                "retention.closed_problems_days must be 0 (keep for ever) or between 1 and 3650"
+                    .to_owned(),
+            ));
         }
         Ok(())
     }
@@ -173,6 +231,10 @@ pub struct SmtpConfig {
     pub from: Option<String>,
     /// Total time allowed for one message, in seconds.
     pub timeout_secs: u64,
+    /// PEM file with certificate authorities trusted in addition to the public ones.
+    pub ca_file: Option<PathBuf>,
+    /// The name sent with EHLO; the domain of `from` when unset.
+    pub hello_name: Option<String>,
 }
 
 impl Default for SmtpConfig {
@@ -185,6 +247,8 @@ impl Default for SmtpConfig {
             password: None,
             from: None,
             timeout_secs: 15,
+            ca_file: None,
+            hello_name: None,
         }
     }
 }
@@ -199,6 +263,8 @@ impl fmt::Debug for SmtpConfig {
             .field("password", &Redacted(self.password.is_some()))
             .field("from", &self.from)
             .field("timeout_secs", &self.timeout_secs)
+            .field("ca_file", &self.ca_file)
+            .field("hello_name", &self.hello_name)
             .finish()
     }
 }
@@ -219,6 +285,17 @@ impl SmtpConfig {
             return bad(&format!(
                 "smtp.timeout_secs must be between 1 and {MAX_SMTP_TIMEOUT_SECS}"
             ));
+        }
+        if let Some(name) = &self.hello_name
+            && !is_host_name(name)
+        {
+            return bad("smtp.hello_name must be a host name");
+        }
+        if self.ca_file.is_some() && self.encryption == SmtpEncryption::None {
+            return bad("smtp.ca_file needs starttls or tls");
+        }
+        if let Some(path) = &self.ca_file {
+            check_file_path("smtp.ca_file", path)?;
         }
         let Some(host) = &self.host else {
             return Ok(());
@@ -252,6 +329,27 @@ impl SmtpConfig {
     }
 }
 
+/// A file setting `key`: not empty, without control characters, and absolute.
+fn check_file_path(key: &str, path: &Path) -> Result<(), ConfigError> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().contains(char::is_control) {
+        return Err(ConfigError::Invalid(format!("{key} is not a valid path")));
+    }
+    if !path.is_absolute() {
+        return Err(ConfigError::Invalid(format!(
+            "{key} must be an absolute path"
+        )));
+    }
+    Ok(())
+}
+
+/// A host name for EHLO: 1 to 253 ASCII letters, digits, `-` and `.`.
+pub(crate) fn is_host_name(name: &str) -> bool {
+    (1..=253).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+}
+
 /// Settings for configuration from a Git repository.
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -264,6 +362,11 @@ pub struct GitopsConfig {
     pub token: Option<String>,
     pub ssh_key_file: Option<PathBuf>,
     pub known_hosts_file: Option<PathBuf>,
+    /// Proxy for an `https://` repository: `http://`, `https://`, `socks5://` or
+    /// `socks5h://`. Its password is a secret.
+    pub proxy: Option<String>,
+    /// Certificate authorities for an `https://` repository, in place of git's bundle.
+    pub ca_file: Option<PathBuf>,
     pub cache_dir: PathBuf,
     pub max_host_removal_percent: u8,
 }
@@ -278,6 +381,8 @@ impl Default for GitopsConfig {
             token: None,
             ssh_key_file: None,
             known_hosts_file: None,
+            proxy: None,
+            ca_file: None,
             cache_dir: PathBuf::from("/var/lib/cerbrix/git"),
             max_host_removal_percent: 50,
         }
@@ -313,6 +418,47 @@ fn url_without_userinfo(raw: &str) -> String {
     }
 }
 
+/// The URL for display, with `***` in place of a user name and password.
+fn url_with_masked_userinfo(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(mut u) => {
+            if !u.username().is_empty() || u.password().is_some() {
+                let _ = u.set_password(None);
+                let _ = u.set_username("***");
+            }
+            u.to_string()
+        }
+        Err(_) => "<unparseable>".to_owned(),
+    }
+}
+
+/// A proxy URL git can use: `http`, `https`, `socks5` or `socks5h` with a host
+/// and nothing after it.
+fn valid_proxy(raw: &str) -> bool {
+    // `Url::parse` would silently trim surrounding spaces and control characters.
+    if raw.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    // Checked on the raw text: `Url::parse` lowercases the scheme, but git matches
+    // it case-sensitively and treats any other spelling as a plain HTTP proxy.
+    if !["http://", "https://", "socks5://", "socks5h://"]
+        .iter()
+        .any(|scheme| raw.starts_with(scheme))
+    {
+        return false;
+    }
+    match url::Url::parse(raw) {
+        // A path would hide a password with an unencoded `/` from masking.
+        Ok(u) => {
+            u.host_str().is_some_and(|h| !h.is_empty())
+                && matches!(u.path(), "" | "/")
+                && u.query().is_none()
+                && u.fragment().is_none()
+        }
+        Err(_) => false,
+    }
+}
+
 impl fmt::Debug for GitopsConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GitopsConfig")
@@ -323,6 +469,18 @@ impl fmt::Debug for GitopsConfig {
             .field("token", &Redacted(self.token.is_some()))
             .field("ssh_key_file", &self.ssh_key_file)
             .field("known_hosts_file", &self.known_hosts_file)
+            .field(
+                "proxy",
+                // An invalid value may hold its password where masking cannot find it.
+                &self.proxy.as_deref().map(|p| {
+                    if valid_proxy(p) {
+                        url_with_masked_userinfo(p)
+                    } else {
+                        "<invalid>".to_owned()
+                    }
+                }),
+            )
+            .field("ca_file", &self.ca_file)
             .field("cache_dir", &self.cache_dir)
             .field("max_host_removal_percent", &self.max_host_removal_percent)
             .finish()
@@ -443,22 +601,21 @@ impl GitopsConfig {
         if self.ssh_key_file.is_some() && !matches!(kind, GitUrlKind::Ssh | GitUrlKind::ScpLike) {
             return bad("gitops.ssh_key_file requires an ssh:// or user@host:path gitops.url");
         }
+        if let Some(proxy) = &self.proxy
+            && !valid_proxy(proxy)
+        {
+            return bad("gitops.proxy must be an http, https or socks5 URL");
+        }
+        if (self.proxy.is_some() || self.ca_file.is_some()) && kind != GitUrlKind::Https {
+            return bad("gitops.proxy and gitops.ca_file need an https repository URL");
+        }
         for (key, path) in [
             ("gitops.ssh_key_file", &self.ssh_key_file),
             ("gitops.known_hosts_file", &self.known_hosts_file),
+            ("gitops.ca_file", &self.ca_file),
         ] {
-            if let Some(path) = path
-                && (path.as_os_str().is_empty()
-                    || path.to_string_lossy().contains(char::is_control))
-            {
-                return Err(ConfigError::Invalid(format!("{key} is not a valid path")));
-            }
-            if let Some(path) = path
-                && !path.is_absolute()
-            {
-                return Err(ConfigError::Invalid(format!(
-                    "{key} must be an absolute path"
-                )));
+            if let Some(path) = path {
+                check_file_path(key, path)?;
             }
         }
         if self.cache_dir.as_os_str().is_empty() {
@@ -553,6 +710,7 @@ impl Config {
         self.alerting.validate()?;
         self.smtp.validate()?;
         self.auth.validate()?;
+        self.retention.validate()?;
         Ok(())
     }
 
@@ -1016,6 +1174,64 @@ mod tests {
     }
 
     #[test]
+    fn client_address_header_is_off_by_default_and_must_be_a_header_name() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let load = || Config::load(Some(Path::new("cerbrix.toml")));
+            assert_eq!(load().unwrap().auth.client_address_header, None);
+            jail.set_env("CERBRIX_AUTH__CLIENT_ADDRESS_HEADER", "X-Forwarded-For");
+            assert_eq!(
+                load().unwrap().auth.client_address_header.as_deref(),
+                Some("X-Forwarded-For")
+            );
+            for bad in ["", "X Forwarded For", "x-forwarded-for:"] {
+                jail.set_env("CERBRIX_AUTH__CLIENT_ADDRESS_HEADER", bad);
+                assert_eq!(
+                    invalid(load()),
+                    "auth.client_address_header must be a header name such as X-Forwarded-For",
+                    "{bad:?}"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn login_throttle_is_on_by_default_and_can_be_switched_off() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let load = || Config::load(Some(Path::new("cerbrix.toml")));
+            assert!(load().unwrap().auth.throttle_logins);
+            jail.set_env("CERBRIX_AUTH__THROTTLE_LOGINS", "false");
+            assert!(!load().unwrap().auth.throttle_logins);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn retention_defaults_and_bounds() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let load = || Config::load(Some(Path::new("cerbrix.toml")));
+            assert_eq!(load().unwrap().retention.closed_problems_days, 365);
+            for (value, ok) in [(0, true), (1, true), (3650, true), (3651, false)] {
+                jail.set_env("CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS", value);
+                let result = load();
+                assert_eq!(result.is_ok(), ok, "closed_problems_days {value}");
+                if ok {
+                    assert_eq!(result.unwrap().retention.closed_problems_days, value);
+                } else {
+                    assert_eq!(
+                        invalid(result),
+                        "retention.closed_problems_days must be 0 (keep for ever) or between 1 and 3650"
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
     fn interval_bounds() {
         Jail::expect_with(|_| {
             for (value, ok) in [(4, false), (5, true), (3600, true), (3601, false)] {
@@ -1056,6 +1272,130 @@ mod tests {
             "{shown}"
         );
         assert!(shown.contains("git.example.com"), "{shown}");
+    }
+
+    #[test]
+    fn proxy_must_be_an_http_https_or_socks5_url() {
+        Jail::expect_with(|jail| {
+            let cfg = load_gitops(&gitops_toml("")).unwrap();
+            assert!(cfg.gitops.proxy.is_none() && cfg.gitops.ca_file.is_none());
+            for proxy in [
+                "http://proxy.example.com:3128",
+                "https://proxy.example.com",
+                "socks5://127.0.0.1:1080",
+                "socks5h://user:pw@proxy:1080",
+                "http://proxy:3128/",
+            ] {
+                let toml = gitops_toml(&format!("proxy = {proxy:?}\n"));
+                assert!(load_gitops(&toml).is_ok(), "{proxy} rejected");
+            }
+            // TOML string literals.
+            for proxy in [
+                r#""""#,
+                r#""proxy.example.com:3128""#,
+                r#""ftp://proxy:21""#,
+                r#""socks4://proxy:1080""#,
+                r#""http://""#,
+                r#""http://proxy :3128""#,
+                r#"" http://proxy:3128""#,
+                r#""http://proxy:3128\n""#,
+                r#""http://pro\u0007xy:3128""#,
+                // Git matches the scheme case-sensitively and would fall back to a
+                // plain HTTP proxy.
+                r#""HTTP://proxy:3128""#,
+                r#""HTTPS://user:pw@proxy:3128""#,
+                r#""SOCKS5://proxy:1080""#,
+                r#""Socks5h://proxy:1080""#,
+                r#""hTTps://proxy:3128""#,
+                // A path, query or fragment: an unencoded `/` in the password would
+                // make the password part of a path and escape masking.
+                r#""http://user:123/x@proxy:3128""#,
+                r#""http://proxy:3128/path""#,
+                r#""socks5://proxy:1080/x""#,
+                r#""http://proxy:3128?a=b""#,
+                r#""http://proxy:3128/?""#,
+                r#""http://proxy:3128#frag""#,
+            ] {
+                let msg = invalid(load_gitops(&gitops_toml(&format!("proxy = {proxy}\n"))));
+                assert_eq!(
+                    msg, "gitops.proxy must be an http, https or socks5 URL",
+                    "{proxy:?}"
+                );
+            }
+            // A proxy password in an error never shows.
+            for proxy in [
+                "ftp://user:pw-SECRET@proxy",
+                "http://user:pw-SECRET/x@proxy:3128",
+            ] {
+                let msg = invalid(load_gitops(&gitops_toml(&format!("proxy = {proxy:?}\n"))));
+                assert!(!msg.contains("pw-SECRET"), "{msg}");
+            }
+            jail.create_file("cerbrix.toml", &gitops_toml(""))?;
+            jail.set_env("CERBRIX_GITOPS__PROXY", "http://proxy:3128");
+            jail.set_env("CERBRIX_GITOPS__CA_FILE", ABS_KEY);
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert_eq!(cfg.gitops.proxy.as_deref(), Some("http://proxy:3128"));
+            assert_eq!(cfg.gitops.ca_file, Some(PathBuf::from(ABS_KEY)));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn proxy_and_ca_file_need_an_https_repository() {
+        Jail::expect_with(|_| {
+            let proxy = "proxy = \"http://proxy:3128\"\n".to_owned();
+            let ca = format!("ca_file = \"{ABS_KEY}\"\n");
+            for extra in [&proxy, &ca] {
+                for url in [
+                    "ssh://git@host/org/r.git",
+                    "git@host:org/r.git",
+                    "file:///srv/repo",
+                ] {
+                    let msg = invalid(load_gitops(&gitops_toml_with_url(url, extra)));
+                    assert_eq!(
+                        msg, "gitops.proxy and gitops.ca_file need an https repository URL",
+                        "{url}"
+                    );
+                }
+                assert!(load_gitops(&gitops_toml(extra)).is_ok(), "{extra}");
+            }
+            assert!(load_gitops(&gitops_toml(&format!("{proxy}{ca}"))).is_ok());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn relative_ca_file_rejected() {
+        Jail::expect_with(|_| {
+            let msg = invalid(load_gitops(&gitops_toml("ca_file = \"certs/ca.pem\"\n")));
+            assert_eq!(msg, "gitops.ca_file must be an absolute path");
+            let msg = invalid(load_gitops(&gitops_toml("ca_file = \"\"\n")));
+            assert_eq!(msg, "gitops.ca_file is not a valid path");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn debug_masks_the_proxy_user_info() {
+        let cfg = GitopsConfig {
+            proxy: Some("http://user:secret@proxy:3128".into()),
+            ..GitopsConfig::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(
+            !shown.contains("secret") && !shown.contains("user"),
+            "{shown}"
+        );
+        assert!(shown.contains("proxy:3128"), "{shown}");
+        // An invalid value is not shown at all: its password may sit where masking
+        // cannot find it.
+        let cfg = GitopsConfig {
+            proxy: Some("http://user:123/secret@proxy:3128".into()),
+            ..GitopsConfig::default()
+        };
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("proxy: Some(\"<invalid>\")"), "{shown}");
     }
 
     #[test]
@@ -1237,6 +1577,76 @@ mod tests {
                 let toml = smtp_toml(&format!("timeout_secs = {value}\n"));
                 assert_eq!(load_gitops(&toml).is_ok(), ok, "timeout {value}");
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_hello_name_must_be_a_host_name() {
+        Jail::expect_with(|jail| {
+            let cfg = load_gitops(&smtp_toml("")).unwrap();
+            assert!(cfg.smtp.hello_name.is_none() && cfg.smtp.ca_file.is_none());
+            let cfg = load_gitops(&smtp_toml("hello_name = \"mon-1.example.net\"\n")).unwrap();
+            assert_eq!(cfg.smtp.hello_name.as_deref(), Some("mon-1.example.net"));
+            let long = "a".repeat(254);
+            for bad in [
+                "",
+                "[127.0.0.1]",
+                "mon example",
+                "mon_1.example",
+                "mön.example",
+                &long,
+            ] {
+                let toml = smtp_toml(&format!("hello_name = \"{bad}\"\n"));
+                let msg = invalid(load_gitops(&toml));
+                assert_eq!(msg, "smtp.hello_name must be a host name", "{bad:?}");
+            }
+            assert!(load_gitops(&smtp_toml(&format!("hello_name = \"{}\"\n", &long[1..]))).is_ok());
+            jail.create_file("cerbrix.toml", &smtp_toml(""))?;
+            jail.set_env("CERBRIX_SMTP__HELLO_NAME", "mon.example.net");
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert_eq!(cfg.smtp.hello_name.as_deref(), Some("mon.example.net"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_ca_file_needs_tls() {
+        Jail::expect_with(|jail| {
+            let ca = format!("ca_file = \"{ABS_KEY}\"\n");
+            for (encryption, ok) in [("starttls", true), ("tls", true), ("none", false)] {
+                let toml = smtp_toml(&format!("encryption = \"{encryption}\"\n{ca}"));
+                match load_gitops(&toml) {
+                    Ok(cfg) => {
+                        assert!(ok, "{encryption}");
+                        assert_eq!(cfg.smtp.ca_file, Some(PathBuf::from(ABS_KEY)));
+                    }
+                    Err(e) => {
+                        assert!(!ok, "{encryption}: {e}");
+                        assert_eq!(invalid(Err(e)), "smtp.ca_file needs starttls or tls");
+                    }
+                }
+            }
+            jail.create_file("cerbrix.toml", &smtp_toml(""))?;
+            jail.set_env("CERBRIX_SMTP__CA_FILE", ABS_KEY);
+            let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
+            assert_eq!(cfg.smtp.ca_file, Some(PathBuf::from(ABS_KEY)));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_ca_file_must_be_an_absolute_path() {
+        Jail::expect_with(|_| {
+            let msg = invalid(load_gitops(&smtp_toml("ca_file = \"certs/ca.pem\"\n")));
+            assert_eq!(msg, "smtp.ca_file must be an absolute path");
+            let msg = invalid(load_gitops(&smtp_toml("ca_file = \"\"\n")));
+            assert_eq!(msg, "smtp.ca_file is not a valid path");
+            let toml = smtp_toml(&format!("ca_file = \"{ABS_KEY}\\u0007\"\n"));
+            assert_eq!(
+                invalid(load_gitops(&toml)),
+                "smtp.ca_file is not a valid path"
+            );
             Ok(())
         });
     }

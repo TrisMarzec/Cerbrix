@@ -42,6 +42,7 @@ uuid.workspace = true
 figment = { workspace = true, features = ["test"] }
 rcgen.workspace = true
 tempfile.workspace = true
+tokio-rustls = { version = "0.26.6", default-features = false }
 tower = { version = "0.5.3", features = ["util"] }
 wiremock.workspace = true
 

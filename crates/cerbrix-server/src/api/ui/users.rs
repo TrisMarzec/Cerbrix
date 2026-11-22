@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{ApiError, ApiJson, Entry, Listed, Page, hash_failed, invalid};
+use super::{ApiError, ApiJson, Entry, Listed, Page, hash_failed, invalid, store_failed};
 use crate::api::AppState;
 use crate::auth::{Admin, Role, generate_password, validate_password, validate_user_name};
 use crate::state::{StateError, User};
@@ -63,11 +63,6 @@ fn conflict(message: &'static str) -> ApiError {
 /// A malformed id cannot name a user.
 fn parse_id(raw: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(raw).map_err(|_| not_found())
-}
-
-fn store_failed(what: &str, e: &StateError) -> ApiError {
-    tracing::error!(error = %e, "{what}");
-    ApiError::internal()
 }
 
 /// The answer to a store error of a change of an existing user.

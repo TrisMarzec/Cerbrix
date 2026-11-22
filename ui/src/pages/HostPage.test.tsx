@@ -764,6 +764,20 @@ describe('series errors', () => {
     expect(screen.queryByText(/Could not load this graph/)).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['database_unavailable', 'The server cannot reach its database.'],
+    ['timeout', 'The server took too long to answer.'],
+  ])('does not blame the metrics store for a 503 %s', async (code, sentence) => {
+    await open({
+      routes: {
+        'GET /hosts/web-01/series': { status: 503, json: { error: code, message: 'x' } },
+      },
+    });
+    expect(screen.getByText(`Could not load this graph: ${sentence}`)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(screen.queryByText('The metrics store did not answer')).not.toBeInTheDocument();
+  });
+
   it('says when a graph was last updated after a poll failed, and keeps its picture', async () => {
     await open({
       routes: {

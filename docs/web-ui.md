@@ -232,8 +232,12 @@ problem shows within a few seconds.
   [example](configuration-repository.md#display-files-displays), which rotates through
   `production` and `web`, a critical problem on a production host while "Web servers" is on the
   screen gives "Alarm: showing Production. Switched from Web servers."; when other dashboards have
-  an alarm as well, the band adds "1 more dashboard waiting." or "N more dashboards waiting.". The
-  problems that caused the switch are highlighted in the problems panel. When the alarm is
+  an alarm as well, the band adds "1 more dashboard waiting." or "N more dashboards waiting.". A
+  second line of the band names the most urgent problem behind the alarm, more severe first, then
+  older: "Critical: web-01 – Disk almost full", with "+2 more" at its end when the dashboard has
+  further alarms. It is there whether or not the dashboard has a problems panel, so the wall
+  always says which host has which problem. The problems that caused the switch are also
+  highlighted in the problems panel. When the alarm is
   acknowledged or resolved, the display goes on with the next dashboard with an alarm, or back to
   its own setting; the interrupted dashboard of a rotation gets its full time again.
 - **A dashboard that cannot be loaded.** When the dashboard that should be on the screen cannot

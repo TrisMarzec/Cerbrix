@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{ApiError, ApiJson, Entry, Page, invalid, query_text};
+use super::{ApiError, ApiJson, Entry, Page, invalid, query_text, store_failed};
 use crate::api::AppState;
 use crate::auth::{Operator, Viewer};
 use crate::gitops::replace_control_by_space;
@@ -35,11 +35,6 @@ const MAX_GROUP_CHARS: usize = 63;
 
 /// The longest dashboard id taken.
 const MAX_DASHBOARD_CHARS: usize = 200;
-
-fn store_failed(what: &str, e: &StateError) -> ApiError {
-    tracing::error!(error = %e, "{what}");
-    ApiError::internal()
-}
 
 fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such problem")
