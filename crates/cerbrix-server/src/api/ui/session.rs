@@ -63,14 +63,18 @@ async fn login(
     ApiJson(body): ApiJson<LoginBody>,
 ) -> Result<Response, ApiError> {
     let client = client_address(peer.ip(), &headers, app.client_address_header.as_ref());
+    // `auth.throttle_logins = false`: the address is neither checked nor counted.
+    let throttle = app.config.auth.throttle_logins;
     // Before any password work and before the account's own counter, and the same for
     // every name.
-    if app.logins.refused(client, Instant::now()) {
+    if throttle && app.logins.refused(client, Instant::now()) {
         return Err(logins_refused());
     }
     // A failed login, counted against the client address.
     let wrong = || {
-        app.logins.failed(client, Instant::now());
+        if throttle {
+            app.logins.failed(client, Instant::now());
+        }
         ApiError::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -780,6 +784,17 @@ mod tests {
         assert_eq!(other.status, StatusCode::UNAUTHORIZED);
         let direct = login_from(&fx, proxy, &[], "nobody", PASSWORD).await;
         assert_eq!(direct.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn with_the_throttle_off_an_address_is_never_refused(pool: PgPool) {
+        let mut config = (*config(true, None)).clone();
+        config.auth.throttle_logins = false;
+        let fx = Fixture::with_config(pool, std::sync::Arc::new(config)).await;
+        for n in 1..=11 {
+            let reply = login(&fx, "nobody", PASSWORD).await;
+            assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "attempt {n}");
+        }
     }
 
     #[test]

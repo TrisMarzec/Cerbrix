@@ -1749,5 +1749,6 @@ mod tests {
         assert_eq!(reply.error_code(), "timeout");
         assert_eq!(reply.header("cache-control"), Some("no-store"));
         assert_eq!(reply.header("content-type"), Some("application/json"));
+        assert_eq!(reply.header("x-content-type-options"), Some("nosniff"));
     }
 }

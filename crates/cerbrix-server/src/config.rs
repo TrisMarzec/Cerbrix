@@ -120,6 +120,9 @@ pub struct AuthConfig {
     /// The request header whose right-most address is the client address for counting failed
     /// logins, such as `X-Forwarded-For` behind a reverse proxy. Unset: the peer address.
     pub client_address_header: Option<String>,
+    /// Whether failed logins are counted per client address. Off where all clients share
+    /// one address and no proxy header names the real one; the account lock stays.
+    pub throttle_logins: bool,
 }
 
 impl Default for AuthConfig {
@@ -129,6 +132,7 @@ impl Default for AuthConfig {
             session_max_secs: 604_800,
             secure_cookie: None,
             client_address_header: None,
+            throttle_logins: true,
         }
     }
 }
@@ -290,6 +294,9 @@ impl SmtpConfig {
         if self.ca_file.is_some() && self.encryption == SmtpEncryption::None {
             return bad("smtp.ca_file needs starttls or tls");
         }
+        if let Some(path) = &self.ca_file {
+            check_file_path("smtp.ca_file", path)?;
+        }
         let Some(host) = &self.host else {
             return Ok(());
         };
@@ -320,6 +327,19 @@ impl SmtpConfig {
         }
         Ok(())
     }
+}
+
+/// A file setting `key`: not empty, without control characters, and absolute.
+fn check_file_path(key: &str, path: &Path) -> Result<(), ConfigError> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().contains(char::is_control) {
+        return Err(ConfigError::Invalid(format!("{key} is not a valid path")));
+    }
+    if !path.is_absolute() {
+        return Err(ConfigError::Invalid(format!(
+            "{key} must be an absolute path"
+        )));
+    }
+    Ok(())
 }
 
 /// A host name for EHLO: 1 to 253 ASCII letters, digits, `-` and `.`.
@@ -594,18 +614,8 @@ impl GitopsConfig {
             ("gitops.known_hosts_file", &self.known_hosts_file),
             ("gitops.ca_file", &self.ca_file),
         ] {
-            if let Some(path) = path
-                && (path.as_os_str().is_empty()
-                    || path.to_string_lossy().contains(char::is_control))
-            {
-                return Err(ConfigError::Invalid(format!("{key} is not a valid path")));
-            }
-            if let Some(path) = path
-                && !path.is_absolute()
-            {
-                return Err(ConfigError::Invalid(format!(
-                    "{key} must be an absolute path"
-                )));
+            if let Some(path) = path {
+                check_file_path(key, path)?;
             }
         }
         if self.cache_dir.as_os_str().is_empty() {
@@ -1187,6 +1197,18 @@ mod tests {
     }
 
     #[test]
+    fn login_throttle_is_on_by_default_and_can_be_switched_off() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let load = || Config::load(Some(Path::new("cerbrix.toml")));
+            assert!(load().unwrap().auth.throttle_logins);
+            jail.set_env("CERBRIX_AUTH__THROTTLE_LOGINS", "false");
+            assert!(!load().unwrap().auth.throttle_logins);
+            Ok(())
+        });
+    }
+
+    #[test]
     fn retention_defaults_and_bounds() {
         Jail::expect_with(|jail| {
             jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
@@ -1609,6 +1631,22 @@ mod tests {
             jail.set_env("CERBRIX_SMTP__CA_FILE", ABS_KEY);
             let cfg = Config::load(Some(Path::new("cerbrix.toml"))).unwrap();
             assert_eq!(cfg.smtp.ca_file, Some(PathBuf::from(ABS_KEY)));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn smtp_ca_file_must_be_an_absolute_path() {
+        Jail::expect_with(|_| {
+            let msg = invalid(load_gitops(&smtp_toml("ca_file = \"certs/ca.pem\"\n")));
+            assert_eq!(msg, "smtp.ca_file must be an absolute path");
+            let msg = invalid(load_gitops(&smtp_toml("ca_file = \"\"\n")));
+            assert_eq!(msg, "smtp.ca_file is not a valid path");
+            let toml = smtp_toml(&format!("ca_file = \"{ABS_KEY}\\u0007\"\n"));
+            assert_eq!(
+                invalid(load_gitops(&toml)),
+                "smtp.ca_file is not a valid path"
+            );
             Ok(())
         });
     }

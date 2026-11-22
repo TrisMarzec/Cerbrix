@@ -970,6 +970,7 @@ mod login_tests {
             session_max_secs: 3600,
             secure_cookie: None,
             client_address_header: None,
+            throttle_logins: true,
         }
     }
 
@@ -1461,11 +1462,11 @@ mod login_tests {
         else {
             panic!("the password is right");
         };
-        // ... then an admin resets it ...
-        store
-            .set_user_password(amy.id, "$argon2id$reset", t0())
-            .await
-            .unwrap();
+        // ... then an admin resets it, and the user logs in with the reset password ...
+        const RESET: &str = "the password the admin set";
+        let reset = hash_password(RESET.to_owned()).await.unwrap();
+        store.set_user_password(amy.id, &reset, t0()).await.unwrap();
+        let token = token_of(try_login(&store, "amy", RESET, t0()).await);
         // ... and only then the change would be stored, from the old password.
         let changed = store
             .set_user_password_renewing_session(amy.id, &hash, "$argon2id$new", t0(), &cfg())
@@ -1476,13 +1477,16 @@ mod login_tests {
         );
         assert_eq!(
             store.user_password_hash(amy.id).await.unwrap().as_deref(),
-            Some("$argon2id$reset")
+            Some(reset.as_str())
         );
+        // The session of the reset password stays, and no other was started.
+        let user = store.session_user(&token, t0(), &cfg()).await.unwrap();
+        assert_eq!(user.map(|u| u.id), Some(amy.id));
         let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(sessions, 0);
+        assert_eq!(sessions, 1);
     }
 
     /// Everything the process logs while the tests run, from a subscriber installed once

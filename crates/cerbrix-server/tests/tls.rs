@@ -4,7 +4,9 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 use std::time::Duration;
 
-use cerbrix_server::config::{Config, DatabaseConfig, IngestConfig, MetricsConfig, ServerConfig};
+use cerbrix_server::config::{
+    Config, DatabaseConfig, IngestConfig, MetricsConfig, RetentionConfig, ServerConfig,
+};
 use cerbrix_server::tls::serve;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -28,7 +30,11 @@ fn config(listen: SocketAddr, cert: Option<&Path>, key: Option<&Path>, insecure:
         alerting: Default::default(),
         smtp: Default::default(),
         auth: Default::default(),
-        retention: Default::default(),
+        // `serve` starts the retention loop against `DATABASE_URL`, which may be the
+        // developer's database: keep its closed problems.
+        retention: RetentionConfig {
+            closed_problems_days: 0,
+        },
     }
 }
 
