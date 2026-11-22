@@ -231,6 +231,10 @@ When a trigger is changed in the repository:
 The sync does this when it applies the new revision, in the same step. The e-mail about the end
 goes to everyone who was mailed about the start.
 
+A closed problem is kept for 365 days after it was resolved and then deleted with its e-mail
+records; `CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS` changes that, see
+[Retention](install.md#retention).
+
 ## Who is told: notification rules
 
 Notification rules are files in `notifications/`. A rule says which problems go to which

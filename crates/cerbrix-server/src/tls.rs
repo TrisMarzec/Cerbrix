@@ -21,6 +21,7 @@ use crate::auth::{PasswordGate, SESSION_CLEANUP_EVERY, run_session_cleanup_loop}
 use crate::config::Config;
 use crate::gitops::{GitSource, run_sync_loop};
 use crate::metrics::VictoriaMetrics;
+use crate::retention::{RETENTION_EVERY, run_retention_loop};
 use crate::state::StateStore;
 
 /// Upper bound for one request, body included, so that a client trickling a body
@@ -96,6 +97,15 @@ pub async fn serve(
         SESSION_CLEANUP_EVERY,
         shutdown_token.clone(),
     ));
+    // `closed_problems_days = 0` keeps closed problems for ever: no loop.
+    let retention_task = (config.retention.closed_problems_days != 0).then(|| {
+        tokio::spawn(run_retention_loop(
+            store.clone(),
+            config.retention.clone(),
+            RETENTION_EVERY,
+            shutdown_token.clone(),
+        ))
+    });
     let dispatch_task = channel.map(|channel| {
         tokio::spawn(run_dispatch_loop(
             store.clone(),
@@ -168,6 +178,11 @@ pub async fn serve(
     }
     if let Err(err) = sessions_task.await {
         tracing::error!(%err, "session cleanup loop ended abnormally");
+    }
+    if let Some(task) = retention_task
+        && let Err(err) = task.await
+    {
+        tracing::error!(%err, "retention loop ended abnormally");
     }
     if let Some(task) = dispatch_task
         && let Err(err) = task.await

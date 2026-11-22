@@ -37,7 +37,8 @@ docker compose ps
 ```
 
 The first start builds the server image, which takes several minutes. The stack consists of
-`postgres`, `victoriametrics` (12 months retention) and `server`. The server applies its
+`postgres`, `victoriametrics` (keeps metric values for 12 months by default, see
+[Retention](#retention)) and `server`. The server applies its
 database migrations on start. By default the server is published on `127.0.0.1:8443` and
 VictoriaMetrics on `127.0.0.1:8428` only; PostgreSQL is not published at all. Check it:
 
@@ -345,6 +346,26 @@ settings it records problems but sends no e-mail; hosts with no-data triggers co
 the start of the server, so the upgrade does not report any host as silent. If a host has an
 item-level no-data trigger without a host-level one, the configuration is now refused (Out Of
 Sync) until you add the host-level trigger; see [Alerting](alerting.md#when-data-stops-arriving).
+
+## Retention
+
+Two settings decide how long data is kept:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CERBRIX_METRICS_RETENTION` | `12` | How long VictoriaMetrics keeps metric values. A number without a unit means months; `90d` (days) or `2y` (years) are possible too. A Compose variable: set it in the shell environment or in the `.env` file next to `docker-compose.yml`, not in `deploy/server.env`. |
+| `CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS` | `365` | Problems resolved longer ago than this many days are deleted, together with their notification records (the queued and sent e-mails). `0` keeps them for ever, otherwise 1 to 3650. Set in `deploy/server.env`. |
+
+VictoriaMetrics removes values older than its retention by itself; the server never deletes
+metric values. Shortening `CERBRIX_METRICS_RETENTION` and restarting the stack
+(`docker compose up -d`) deletes the values that are older than the new period, and they cannot
+be brought back. Lengthening it keeps values from then on, it does not bring back values already
+removed.
+
+The server deletes expired problems once an hour, the first time right after it starts, in batches of
+5000 problems so that no single step holds the table for long. Open problems are never deleted, however long ago they started: only the time a problem
+was resolved counts. The sync history is kept; retention does not touch it. An invalid value of
+`CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS` stops the server at start.
 
 ## Making the server reachable for agents
 

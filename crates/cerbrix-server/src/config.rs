@@ -32,6 +32,8 @@ pub struct Config {
     pub smtp: SmtpConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub retention: RetentionConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,6 +164,36 @@ impl AuthConfig {
                 })
             })
             .transpose()
+    }
+}
+
+/// How long data is kept in PostgreSQL. Metric values are kept by VictoriaMetrics, whose
+/// retention is set in the Compose file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RetentionConfig {
+    /// Problems resolved longer ago than this many days are deleted; `0` keeps them for ever.
+    pub closed_problems_days: u32,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            closed_problems_days: 365,
+        }
+    }
+}
+
+impl RetentionConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        // 0 is allowed and means "keep for ever".
+        if self.closed_problems_days > 3650 {
+            return Err(ConfigError::Invalid(
+                "retention.closed_problems_days must be 0 (keep for ever) or between 1 and 3650"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -575,6 +607,7 @@ impl Config {
         self.alerting.validate()?;
         self.smtp.validate()?;
         self.auth.validate()?;
+        self.retention.validate()?;
         Ok(())
     }
 
@@ -1055,6 +1088,29 @@ mod tests {
                     "auth.client_address_header must be a header name such as X-Forwarded-For",
                     "{bad:?}"
                 );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn retention_defaults_and_bounds() {
+        Jail::expect_with(|jail| {
+            jail.create_file("cerbrix.toml", &base_toml(DB, VM))?;
+            let load = || Config::load(Some(Path::new("cerbrix.toml")));
+            assert_eq!(load().unwrap().retention.closed_problems_days, 365);
+            for (value, ok) in [(0, true), (1, true), (3650, true), (3651, false)] {
+                jail.set_env("CERBRIX_RETENTION__CLOSED_PROBLEMS_DAYS", value);
+                let result = load();
+                assert_eq!(result.is_ok(), ok, "closed_problems_days {value}");
+                if ok {
+                    assert_eq!(result.unwrap().retention.closed_problems_days, value);
+                } else {
+                    assert_eq!(
+                        invalid(result),
+                        "retention.closed_problems_days must be 0 (keep for ever) or between 1 and 3650"
+                    );
+                }
             }
             Ok(())
         });

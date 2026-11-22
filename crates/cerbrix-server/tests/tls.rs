@@ -28,6 +28,7 @@ fn config(listen: SocketAddr, cert: Option<&Path>, key: Option<&Path>, insecure:
         alerting: Default::default(),
         smtp: Default::default(),
         auth: Default::default(),
+        retention: Default::default(),
     }
 }
 

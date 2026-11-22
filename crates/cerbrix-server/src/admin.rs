@@ -745,6 +745,7 @@ mod tests {
             alerting: Default::default(),
             smtp: Default::default(),
             auth: Default::default(),
+            retention: Default::default(),
         }
     }
 

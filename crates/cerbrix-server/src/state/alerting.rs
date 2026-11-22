@@ -1057,6 +1057,25 @@ impl StateStore {
         }
         Ok(())
     }
+
+    /// Deletes at most `limit` problems resolved before `before`, the oldest resolution
+    /// first, with their notification records. Open problems are never deleted. Returns
+    /// how many were deleted.
+    pub async fn delete_problems_resolved_before(
+        &self,
+        before: OffsetDateTime,
+        limit: i64,
+    ) -> Result<u64, StateError> {
+        let done = sqlx::query(
+            "DELETE FROM problems WHERE id IN ( \
+             SELECT id FROM problems WHERE resolved_at < $1 ORDER BY resolved_at LIMIT $2)",
+        )
+        .bind(before)
+        .bind(limit)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected())
+    }
 }
 
 /// Upserts the states in one statement; the last entry of a duplicated key wins.
@@ -2530,5 +2549,108 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(seen, None);
+    }
+
+    /// A host with one problem per entry, `(trigger, started, resolved)`; returns their ids.
+    async fn problems_on_new_host(
+        pool: &PgPool,
+        problems: &[(&str, OffsetDateTime, Option<OffsetDateTime>)],
+    ) -> Vec<Uuid> {
+        let host = Uuid::new_v4();
+        sqlx::query("INSERT INTO hosts (id, name) VALUES ($1, 'h')")
+            .bind(host)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for (trigger, started, resolved) in problems {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO problems (id, host_id, trigger_name, instance, severity, summary, \
+                 started_at, resolved_at, resolve_reason) \
+                 VALUES ($1, $2, $3, '', 'high', 's', $4, $5, \
+                         CASE WHEN $5::timestamptz IS NULL THEN NULL ELSE 'condition_ended' END)",
+            )
+            .bind(id)
+            .bind(host)
+            .bind(trigger)
+            .bind(started)
+            .bind(resolved)
+            .execute(pool)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    async fn problem_ids(pool: &PgPool) -> Vec<Uuid> {
+        sqlx::query_scalar("SELECT id FROM problems ORDER BY started_at")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn old_closed_problems_are_deleted_with_their_notifications(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let now = OffsetDateTime::now_utc();
+        let days = |n: i64| now - Duration::days(n);
+        let ids = problems_on_new_host(
+            &pool,
+            &[
+                ("open", days(500), None),
+                ("old", days(401), Some(days(400))),
+                ("recent", days(11), Some(days(10))),
+            ],
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO notification_outbox (problem_id, event, recipient, created_at, \
+             next_attempt_at, sent_at) VALUES ($1, 'started', 'a@example.com', $2, $2, $2)",
+        )
+        .bind(ids[1])
+        .bind(days(401))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let deleted = store
+            .delete_problems_resolved_before(days(365), 100)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 1);
+        assert_eq!(problem_ids(&pool).await, [ids[0], ids[2]]);
+        let outbox: i64 = sqlx::query_scalar("SELECT count(*) FROM notification_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(outbox, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn the_limit_bounds_one_call(pool: PgPool) {
+        let store = StateStore::from_pool(pool.clone());
+        let now = OffsetDateTime::now_utc();
+        let days = |n: i64| now - Duration::days(n);
+        // Started in the opposite order to their resolution: the oldest resolution goes first.
+        let ids = problems_on_new_host(
+            &pool,
+            &[
+                ("c", days(700), Some(days(400))),
+                ("b", days(800), Some(days(500))),
+                ("a", days(900), Some(days(600))),
+            ],
+        )
+        .await;
+
+        let deleted = store
+            .delete_problems_resolved_before(days(365), 2)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 2);
+        assert_eq!(problem_ids(&pool).await, [ids[0]]);
     }
 }

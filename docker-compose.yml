@@ -19,7 +19,8 @@ services:
     image: victoriametrics/victoria-metrics:v1.156.0
     restart: unless-stopped
     command:
-      - "-retentionPeriod=12"
+      # Months without a unit; 90d or 2y are possible. See "Retention" in docs/install.md.
+      - "-retentionPeriod=${CERBRIX_METRICS_RETENTION:-12}"
       - "-storageDataPath=/victoria-metrics-data"
     ports:
       # Bound to localhost only: VictoriaMetrics has no authentication.

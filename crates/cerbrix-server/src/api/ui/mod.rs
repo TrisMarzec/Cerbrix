@@ -609,6 +609,7 @@ pub(crate) mod testing {
                 secure_cookie,
                 ..AuthConfig::default()
             },
+            retention: Default::default(),
         })
     }
 
