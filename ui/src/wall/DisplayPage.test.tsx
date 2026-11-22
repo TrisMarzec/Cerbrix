@@ -575,7 +575,7 @@ describe('DisplayPage: what it shows', () => {
     mock.on(STATE, { json: displayState({ target: 'b', causes: [criticalProblem.id, 'p2', 'p3'], worst }) });
     await advance(5000);
     await settle();
-    expect(bandProblem()).toBe('Critical: web-01 – Disk almost full+2 more');
+    expect(bandProblem()).toBe('Critical: web-01 – Disk almost full +2 more');
     expect(document.querySelector('.wall-band.is-alarm .wall-band-detail .wall-band-more')).toHaveTextContent(
       /^\+2 more$/,
     );

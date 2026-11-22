@@ -217,6 +217,8 @@ describe('WallFrame switch band', () => {
     const more = line?.querySelector('.wall-band-more');
     expect(text).toHaveTextContent(/^Warning: db-01 – Replication lag$/);
     expect(more).toHaveTextContent(/^\+2 more$/);
+    // The text of the status region reads with a space before the count.
+    expect(line?.textContent).toBe('Warning: db-01 – Replication lag +2 more');
     expect(text?.contains(more ?? null)).toBe(false);
     expect(line?.lastElementChild).toBe(more);
   });

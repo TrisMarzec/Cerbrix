@@ -36,6 +36,10 @@ describe('describeError', () => {
     );
   });
 
+  it('does not take a code for a sentence because an object has a property of that name', () => {
+    expect(describeError(new ApiError(500, 'constructor', 'the server message'))).toBe('the server message');
+  });
+
   it('takes a sentence per status from the caller first', () => {
     const overrides = { 409: 'This problem is already resolved.', 403: 'The current password is wrong.' };
     expect(describeError(new ApiError(409, 'conflict', 'x'), overrides)).toBe('This problem is already resolved.');

@@ -92,7 +92,12 @@ function AlarmBand({ alarm }: { alarm: WallAlarm }) {
       {problem !== undefined && (
         <p class="wall-band-line wall-band-detail">
           <span class="wall-band-text">{`${severityWord(problem.severity)}: ${problem.host} – ${problem.summary}`}</span>
-          {problem.more > 0 && <span class="wall-band-more">+{problem.more} more</span>}
+          {problem.more > 0 && (
+            <>
+              {' '}
+              <span class="wall-band-more">+{problem.more} more</span>
+            </>
+          )}
         </p>
       )}
     </div>

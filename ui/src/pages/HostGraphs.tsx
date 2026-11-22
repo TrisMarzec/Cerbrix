@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { api, seg } from '../api/client';
+import { api, isApiError, seg } from '../api/client';
 import type { HostItem, HostValue, Series } from '../api/types';
 import { Banner } from '../components/Banner';
 import { BusyRegion } from '../components/BusyRegion';
+import { describeError } from '../components/describeError';
 import { Graph } from '../components/Graph';
 import { StaleNote } from '../components/StaleNote';
 import { usePolled } from '../lib/poll';
@@ -123,7 +124,10 @@ function LoadedGraph({ host, spec, range, now, valuesHaveKey }: LoadedProps) {
   if (answer === undefined) {
     const error = series.error;
     if (error === undefined) return null;
-    if (error.status === 503) return <p class="graph-empty">The metrics store did not answer</p>;
+    // Only the metrics store's own error: a 503 can also be a database out of reach or a timeout.
+    if (isApiError(error, 'metrics_unavailable')) {
+      return <p class="graph-empty">The metrics store did not answer</p>;
+    }
     // 400 for an item asked for without parameters, of which the host has no value at all: the item
     // needs a parameter and no instance has reported yet.
     if (error.status === 400 && Object.keys(spec.params).length === 0 && !valuesHaveKey) {
@@ -131,7 +135,7 @@ function LoadedGraph({ host, spec, range, now, valuesHaveKey }: LoadedProps) {
     }
     return (
       <Banner kind="warning">
-        {`Could not load this graph: ${error.message}`}{' '}
+        {`Could not load this graph: ${describeError(error)}`}{' '}
         <button type="button" class="btn" onClick={series.reload}>
           Try again
         </button>

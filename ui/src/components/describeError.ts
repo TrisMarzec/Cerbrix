@@ -19,7 +19,8 @@ const BY_CODE: Partial<Record<string, string>> = {
  */
 export function describeError(e: unknown, overrides: ErrorTexts = {}): string {
   if (!(e instanceof ApiError) || e.status === 0) return 'Could not reach the server.';
-  const general = BY_CODE[e.code];
+  // Own keys only: `constructor` and the like are no codes.
+  const general = Object.hasOwn(BY_CODE, e.code) ? BY_CODE[e.code] : undefined;
   if (general !== undefined) return general;
   const own = overrides[e.status];
   if (own !== undefined) return own;
